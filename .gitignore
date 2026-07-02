@@ -89,3 +89,10 @@ venv/
 ## operating system files
 .DS_Store
 Thumbs.db
+
+## OpenMW Enhanced local state
+/.build/
+/src/openmw/
+/.agents/
+/.codex/
+*.AppImage

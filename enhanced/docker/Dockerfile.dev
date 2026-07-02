@@ -1,0 +1,58 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends software-properties-common gnupg ca-certificates \
+    && add-apt-repository -y ppa:openmw/openmw \
+    && add-apt-repository -y ppa:openmw/openmw-daily \
+    && add-apt-repository -y ppa:openmw/staging \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        binutils \
+        build-essential \
+        ccache \
+        cmake \
+        curl \
+        file \
+        git \
+        libavcodec-dev \
+        libavformat-dev \
+        libavutil-dev \
+        libboost-iostreams-dev \
+        libboost-program-options-dev \
+        libboost-system-dev \
+        libbullet-dev \
+        libcollada-dom-dev \
+        libicu-dev \
+        libjpeg-dev \
+        libluajit-5.1-dev \
+        liblz4-dev \
+        libmygui-dev \
+        libopenal-dev \
+        libopenscenegraph-dev \
+        libpng-dev \
+        libqt6opengl6-dev \
+        libqt6svg6 \
+        libqt6svg6-dev \
+        librecast-dev \
+        libsdl2-dev \
+        libsqlite3-dev \
+        libswresample-dev \
+        libswscale-dev \
+        libtinyxml-dev \
+        libunshield-dev \
+        libyaml-cpp-dev \
+        mold \
+        ninja-build \
+        pkg-config \
+        qt6-tools-dev \
+        qt6-tools-dev-tools \
+        qt6-translations-l10n \
+        unzip \
+        xz-utils \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CCACHE_DIR=/ccache
+ENV CARGO_HOME=/cargo

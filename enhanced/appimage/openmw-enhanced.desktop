@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=OpenMW Enhanced
+Comment=OpenMW game engine
+Exec=openmw-launcher
+Icon=openmw-enhanced
+Categories=Game;RolePlaying;
+Terminal=false
