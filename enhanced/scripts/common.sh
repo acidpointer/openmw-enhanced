@@ -105,3 +105,23 @@ cmake_jobs() {
         printf '2\n'
     fi
 }
+
+ensure_cmake_build_dir() {
+    local source_dir="$1"
+    local build_dir="$2"
+    local cache_file="${build_dir}/CMakeCache.txt"
+
+    if [[ -f "${cache_file}" ]]; then
+        local cached_source_dir
+        cached_source_dir="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "${cache_file}" | tail -n 1)"
+
+        if [[ -n "${cached_source_dir}" && "${cached_source_dir}" != "${source_dir}" ]]; then
+            echo "CMake source directory changed for ${build_dir}; clearing stale build cache." >&2
+            echo "  cached:  ${cached_source_dir}" >&2
+            echo "  current: ${source_dir}" >&2
+            rm -rf "${build_dir}"
+        fi
+    fi
+
+    mkdir -p "${build_dir}"
+}

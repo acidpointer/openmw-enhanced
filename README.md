@@ -11,6 +11,19 @@ OpenMW also comes with OpenMW-CS, a replacement for Bethesda's Construction Set.
 * IRC: #openmw on irc.libera.chat
 * Discord: https://discord.gg/bWuqq2e
 
+OpenMW Enhanced Notes
+---------------------
+
+This fork carries AppImage/build infrastructure in `enhanced/` and selected
+engine patchsets on top of upstream OpenMW. The occlusion-culling patchset was
+split from `https://github.com/sableeyed/openmwocclusion-linux.git`, which is
+used only as an external reference/source and is not vendored as a Git
+repository.
+
+Occlusion culling is enabled by default in this fork. To verify it at runtime,
+set `occlusion debug messages = true` under `[Camera]` in
+`~/.config/openmw/settings.cfg`; the log should periodically print
+`OcclusionCull` statistics while in exterior cells.
 
 Font Licenses:
 * DejaVuLGCSansMono.ttf: custom (see [files/data/fonts/DejaVuFontLicense.txt](https://gitlab.com/OpenMW/openmw/-/raw/master/files/data/fonts/DejaVuFontLicense.txt) for more information)

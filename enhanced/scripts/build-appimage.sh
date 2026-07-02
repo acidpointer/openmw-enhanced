@@ -70,7 +70,8 @@ case "${OPENMW_BULLET_THREADING:-on}" in
 esac
 
 rm -rf "${APPDIR}"
-mkdir -p "${BUILD_DIR}" "${APPDIR}" /ccache /cargo
+ensure_cmake_build_dir "${SOURCE_DIR}" "${BUILD_DIR}"
+mkdir -p "${APPDIR}" /ccache /cargo
 
 cmake -S "${SOURCE_DIR}" -B "${BUILD_DIR}" -G Ninja \
     -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \

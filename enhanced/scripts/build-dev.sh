@@ -60,7 +60,8 @@ SOURCE_DIR="$(find_openmw_source_dir /src)"
 BUILD_DIR="/build/dev"
 JOBS="$(cmake_jobs)"
 
-mkdir -p "${BUILD_DIR}" /ccache /cargo
+ensure_cmake_build_dir "${SOURCE_DIR}" "${BUILD_DIR}"
+mkdir -p /ccache /cargo
 
 cmake -S "${SOURCE_DIR}" -B "${BUILD_DIR}" -G Ninja \
     -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
