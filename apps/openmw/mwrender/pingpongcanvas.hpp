@@ -46,6 +46,8 @@ namespace MWRender
 
         void setTextureDepth(osg::ref_ptr<osg::Texture> tex) { mTextureDepth = tex; }
 
+        void setTextureWorldDepth(osg::ref_ptr<osg::Texture> tex) { mTextureWorldDepth = tex; }
+
         void setTextureNormals(osg::ref_ptr<osg::Texture> tex) { mTextureNormals = tex; }
 
         void setTextureDistortion(osg::ref_ptr<osg::Texture> tex) { mTextureDistortion = tex; }
@@ -70,6 +72,7 @@ namespace MWRender
 
         osg::ref_ptr<osg::Texture> mTextureScene;
         osg::ref_ptr<osg::Texture> mTextureDepth;
+        osg::ref_ptr<osg::Texture> mTextureWorldDepth;
         osg::ref_ptr<osg::Texture> mTextureNormals;
         osg::ref_ptr<osg::Texture> mTextureDistortion;
 

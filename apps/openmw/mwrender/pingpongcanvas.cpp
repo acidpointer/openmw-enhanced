@@ -249,6 +249,7 @@ namespace MWRender
                 state, "postprocess:" + techniqueName, "subpasses=" + std::to_string(node.mPasses.size()));
 
             node.mRootStateSet->setTextureAttribute(PostProcessor::Unit_Depth, mTextureDepth);
+            node.mRootStateSet->setTextureAttribute(PostProcessor::Unit_WorldDepth, mTextureWorldDepth);
 
             if (mAvgLum)
                 node.mRootStateSet->setTextureAttribute(PostProcessor::TextureUnits::Unit_EyeAdaptation,

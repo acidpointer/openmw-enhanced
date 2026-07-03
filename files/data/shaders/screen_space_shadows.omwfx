@@ -2,72 +2,73 @@ uniform_bool uDebug {
     header = "Diagnostics";
     default = false;
     display_name = "Debug shadow mask";
-    description = "Show the generated screen-space shadow mask in orange. Use this to confirm whether the shader finds any shadow casters.";
+    description = "Show the generated screen-space shadow mask in orange.";
 }
 
 uniform_float uStrength {
     header = "Appearance";
-    default = 1.4;
+    default = 1.10;
     min = 0.0;
-    max = 3.0;
+    max = 1.65;
     step = 0.05;
     display_name = "Strength";
     description = "Overall strength of the screen-space shadow darkening.";
 }
 
 uniform_float uMaxDarkening {
-    default = 0.45;
+    default = 0.30;
     min = 0.0;
-    max = 0.8;
+    max = 0.45;
     step = 0.01;
     display_name = "Maximum darkening";
-    description = "Maximum amount of final color darkening. Raise while debugging visibility, lower if shadows look too heavy.";
+    description = "Maximum amount of final color darkening.";
 }
 
-uniform_float uTraceDistance {
+uniform_float uContactLength {
     header = "Tracing";
-    default = 1.35;
-    min = 0.25;
-    max = 3.0;
+    default = 0.85;
+    min = 0.20;
+    max = 1.35;
     step = 0.05;
-    display_name = "Trace distance";
-    description = "How far the shader searches along the sun direction in screen space.";
+    display_name = "Contact length";
+    description = "How far the shader searches along the sun direction. Higher values create longer shadows and more screen-space artifacts.";
 }
 
-uniform_float uTraceWidth {
-    default = 1.25;
-    min = 0.25;
-    max = 3.0;
-    step = 0.05;
-    display_name = "Trace width";
-    description = "How wide the geometric hit test is. Higher values catch more shadows but can create false positives.";
-}
-
-uniform_float uStepScale {
-    default = 1.0;
-    min = 0.35;
-    max = 3.0;
-    step = 0.05;
-    display_name = "Step scale";
-    description = "Screen-space distance between samples. Higher values cover longer visible shadows with the same sample count.";
-}
-
-uniform_float uCasterHeight {
+uniform_float uThickness {
     default = 0.75;
-    min = 0.1;
-    max = 3.0;
+    min = 0.25;
+    max = 1.40;
     step = 0.05;
-    display_name = "Caster height bias";
-    description = "How strongly the shader requires sampled geometry to rise above the receiver. Lower values find more shadows and more false positives.";
+    display_name = "Thickness";
+    description = "Geometric tolerance used when matching screen-space depth against the light ray.";
 }
 
-uniform_float uSameSurfaceRejection {
+uniform_float uCasterBias {
+    default = 0.95;
+    min = 0.45;
+    max = 1.60;
+    step = 0.05;
+    display_name = "Caster bias";
+    description = "How far sampled geometry must rise above the receiving surface before it can cast a screen-space shadow.";
+}
+
+uniform_float uSoftness {
+    header = "Denoising";
+    default = 1.20;
+    min = 0.0;
+    max = 2.50;
+    step = 0.05;
+    display_name = "Softness";
+    description = "Edge-aware filtering radius. Higher values reduce stair-stepping but soften detail.";
+}
+
+uniform_float uStability {
     default = 1.0;
     min = 0.0;
     max = 2.0;
     step = 0.05;
-    display_name = "Same-surface rejection";
-    description = "Rejects terrain and other continuous surfaces from shadowing themselves. Lower values show more mask; higher values reduce smearing.";
+    display_name = "Stability";
+    description = "World-anchored sample scrambling. Higher values break up laddering into stable noise that the denoiser can remove.";
 }
 
 shared {
@@ -90,11 +91,6 @@ shared {
         return (omw.viewMatrix * vec4(worldPos, 1.0)).xyz;
     }
 
-    vec3 viewPosFromUv(vec2 uv)
-    {
-        return viewPosFromWorld(omw_GetWorldPosFromUV(uv));
-    }
-
     vec2 projectViewToUv(vec3 viewPos)
     {
         vec4 clip = omw.projectionMatrix * vec4(viewPos, 1.0);
@@ -112,9 +108,46 @@ shared {
         vec2 edge = min(uv, 1.0 - uv);
         return saturate(min(edge.x, edge.y) * 28.0);
     }
+
+    bool firstPersonOverlayAt(vec2 uv)
+    {
+        if (!omw.enhancedIsFirstPerson)
+            return false;
+
+        float sceneDepth = omw_GetLinearDepth(uv);
+        float worldDepth = omw_GetWorldLinearDepth(uv);
+        return sceneDepth + 4.0 < worldDepth;
+    }
+
+    vec3 normalWorldFromBuffer(vec2 uv)
+    {
+        return normalize(omw_GetNormalsWorldSpace(uv));
+    }
+
+    vec2 projectedLightAxis(vec2 uv, float centerDepth)
+    {
+        vec3 centerWorld = omw_GetWorldPosFromWorldDepthUV(uv);
+        vec3 toLight = normalize(omw.sunPos.xyz);
+        float depthScale = saturate(centerDepth / 5200.0);
+        float probeDistance = mix(80.0, 360.0, depthScale);
+        vec2 lightUv = projectWorldToUv(centerWorld + toLight * probeDistance);
+        vec2 axis = lightUv - uv;
+        if (dot(axis, axis) < 0.000001)
+            return vec2(1.0, 0.0);
+        return normalize(axis);
+    }
 }
 
 render_target RT_ShadowRaw {
+    internal_format = r16f;
+    source_type = half_float;
+    source_format = red;
+    mipmaps = false;
+    min_filter = linear;
+    mag_filter = linear;
+}
+
+render_target RT_ShadowDirectional {
     internal_format = r16f;
     source_type = half_float;
     source_format = red;
@@ -135,82 +168,133 @@ render_target RT_ShadowBlur {
 fragment shadow_raw(target=RT_ShadowRaw) {
     omw_In vec2 omw_TexCoord;
 
-    const int SHADOW_STEPS = 24;
+    const int SHADOW_STEPS = 128;
 
-    vec3 normalWorldFromBuffer(vec2 uv)
-    {
-        return normalize(omw_GetNormalsWorldSpace(uv));
-    }
-
+#if !OMW_NORMALS
     vec3 fallbackWorldNormal(vec2 uv)
     {
-        vec3 worldPos = omw_GetWorldPosFromUV(uv);
-        vec3 dx = dFdx(worldPos);
-        vec3 dy = dFdy(worldPos);
-        return normalize(cross(dx, dy));
+        vec2 texel = omw.rcpResolution;
+        vec3 center = omw_GetWorldPosFromWorldDepthUV(uv);
+        vec3 right = omw_GetWorldPosFromWorldDepthUV(uv + vec2(texel.x, 0.0));
+        vec3 up = omw_GetWorldPosFromWorldDepthUV(uv + vec2(0.0, texel.y));
+        return normalize(cross(right - center, up - center));
+    }
+#endif
+
+    float sampleRayHit(vec2 sampleUv, vec3 rayView, vec3 originWorld, vec3 normalWorld, vec3 toLightWorld,
+        float rayDistance, float maxDistance, float receiverDepth)
+    {
+        float edgeFade = screenEdgeFade(sampleUv);
+        if (edgeFade <= 0.0)
+            return 0.0;
+
+        if (firstPersonOverlayAt(sampleUv))
+            return 0.0;
+
+        float sampleDepth = omw_GetWorldLinearDepth(sampleUv);
+        if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION)
+            return 0.0;
+
+        vec3 sampleWorld = omw_GetWorldPosFromWorldDepthUV(sampleUv);
+        vec3 originToSample = sampleWorld - originWorld;
+        float rayAlong = dot(originToSample, toLightWorld);
+        if (rayAlong <= 0.0 || rayAlong > maxDistance)
+            return 0.0;
+
+        float distanceScale = saturate(receiverDepth / 5200.0);
+        float thicknessScale = clamp(uThickness, 0.25, 1.40);
+        float casterBias = clamp(uCasterBias, 0.45, 1.60);
+
+        float receiverPlaneHeight = dot(originToSample, normalWorld);
+        float minCasterPlaneHeight = mix(7.0, 34.0, distanceScale) * casterBias;
+        if (receiverPlaneHeight <= minCasterPlaneHeight)
+            return 0.0;
+
+        float rayDepth = max(-rayView.z, 0.0);
+        float depthDelta = rayDepth - sampleDepth;
+        float depthBias = mix(1.4, 8.5, distanceScale) * casterBias;
+        float thickness = (mix(12.0, 72.0, distanceScale) + rayDistance * 0.055) * thicknessScale;
+
+        float frontHit = smoothstep(depthBias, depthBias + thickness * 0.35, depthDelta);
+        float backReject = 1.0 - smoothstep(depthBias + thickness, depthBias + thickness * 2.2, depthDelta);
+        float depthHit = frontHit * backReject;
+        if (depthHit <= 0.0)
+            return 0.0;
+
+        float worldRadius = (mix(16.0, 86.0, distanceScale) + rayDistance * 0.030) * thicknessScale;
+        float rayLateralDistance = length(originToSample - toLightWorld * rayAlong);
+        float lateralHit = 1.0 - smoothstep(worldRadius, worldRadius * 2.5, rayLateralDistance);
+        if (lateralHit <= 0.0)
+            return 0.0;
+
+        float casterHeight = smoothstep(minCasterPlaneHeight, minCasterPlaneHeight * 4.5, receiverPlaneHeight);
+
+#if OMW_NORMALS
+        vec3 blockerNormal = normalWorldFromBuffer(sampleUv);
+        float sameNormal = smoothstep(0.68, 0.94, dot(normalWorld, blockerNormal));
+        float samePlane = 1.0 - smoothstep(minCasterPlaneHeight, minCasterPlaneHeight * 7.5, receiverPlaneHeight);
+        float selfReject = saturate(1.0 - sameNormal * samePlane);
+#else
+        float selfReject = 1.0;
+#endif
+
+        return depthHit * lateralHit * casterHeight * selfReject * edgeFade;
     }
 
     float traceScreenSpaceShadow(vec2 uv, vec3 originWorld, vec3 normalWorld, vec3 toLightWorld, float receiverDepth)
     {
-        float lit = smoothstep(0.02, 0.32, dot(normalWorld, toLightWorld));
+        float lit = smoothstep(0.02, 0.34, dot(normalWorld, toLightWorld));
         if (lit <= 0.0)
             return 0.0;
 
         float distanceScale = saturate(receiverDepth / 5200.0);
-        float maxDistance = mix(120.0, 780.0, distanceScale) * uTraceDistance;
-        float startDistance = mix(4.0, 20.0, distanceScale);
-        float receiverBias = mix(1.0, 6.0, distanceScale) * max(uCasterHeight, 0.1);
-        float depthBias = mix(1.5, 9.0, distanceScale) * max(uCasterHeight, 0.1);
-        float thickness = mix(28.0, 180.0, distanceScale) * uTraceWidth;
-        float jitter = hash12(uv * omw.resolution.xy + float(omw.frameNumber) * vec2(0.067, 0.131));
+        float contactLength = clamp(uContactLength, 0.20, 1.35);
+        float casterBias = clamp(uCasterBias, 0.45, 1.60);
+        float maxDistance = mix(95.0, 620.0, distanceScale) * contactLength;
+        float startDistance = mix(3.0, 18.0, distanceScale);
+        float receiverBias = mix(1.0, 5.5, distanceScale) * casterBias;
+        float stability = clamp(uStability, 0.0, 2.0);
 
         vec3 originView = viewPosFromWorld(originWorld + normalWorld * receiverBias);
         vec3 lightView = normalize((omw.viewMatrix * vec4(toLightWorld, 0.0)).xyz);
-        float strongestHit = 0.0;
+
+        vec2 stableCell = floor(originWorld.xz * mix(0.035, 0.090, stability * 0.5));
+        float stablePhase = mix(0.5, hash12(stableCell + normalWorld.xy * 23.17), saturate(stability));
+        float integrated = 0.0;
+        float strongest = 0.0;
 
         for (int i = 0; i < SHADOW_STEPS; ++i)
         {
-            float stepPosition = (float(i) + jitter) / float(SHADOW_STEPS);
+            float sequence = fract(stablePhase + float(i) * 0.61803398875);
+            float stepPosition = (float(i) + mix(0.5, sequence, saturate(stability))) / float(SHADOW_STEPS);
             float curvedStep = stepPosition * stepPosition;
-            float rayDistance = startDistance + maxDistance * curvedStep * uStepScale;
+            float rayDistance = startDistance + maxDistance * curvedStep;
             vec3 rayView = originView + lightView * rayDistance;
             if (rayView.z >= -omw.near)
                 continue;
 
             vec2 sampleUv = projectViewToUv(rayView);
-            float edgeFade = screenEdgeFade(sampleUv);
-            if (edgeFade <= 0.0)
-                continue;
+            float hit = sampleRayHit(
+                sampleUv, rayView, originWorld, normalWorld, toLightWorld, rayDistance, maxDistance, receiverDepth);
 
-            float sampleDepth = omw_GetLinearDepth(sampleUv);
-            if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION)
-                continue;
-
-            float rayDepth = max(-rayView.z, 0.0);
-            float depthDelta = rayDepth - sampleDepth;
-            float adaptiveThickness = thickness + rayDistance * 0.12 * uTraceWidth;
-            float frontHit = smoothstep(depthBias, depthBias + adaptiveThickness * 0.25, depthDelta);
-            float thicknessReject = 1.0 - smoothstep(adaptiveThickness, adaptiveThickness * 1.6, depthDelta);
-            float hit = frontHit * thicknessReject;
-
-#if OMW_NORMALS
-            vec3 blockerNormal = normalWorldFromBuffer(sampleUv);
-            float sameNormal = smoothstep(0.72, 0.94, dot(normalWorld, blockerNormal));
-            float shallowDepth = 1.0 - smoothstep(depthBias, adaptiveThickness * 0.45, depthDelta);
-            hit *= saturate(1.0 - sameNormal * shallowDepth * uSameSurfaceRejection);
-#endif
-
-            float distanceWeight = 1.0 - smoothstep(0.15, 1.0, curvedStep);
-            strongestHit = max(strongestHit, hit * distanceWeight * edgeFade);
+            float distanceWeight = 1.0 - smoothstep(0.05, 0.92, stepPosition);
+            float sampleWeight = mix(0.65, 1.35, stepPosition);
+            integrated += hit * distanceWeight * sampleWeight;
+            strongest = max(strongest, hit * distanceWeight);
         }
 
-        return saturate(strongestHit * 1.8) * lit;
+        float averageHit = integrated / float(SHADOW_STEPS);
+        float loss = max(strongest * 0.50, averageHit * 7.5);
+        return saturate(loss * 1.8) * lit;
     }
 
     float screenSpaceShadowLoss(vec2 uv)
     {
-        float centerDepth = omw_GetLinearDepth(uv);
+        float centerDepth = omw_GetWorldLinearDepth(uv);
         if (centerDepth >= omw.far * SKY_DEPTH_FRACTION)
+            return 0.0;
+
+        if (firstPersonOverlayAt(uv))
             return 0.0;
 
         if (omw.isInterior)
@@ -222,13 +306,13 @@ fragment shadow_raw(target=RT_ShadowRaw) {
         vec3 normal = fallbackWorldNormal(uv);
 #endif
 
-        vec3 origin = omw_GetWorldPosFromUV(uv);
+        vec3 origin = omw_GetWorldPosFromWorldDepthUV(uv);
         float receiverDepth = length(origin - omw.eyePos.xyz);
         vec3 toLight = normalize(omw.sunPos.xyz);
         float occlusion = traceScreenSpaceShadow(uv, origin, normal, toLight, receiverDepth);
 
-        float distanceFade = 1.0 - smoothstep(3500.0, 9000.0, receiverDepth);
-        float fogFade = 1.0 - omw_EstimateFogCoverageFromUV(uv) * 0.85;
+        float distanceFade = 1.0 - smoothstep(3200.0, 7600.0, receiverDepth);
+        float fogFade = 1.0 - omw_EstimateFogCoverageFromUV(uv) * 0.88;
         return saturate(occlusion * distanceFade * fogFade);
     }
 
@@ -238,31 +322,114 @@ fragment shadow_raw(target=RT_ShadowRaw) {
     }
 }
 
-fragment shadow_blur(target=RT_ShadowBlur, rt1=RT_ShadowRaw) {
+fragment shadow_directional(target=RT_ShadowDirectional, rt1=RT_ShadowRaw) {
     omw_In vec2 omw_TexCoord;
 
     void main()
     {
-        float centerDepth = omw_GetLinearDepth(omw_TexCoord);
-        float center = omw_Texture2D(RT_ShadowRaw, omw_TexCoord).r;
-        vec2 texel = omw.rcpResolution;
-        float sum = center * 4.0;
-        float weight = 4.0;
-
-        for (int i = 0; i < 8; ++i)
+        float centerDepth = omw_GetWorldLinearDepth(omw_TexCoord);
+        if (centerDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(omw_TexCoord))
         {
-            vec2 direction = i < 4
-                ? vec2(float(i * 2 - 3), 0.0)
-                : vec2(0.0, float((i - 4) * 2 - 3));
-            vec2 sampleUv = omw_TexCoord + texel * direction;
-            float sampleDepth = omw_GetLinearDepth(sampleUv);
-            float depthWeight = exp2(-abs(sampleDepth - centerDepth) / max(centerDepth, 1.0) * 85.0);
-            float sampleWeight = depthWeight * 1.25;
+            omw_FragColor = vec4(0.0, 1.0, 1.0, 1.0);
+            return;
+        }
+
+#if OMW_NORMALS
+        vec3 centerNormal = normalWorldFromBuffer(omw_TexCoord);
+#endif
+
+        vec2 axis = projectedLightAxis(omw_TexCoord, centerDepth);
+        vec2 texel = omw.rcpResolution;
+        float softness = clamp(uSoftness, 0.0, 2.5);
+        float radius = mix(1.0, 4.5, softness / 2.5);
+        float center = omw_Texture2D(RT_ShadowRaw, omw_TexCoord).r;
+        float sum = center * 8.0;
+        float weight = 8.0;
+
+        for (int i = -8; i <= 8; ++i)
+        {
+            if (i == 0)
+                continue;
+
+            float sampleIndex = float(i);
+            vec2 sampleUv = omw_TexCoord + axis * texel * sampleIndex * radius;
+            if (screenEdgeFade(sampleUv) <= 0.0 || firstPersonOverlayAt(sampleUv))
+                continue;
+
+            float sampleDepth = omw_GetWorldLinearDepth(sampleUv);
+            if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION)
+                continue;
+
+            float depthWeight = exp2(-abs(sampleDepth - centerDepth) / max(centerDepth, 1.0) * 70.0);
+#if OMW_NORMALS
+            vec3 sampleNormal = normalWorldFromBuffer(sampleUv);
+            float normalWeight = smoothstep(0.35, 0.95, dot(centerNormal, sampleNormal));
+#else
+            float normalWeight = 1.0;
+#endif
+            float kernelWeight = exp2(-sampleIndex * sampleIndex / 38.0);
+            float sampleWeight = depthWeight * normalWeight * kernelWeight * softness;
             sum += omw_Texture2D(RT_ShadowRaw, sampleUv).r * sampleWeight;
             weight += sampleWeight;
         }
 
-        omw_FragColor = vec4(sum / weight, 1.0, 1.0, 1.0);
+        omw_FragColor = vec4(saturate(sum / weight), 1.0, 1.0, 1.0);
+    }
+}
+
+fragment shadow_cross(target=RT_ShadowBlur, rt1=RT_ShadowDirectional) {
+    omw_In vec2 omw_TexCoord;
+
+    void main()
+    {
+        float centerDepth = omw_GetWorldLinearDepth(omw_TexCoord);
+        if (centerDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(omw_TexCoord))
+        {
+            omw_FragColor = vec4(0.0, 1.0, 1.0, 1.0);
+            return;
+        }
+
+#if OMW_NORMALS
+        vec3 centerNormal = normalWorldFromBuffer(omw_TexCoord);
+#endif
+
+        vec2 axis = projectedLightAxis(omw_TexCoord, centerDepth);
+        vec2 crossAxis = vec2(-axis.y, axis.x);
+        vec2 texel = omw.rcpResolution;
+        float softness = clamp(uSoftness, 0.0, 2.5);
+        float radius = mix(0.7, 2.2, softness / 2.5);
+        float center = omw_Texture2D(RT_ShadowDirectional, omw_TexCoord).r;
+        float sum = center * 7.0;
+        float weight = 7.0;
+
+        for (int i = -4; i <= 4; ++i)
+        {
+            if (i == 0)
+                continue;
+
+            float sampleIndex = float(i);
+            vec2 sampleUv = omw_TexCoord + crossAxis * texel * sampleIndex * radius;
+            if (screenEdgeFade(sampleUv) <= 0.0 || firstPersonOverlayAt(sampleUv))
+                continue;
+
+            float sampleDepth = omw_GetWorldLinearDepth(sampleUv);
+            if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION)
+                continue;
+
+            float depthWeight = exp2(-abs(sampleDepth - centerDepth) / max(centerDepth, 1.0) * 105.0);
+#if OMW_NORMALS
+            vec3 sampleNormal = normalWorldFromBuffer(sampleUv);
+            float normalWeight = smoothstep(0.45, 0.96, dot(centerNormal, sampleNormal));
+#else
+            float normalWeight = 1.0;
+#endif
+            float kernelWeight = exp2(-sampleIndex * sampleIndex / 9.0);
+            float sampleWeight = depthWeight * normalWeight * kernelWeight * softness;
+            sum += omw_Texture2D(RT_ShadowDirectional, sampleUv).r * sampleWeight;
+            weight += sampleWeight;
+        }
+
+        omw_FragColor = vec4(saturate(sum / weight), 1.0, 1.0, 1.0);
     }
 }
 
@@ -272,6 +439,12 @@ fragment final(rt1=RT_ShadowBlur) {
     void main()
     {
         vec4 color = omw_GetLastShader(omw_TexCoord);
+        if (firstPersonOverlayAt(omw_TexCoord))
+        {
+            omw_FragColor = color;
+            return;
+        }
+
         float loss = saturate(omw_Texture2D(RT_ShadowBlur, omw_TexCoord).r);
         if (uDebug)
         {
@@ -281,8 +454,10 @@ fragment final(rt1=RT_ShadowBlur) {
         else
         {
             float weatherFade = mix(0.65, 1.0, saturate(omw.sunVis));
-            float shapedLoss = smoothstep(0.005, 0.18, loss);
-            float contactShadow = min(shapedLoss * uStrength * 0.55 * weatherFade, uMaxDarkening);
+            float shapedLoss = smoothstep(0.006, 0.20, loss);
+            float effectiveStrength = clamp(uStrength, 0.0, 1.65);
+            float effectiveMaxDarkening = clamp(uMaxDarkening, 0.0, 0.45);
+            float contactShadow = min(shapedLoss * effectiveStrength * 0.55 * weatherFade, effectiveMaxDarkening);
             omw_FragColor = vec4(color.rgb * (1.0 - contactShadow), color.a);
         }
     }
@@ -290,8 +465,8 @@ fragment final(rt1=RT_ShadowBlur) {
 
 technique {
     description = "Screen-space directional contact shadows for OpenMW Enhanced";
-    version = "0.2";
+    version = "0.3";
     author = "OpenMW Enhanced";
-    passes = shadow_raw, shadow_blur, final;
+    passes = shadow_raw, shadow_directional, shadow_cross, final;
     pass_normals = true;
 }

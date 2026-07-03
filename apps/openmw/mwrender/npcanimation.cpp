@@ -1,6 +1,7 @@
 #include "npcanimation.hpp"
 
 #include <osg/Depth>
+#include <osg/GLExtensions>
 #include <osg/MatrixTransform>
 #include <osg/UserDataContainer>
 
@@ -351,7 +352,21 @@ namespace MWRender
             auto primaryFBO = postProcessor->getPrimaryFbo(frameId);
             primaryFBO->apply(*state);
 
-            postProcessor->getFbo(PostProcessor::FBO_OpaqueDepth, frameId)->apply(*state);
+            auto opaqueDepthFBO = postProcessor->getFbo(PostProcessor::FBO_OpaqueDepth, frameId);
+            auto worldDepthFBO = postProcessor->getFbo(PostProcessor::FBO_WorldDepth, frameId);
+            if (opaqueDepthFBO && worldDepthFBO)
+            {
+                osg::GLExtensions* ext = state->get<osg::GLExtensions>();
+                const osg::Texture* texture
+                    = worldDepthFBO->getAttachment(osg::FrameBufferObject::BufferComponent::PACKED_DEPTH_STENCIL_BUFFER)
+                          .getTexture();
+                opaqueDepthFBO->apply(*state, osg::FrameBufferObject::READ_FRAMEBUFFER);
+                worldDepthFBO->apply(*state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
+                ext->glBlitFramebuffer(0, 0, texture->getTextureWidth(), texture->getTextureHeight(), 0, 0,
+                    texture->getTextureWidth(), texture->getTextureHeight(), GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+            }
+
+            opaqueDepthFBO->apply(*state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
 
             // depth accumulation pass
             osg::ref_ptr<osg::StateSet> restore = bin->getStateSet();

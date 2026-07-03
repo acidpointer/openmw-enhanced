@@ -10,6 +10,19 @@ This repository is the actual OpenMW fork. Upstream OpenMW source lives at the r
 - `enhanced/`: Docker builds, AppImage packaging, project docs, patch catalog.
 - `.build/`: generated CMake trees, ccache, AppDir staging, and AppImage output. Never commit it.
 
+## I/O Budget
+
+OpenMW builds and AppImage packaging are very I/O heavy. Keep tool usage scoped so long Codex sessions do not hit `IO quota exceeded`.
+
+- Do not recursively inspect `.build/`, AppImage extraction trees, ccache, Docker cache directories, generated CMake trees, or staged AppDirs unless the user explicitly asks or the exact file is already known.
+- Do not run broad repository-wide searches when a narrower path is known. Prefer scoped searches in paths such as `apps/`, `components/`, `files/data/shaders/`, and `enhanced/`.
+- Exclude generated and cache directories from searches and file listings.
+- Read only the relevant slice of large files or logs. Prefer targeted `sed`, `tail`, or exact-pattern searches over dumping full files.
+- Do not rebuild the AppImage just to check a small source edit unless the user asked for a build or runtime verification requires it.
+- When a build is needed, use the existing cached Docker/AppImage build scripts and avoid cleaning `.build/`.
+- Keep command output short with `max_output_tokens` or equivalent limits, especially for builds and logs.
+- If I/O quota errors appear, stop broad inspection, summarize current state, and ask whether to continue in a fresh session.
+
 ## Build
 
 - Configure fork remote: `./enhanced/scripts/setup-openmw-fork.sh --fork-url <fork-url>`

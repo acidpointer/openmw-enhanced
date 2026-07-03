@@ -33,6 +33,7 @@
 #include "../mwgui/postprocessorhud.hpp"
 
 #include "distortion.hpp"
+#include "camera.hpp"
 #include "enhancedperf.hpp"
 #include "pingpongcull.hpp"
 #include "renderbin.hpp"
@@ -316,8 +317,12 @@ namespace MWRender
         mCanvases[frameId]->setMask(mUnderwater, mExteriorFlag);
         mCanvases[frameId]->setCalculateAvgLum(mHDR);
 
+        const Camera* activeCamera = mRendering.getCamera();
+        const bool enhancedFirstPerson = activeCamera && activeCamera->getMode() == Camera::Mode::FirstPerson;
+
         mCanvases[frameId]->setTextureScene(getTexture(Tex_Scene, frameId));
         mCanvases[frameId]->setTextureDepth(getTexture(Tex_OpaqueDepth, frameId));
+        mCanvases[frameId]->setTextureWorldDepth(getTexture(enhancedFirstPerson ? Tex_WorldDepth : Tex_OpaqueDepth, frameId));
         mCanvases[frameId]->setTextureDistortion(getTexture(Tex_Distortion, frameId));
 
         mTransparentDepthPostPass->mFbo[frameId] = mFbos[frameId][FBO_Primary];
@@ -331,6 +336,8 @@ namespace MWRender
 
         mStateUpdater->setResolution(osg::Vec2f(
             static_cast<float>(cv->getViewport()->width()), static_cast<float>(cv->getViewport()->height())));
+        if (activeCamera)
+            mStateUpdater->setEnhancedCameraMode(static_cast<int>(activeCamera->getMode()));
 
         // per-frame data
         if (frame != mLastFrameNumber)
@@ -497,7 +504,9 @@ namespace MWRender
 
         setupDepth(textures[Tex_Depth]);
         setupDepth(textures[Tex_OpaqueDepth]);
+        setupDepth(textures[Tex_WorldDepth]);
         textures[Tex_OpaqueDepth]->setName("opaqueTexMap");
+        textures[Tex_WorldDepth]->setName("worldDepthTexMap");
 
         auto& fbos = mFbos[frameId];
 
@@ -555,6 +564,10 @@ namespace MWRender
         fbos[FBO_OpaqueDepth]->setAttachment(osg::FrameBufferObject::BufferComponent::PACKED_DEPTH_STENCIL_BUFFER,
             Stereo::createMultiviewCompatibleAttachment(textures[Tex_OpaqueDepth]));
 
+        fbos[FBO_WorldDepth] = new osg::FrameBufferObject;
+        fbos[FBO_WorldDepth]->setAttachment(osg::FrameBufferObject::BufferComponent::PACKED_DEPTH_STENCIL_BUFFER,
+            Stereo::createMultiviewCompatibleAttachment(textures[Tex_WorldDepth]));
+
         fbos[FBO_Distortion] = new osg::FrameBufferObject;
         fbos[FBO_Distortion]->setAttachment(osg::FrameBufferObject::BufferComponent::COLOR_BUFFER0,
             Stereo::createMultiviewCompatibleAttachment(textures[Tex_Distortion]));
@@ -564,6 +577,10 @@ namespace MWRender
             fbos[FBO_OpaqueDepth]->setAttachment(osg::FrameBufferObject::BufferComponent::COLOR_BUFFER,
                 osg::FrameBufferAttachment(new osg::RenderBuffer(textures[Tex_OpaqueDepth]->getTextureWidth(),
                     textures[Tex_OpaqueDepth]->getTextureHeight(), textures[Tex_Scene]->getInternalFormat())));
+        if (textures[Tex_WorldDepth])
+            fbos[FBO_WorldDepth]->setAttachment(osg::FrameBufferObject::BufferComponent::COLOR_BUFFER,
+                osg::FrameBufferAttachment(new osg::RenderBuffer(textures[Tex_WorldDepth]->getTextureWidth(),
+                    textures[Tex_WorldDepth]->getTextureHeight(), textures[Tex_Scene]->getInternalFormat())));
 #endif
 
         mCanvases[frameId]->dirty();
@@ -617,6 +634,7 @@ namespace MWRender
             node.mRootStateSet->addUniform(new osg::Uniform("omw_SamplerLastShader", Unit_LastShader));
             node.mRootStateSet->addUniform(new osg::Uniform("omw_SamplerLastPass", Unit_LastPass));
             node.mRootStateSet->addUniform(new osg::Uniform("omw_SamplerDepth", Unit_Depth));
+            node.mRootStateSet->addUniform(new osg::Uniform("omw_SamplerWorldDepth", Unit_WorldDepth));
             node.mRootStateSet->addUniform(new osg::Uniform("omw_SamplerDistortion", Unit_Distortion));
 
             if (mNormals)

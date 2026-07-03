@@ -97,6 +97,12 @@ namespace Fx
 
         void setFrameNumber(int frame) { mData.get<FrameNumber>() = frame; }
 
+        void setEnhancedCameraMode(int mode)
+        {
+            mData.get<EnhancedCameraMode>() = mode;
+            mData.get<EnhancedIsFirstPerson>() = mode == 1;
+        }
+
         void setWindSpeed(float speed) { mData.get<WindSpeed>() = speed; }
 
         void setWeatherTransition(float transition)
@@ -251,6 +257,16 @@ namespace Fx
             static constexpr std::string_view sName = "frameNumber";
         };
 
+        struct EnhancedCameraMode : Std140::Int
+        {
+            static constexpr std::string_view sName = "enhancedCameraMode";
+        };
+
+        struct EnhancedIsFirstPerson : Std140::Bool
+        {
+            static constexpr std::string_view sName = "enhancedIsFirstPerson";
+        };
+
         struct WindSpeed : Std140::Float
         {
             static constexpr std::string_view sName = "windSpeed";
@@ -284,8 +300,8 @@ namespace Fx
         using UniformData = Std140::UBO<ProjectionMatrix, InvProjectionMatrix, ViewMatrix, PrevViewMatrix,
             InvViewMatrix, EyePos, EyeVec, FogColor, AmbientColor, SkyColor, SunColor, SunPos, SunVec, Resolution,
             RcpResolution, FogNear, FogFar, Near, Far, Fov, GameHour, SunVis, WaterHeight, IsWaterEnabled,
-            SimulationTime, DeltaSimulationTime, FrameNumber, WindSpeed, WeatherTransition, WeatherID, NextWeatherID,
-            IsUnderwater, IsInterior>;
+            SimulationTime, DeltaSimulationTime, FrameNumber, EnhancedCameraMode, EnhancedIsFirstPerson, WindSpeed,
+            WeatherTransition, WeatherID, NextWeatherID, IsUnderwater, IsInterior>;
 
         UniformData mData;
         bool mUseUBO;

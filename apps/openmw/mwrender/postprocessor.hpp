@@ -56,8 +56,8 @@ namespace MWRender
     class PostProcessor : public osg::Group
     {
     public:
-        using FBOArray = std::array<osg::ref_ptr<osg::FrameBufferObject>, 6>;
-        using TextureArray = std::array<osg::ref_ptr<osg::Texture>, 6>;
+        using FBOArray = std::array<osg::ref_ptr<osg::FrameBufferObject>, 7>;
+        using TextureArray = std::array<osg::ref_ptr<osg::Texture>, 7>;
         using TechniqueList = std::vector<std::shared_ptr<Fx::Technique>>;
 
         enum TextureIndex
@@ -66,6 +66,7 @@ namespace MWRender
             Tex_Scene_LDR,
             Tex_Depth,
             Tex_OpaqueDepth,
+            Tex_WorldDepth,
             Tex_Normal,
             Tex_Distortion,
         };
@@ -76,6 +77,7 @@ namespace MWRender
             FBO_Multisample,
             FBO_FirstPerson,
             FBO_OpaqueDepth,
+            FBO_WorldDepth,
             FBO_Intercept,
             FBO_Distortion,
         };
@@ -85,6 +87,7 @@ namespace MWRender
             Unit_LastShader = 0,
             Unit_LastPass,
             Unit_Depth,
+            Unit_WorldDepth,
             Unit_EyeAdaptation,
             Unit_Normals,
             Unit_Distortion,

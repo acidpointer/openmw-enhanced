@@ -91,6 +91,7 @@ namespace Fx
 uniform @builtinSampler omw_SamplerLastShader;
 uniform @builtinSampler omw_SamplerLastPass;
 uniform @builtinSampler omw_SamplerDepth;
+uniform @builtinSampler omw_SamplerWorldDepth;
 uniform @builtinSampler omw_SamplerNormals;
 uniform @builtinSampler omw_SamplerDistortion;
 
@@ -166,6 +167,20 @@ mat4 omw_InvProjectionMatrix()
 #endif
     }
 
+    float omw_GetWorldDepth(vec2 uv)
+    {
+#if OMW_MULTIVIEW
+        float depth = omw_Texture2DArray(omw_SamplerWorldDepth, vec3(uv, gl_ViewID_OVR)).r;
+#else
+        float depth = omw_Texture2D(omw_SamplerWorldDepth, uv).r;
+#endif
+#if OMW_REVERSE_Z
+        return 1.0 - depth;
+#else
+        return depth;
+#endif
+    }
+
     vec4 omw_GetDistortion(vec2 uv)
     {
 #if OMW_MULTIVIEW
@@ -220,6 +235,19 @@ mat4 omw_InvProjectionMatrix()
         return world_space.xyz / world_space.w;
     }
 
+    vec3 omw_GetWorldPosFromWorldDepthUV(vec2 uv)
+    {
+        float depth = omw_GetWorldDepth(uv);
+#if (OMW_REVERSE_Z == 1)
+        float flippedDepth = 1.0 - depth;
+#else
+        float flippedDepth = depth * 2.0 - 1.0;
+#endif
+        vec4 clip_space = vec4(uv * 2.0 - 1.0, flippedDepth, 1.0);
+        vec4 world_space = omw.invViewMatrix * (omw.invProjectionMatrix * clip_space);
+        return world_space.xyz / world_space.w;
+    }
+
     float omw_GetLinearDepth(vec2 uv)
     {
 #if (OMW_REVERSE_Z == 1)
@@ -227,6 +255,19 @@ mat4 omw_InvProjectionMatrix()
         float dist = omw.near * omw.far / (omw.far + depth * (omw.near - omw.far));
 #else
         float depth = omw_GetDepth(uv) * 2.0 - 1.0;
+        float dist = 2.0 * omw.near * omw.far / (omw.far + omw.near - depth * (omw.far - omw.near));
+#endif
+
+        return dist;
+    }
+
+    float omw_GetWorldLinearDepth(vec2 uv)
+    {
+#if (OMW_REVERSE_Z == 1)
+        float depth = omw_GetWorldDepth(uv);
+        float dist = omw.near * omw.far / (omw.far + depth * (omw.near - omw.far));
+#else
+        float depth = omw_GetWorldDepth(uv) * 2.0 - 1.0;
         float dist = 2.0 * omw.near * omw.far / (omw.far + omw.near - depth * (omw.far - omw.near));
 #endif
 
