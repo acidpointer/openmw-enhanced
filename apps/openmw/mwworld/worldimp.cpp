@@ -2,6 +2,7 @@
 
 #include <charconv>
 #include <filesystem>
+#include <system_error>
 #include <vector>
 
 #include <osg/ComputeBoundsVisitor>

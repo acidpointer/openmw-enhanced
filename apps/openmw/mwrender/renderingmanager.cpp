@@ -348,7 +348,7 @@ namespace MWRender
             const int occluderMaxMeshRes = SceneUtil::Enhanced::occlusionOccluderMaxMeshResolution();
             const float occluderInsideThreshold = SceneUtil::Enhanced::occlusionOccluderInsideThreshold();
             const float occluderMaxDistance = SceneUtil::Enhanced::occlusionOccluderMaxDistance();
-            const bool enableStatics = SceneUtil::Enhanced::occlusionCullingStatics();
+            const bool enableStatics = SceneUtil::Enhanced::occlusionCullingStaticOccluders();
             mObjects->setOcclusionCuller(mOcclusionCuller, occluderMinRadius, occluderMaxRadius, occluderShrinkFactor,
                 occluderMeshRes, occluderMaxMeshRes, occluderInsideThreshold, occluderMaxDistance, enableStatics,
                 maxTriangles, mOcclusionStorage.get());
@@ -1766,7 +1766,7 @@ namespace MWRender
         const int occluderMaxMeshRes = SceneUtil::Enhanced::occlusionOccluderMaxMeshResolution();
         const float occluderInsideThreshold = SceneUtil::Enhanced::occlusionOccluderInsideThreshold();
         const float occluderMaxDistance = SceneUtil::Enhanced::occlusionOccluderMaxDistance();
-        const bool enableStatics = SceneUtil::Enhanced::occlusionCullingStatics();
+        const bool enableStatics = SceneUtil::Enhanced::occlusionCullingStaticOccluders();
         const unsigned int maxTriangles = static_cast<unsigned int>(SceneUtil::Enhanced::occlusionMaxTriangles());
         mObjects->setOcclusionCuller(mOcclusionCuller, occluderMinRadius, occluderMaxRadius, occluderShrinkFactor,
             occluderMeshRes, occluderMaxMeshRes, occluderInsideThreshold, occluderMaxDistance, enableStatics,

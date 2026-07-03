@@ -926,6 +926,78 @@ Logs and settings changed through the launcher and in-game will be saved here.</
         <source>Water cameras</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>Enable static object participation in software occlusion culling.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Static occluders</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Small objects</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Test small objects against the terrain and static occlusion depth buffer.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Static raster budget</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Maximum static occluder rasterization time per camera pass in milliseconds.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Min occluder screen</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Minimum approximate screen coverage for static occluders.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Min occludee screen</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Minimum approximate screen coverage for objects to run an occlusion test.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Adaptive statics</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Temporarily back off static occluders when cost is high and benefit is low.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Adaptive min benefit</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Minimum occluded/tested ratio required to keep static occluders active.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Adaptive cooldown</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Frames to keep static occluders disabled after an expensive low-benefit pass.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Water static occluders</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Allow static occluder rasterization in water reflection/refraction cameras.</source>
+        <translation type="unfinished"></translation>
+    </message>
 </context>
 <context>
     <name>MainWindow</name>

@@ -77,6 +77,8 @@ namespace Launcher
         QCheckBox* mEnhancedOcclusionCulling = nullptr;
         QCheckBox* mEnhancedOcclusionCullingTerrain = nullptr;
         QCheckBox* mEnhancedOcclusionCullingStatics = nullptr;
+        QCheckBox* mEnhancedOcclusionCullingStaticOccluders = nullptr;
+        QCheckBox* mEnhancedOcclusionCullingSmallObjects = nullptr;
         QCheckBox* mEnhancedOcclusionCullingInteriors = nullptr;
         QCheckBox* mEnhancedOcclusionDebugOverlay = nullptr;
         QCheckBox* mEnhancedOcclusionDebugMessages = nullptr;
@@ -92,7 +94,14 @@ namespace Launcher
         QDoubleSpinBox* mEnhancedOcclusionOccluderInsideThreshold = nullptr;
         QDoubleSpinBox* mEnhancedOcclusionOccluderMaxDistance = nullptr;
         QSpinBox* mEnhancedOcclusionMaxTriangles = nullptr;
+        QDoubleSpinBox* mEnhancedOcclusionStaticRasterTimeBudgetMs = nullptr;
+        QDoubleSpinBox* mEnhancedOcclusionMinOccluderScreenRatio = nullptr;
+        QDoubleSpinBox* mEnhancedOcclusionMinOccludeeScreenRatio = nullptr;
+        QCheckBox* mEnhancedOcclusionAdaptiveStatics = nullptr;
+        QDoubleSpinBox* mEnhancedOcclusionAdaptiveMinBenefitRatio = nullptr;
+        QSpinBox* mEnhancedOcclusionAdaptiveCooldownFrames = nullptr;
         QComboBox* mEnhancedOcclusionWaterCameras = nullptr;
+        QCheckBox* mEnhancedOcclusionWaterStaticOccluders = nullptr;
 
         QCheckBox* mEnhancedWaterSurface = nullptr;
         QCheckBox* mEnhancedWaterReflection = nullptr;

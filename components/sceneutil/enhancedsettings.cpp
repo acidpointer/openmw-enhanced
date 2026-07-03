@@ -244,6 +244,16 @@ namespace SceneUtil::Enhanced
         return settingBool("Occlusion", "occlusion culling statics", true);
     }
 
+    bool occlusionCullingStaticOccluders()
+    {
+        return settingBool("Occlusion", "occlusion culling static occluders", occlusionCullingStatics());
+    }
+
+    bool occlusionCullingSmallObjects()
+    {
+        return settingBool("Occlusion", "occlusion culling small objects", true);
+    }
+
     int occlusionBufferWidth()
     {
         return occlusionSettingInt("occlusion buffer width", 512, 64, 2048);
@@ -317,6 +327,41 @@ namespace SceneUtil::Enhanced
     int occlusionMaxTriangles()
     {
         return occlusionSettingInt("occlusion max triangles", 30000, 0, 500000);
+    }
+
+    double occlusionStaticRasterTimeBudgetMs()
+    {
+        return std::clamp(settingDouble("Occlusion", "occlusion static raster time budget ms", 1.0), 0.0, 50.0);
+    }
+
+    double occlusionMinOccluderScreenRatio()
+    {
+        return std::clamp(settingDouble("Occlusion", "occlusion min occluder screen ratio", 0.002), 0.0, 1.0);
+    }
+
+    double occlusionMinOccludeeScreenRatio()
+    {
+        return std::clamp(settingDouble("Occlusion", "occlusion min occludee screen ratio", 0.00005), 0.0, 1.0);
+    }
+
+    bool occlusionAdaptiveStatics()
+    {
+        return settingBool("Occlusion", "occlusion adaptive statics", true);
+    }
+
+    double occlusionAdaptiveMinBenefitRatio()
+    {
+        return std::clamp(settingDouble("Occlusion", "occlusion adaptive min benefit ratio", 0.05), 0.0, 1.0);
+    }
+
+    int occlusionAdaptiveCooldownFrames()
+    {
+        return occlusionSettingInt("occlusion adaptive cooldown frames", 120, 0, 10000);
+    }
+
+    bool occlusionWaterStaticOccluders()
+    {
+        return settingBool("Occlusion", "occlusion water static occluders", false);
     }
 
     std::string occlusionWaterCameras()

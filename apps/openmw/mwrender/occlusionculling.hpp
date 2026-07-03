@@ -33,11 +33,21 @@ namespace MWRender
         PagedOccluderData(const PagedOccluderData& copy, const osg::CopyOp& = {})
             : osg::Object(copy)
             , mOccluderMeshes(copy.mOccluderMeshes)
+            , mOccluderBins(copy.mOccluderBins)
+            , mOccluderBounds(copy.mOccluderBounds)
+            , mOccluderBinDim(copy.mOccluderBinDim)
         {
         }
         META_Object(MWRender, PagedOccluderData)
 
+        void buildSpatialBins();
+        void collectNearbyOccluders(
+            const osg::Vec3f& eyeWorld, float maxDistanceSq, std::vector<const OccluderMesh*>& out) const;
+
         std::vector<OccluderMesh> mOccluderMeshes;
+        std::vector<std::vector<unsigned int>> mOccluderBins;
+        osg::BoundingBox mOccluderBounds;
+        unsigned int mOccluderBinDim = 0;
     };
 }
 
@@ -103,6 +113,8 @@ namespace MWRender
         std::vector<unsigned int> mIndices;
         double mTerrainBuildMs = 0.0;
         double mTerrainRasterMs = 0.0;
+        int mAdaptiveStaticCooldownFrames = 0;
+        int mAdaptiveStaticBadFrames = 0;
 
         // Debug overlay
         osg::ref_ptr<osg::Camera> mDebugCamera;

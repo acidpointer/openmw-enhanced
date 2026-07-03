@@ -22,6 +22,8 @@ namespace SceneUtil::Enhanced
     bool occlusionCulling();
     bool occlusionCullingTerrain();
     bool occlusionCullingStatics();
+    bool occlusionCullingStaticOccluders();
+    bool occlusionCullingSmallObjects();
     int occlusionBufferWidth();
     int occlusionBufferHeight();
     int occlusionTerrainLod();
@@ -37,6 +39,13 @@ namespace SceneUtil::Enhanced
     bool occlusionDebugMessages();
     bool occlusionCullingInteriors();
     int occlusionMaxTriangles();
+    double occlusionStaticRasterTimeBudgetMs();
+    double occlusionMinOccluderScreenRatio();
+    double occlusionMinOccludeeScreenRatio();
+    bool occlusionAdaptiveStatics();
+    double occlusionAdaptiveMinBenefitRatio();
+    int occlusionAdaptiveCooldownFrames();
+    bool occlusionWaterStaticOccluders();
     std::string occlusionWaterCameras();
 }
 

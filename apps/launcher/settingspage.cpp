@@ -316,51 +316,74 @@ void Launcher::SettingsPage::setupEnhancedTab()
     mEnhancedOcclusionCullingTerrain = addCheckBox(*occlusionLayout, occlusionGroup, tr("Terrain"),
         tr("Rasterize terrain heightmaps into the occlusion depth buffer."), 0, 1);
     mEnhancedOcclusionCullingStatics = addCheckBox(*occlusionLayout, occlusionGroup, tr("Statics"),
-        tr("Rasterize simplified static object meshes into the occlusion depth buffer."), 1, 0);
+        tr("Enable static object participation in software occlusion culling."), 1, 0);
+    mEnhancedOcclusionCullingStaticOccluders = addCheckBox(*occlusionLayout, occlusionGroup, tr("Static occluders"),
+        tr("Rasterize simplified static object meshes into the occlusion depth buffer."), 1, 1);
+    mEnhancedOcclusionCullingSmallObjects = addCheckBox(*occlusionLayout, occlusionGroup, tr("Small objects"),
+        tr("Test small objects against the terrain and static occlusion depth buffer."), 2, 0);
     mEnhancedOcclusionCullingInteriors = addCheckBox(*occlusionLayout, occlusionGroup, tr("Interiors"),
-        tr("Enable software occlusion culling in interior cells."), 1, 1);
+        tr("Enable software occlusion culling in interior cells."), 2, 1);
     mEnhancedOcclusionDebugOverlay = addCheckBox(*occlusionLayout, occlusionGroup, tr("Debug overlay"),
-        tr("Show the software occlusion depth buffer as an overlay."), 2, 0);
+        tr("Show the software occlusion depth buffer as an overlay."), 3, 0);
     mEnhancedOcclusionDebugMessages = addCheckBox(*occlusionLayout, occlusionGroup, tr("Debug messages"),
-        tr("Log periodic occlusion culling statistics."), 2, 1);
+        tr("Log periodic occlusion culling statistics."), 3, 1);
     mEnhancedOcclusionBufferWidth = addSpinBoxRow(*occlusionLayout, occlusionGroup, tr("Buffer width"),
-        tr("Software occlusion depth buffer width in pixels."), 3, 64, 2048);
+        tr("Software occlusion depth buffer width in pixels."), 4, 64, 2048);
     mEnhancedOcclusionBufferHeight = addSpinBoxRow(*occlusionLayout, occlusionGroup, tr("Buffer height"),
-        tr("Software occlusion depth buffer height in pixels."), 4, 64, 1024);
+        tr("Software occlusion depth buffer height in pixels."), 5, 64, 1024);
     mEnhancedOcclusionTerrainLod = addSpinBoxRow(*occlusionLayout, occlusionGroup, tr("Terrain LOD"),
-        tr("Terrain LOD level for the occlusion mesh."), 5, 0, 6);
+        tr("Terrain LOD level for the occlusion mesh."), 6, 0, 6);
     mEnhancedOcclusionTerrainRadius = addSpinBoxRow(*occlusionLayout, occlusionGroup, tr("Terrain radius"),
-        tr("Radius in cells around the camera to include terrain as an occluder."), 6, 1, 20);
+        tr("Radius in cells around the camera to include terrain as an occluder."), 7, 1, 20);
     mEnhancedOcclusionOccluderMinRadius = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
-        tr("Occluder min radius"), tr("Minimum bounding sphere radius for static objects used as occluders."), 7, 50.0,
+        tr("Occluder min radius"), tr("Minimum bounding sphere radius for static objects used as occluders."), 8, 50.0,
         50000.0, 1);
     mEnhancedOcclusionOccluderMaxRadius = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
-        tr("Occluder max radius"), tr("Maximum bounding sphere radius for unpaged occluder candidates."), 8, 500.0,
+        tr("Occluder max radius"), tr("Maximum bounding sphere radius for unpaged occluder candidates."), 9, 500.0,
         100000.0, 1);
     mEnhancedOcclusionOccluderShrinkFactor = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
-        tr("Occluder shrink factor"), tr("Shrink factor applied to occluder meshes toward their centroid."), 9, 0.1,
+        tr("Occluder shrink factor"), tr("Shrink factor applied to occluder meshes toward their centroid."), 10, 0.1,
         2.0, 2);
     mEnhancedOcclusionOccluderMeshResolution = addSpinBoxRow(*occlusionLayout, occlusionGroup,
-        tr("Occluder mesh resolution"), tr("Base grid resolution for vertex clustering of occluder meshes."), 10, 4,
+        tr("Occluder mesh resolution"), tr("Base grid resolution for vertex clustering of occluder meshes."), 11, 4,
         32);
     mEnhancedOcclusionOccluderMaxMeshResolution = addSpinBoxRow(*occlusionLayout, occlusionGroup,
-        tr("Occluder max mesh resolution"), tr("Maximum grid resolution for adaptive scaling of large occluders."), 11,
+        tr("Occluder max mesh resolution"), tr("Maximum grid resolution for adaptive scaling of large occluders."), 12,
         4, 64);
     mEnhancedOcclusionOccluderInsideThreshold = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
-        tr("Inside threshold"), tr("Scale factor for the AABB used to detect if the camera is inside an occluder."), 12,
+        tr("Inside threshold"), tr("Scale factor for the AABB used to detect if the camera is inside an occluder."), 13,
         0.1, 5.0, 2);
     mEnhancedOcclusionOccluderMaxDistance = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
-        tr("Occluder max distance"), tr("Maximum distance for rasterizing a building as an occluder."), 13, 1000.0,
+        tr("Occluder max distance"), tr("Maximum distance for rasterizing a building as an occluder."), 14, 1000.0,
         100000.0, 1);
     mEnhancedOcclusionMaxTriangles = addSpinBoxRow(*occlusionLayout, occlusionGroup, tr("Max triangles"),
-        tr("Maximum number of building occluder triangles to rasterize per frame. Use 0 for unlimited."), 14, 0,
+        tr("Maximum number of building occluder triangles to rasterize per frame. Use 0 for unlimited."), 15, 0,
         500000);
+    mEnhancedOcclusionStaticRasterTimeBudgetMs = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
+        tr("Static raster budget"), tr("Maximum static occluder rasterization time per camera pass in milliseconds."),
+        16, 0.0, 50.0, 2);
+    mEnhancedOcclusionMinOccluderScreenRatio = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
+        tr("Min occluder screen"), tr("Minimum approximate screen coverage for static occluders."), 17, 0.0, 1.0, 5);
+    mEnhancedOcclusionMinOccludeeScreenRatio = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
+        tr("Min occludee screen"), tr("Minimum approximate screen coverage for objects to run an occlusion test."), 18,
+        0.0, 1.0, 5);
+    mEnhancedOcclusionAdaptiveStatics = addCheckBox(*occlusionLayout, occlusionGroup, tr("Adaptive statics"),
+        tr("Temporarily back off static occluders when cost is high and benefit is low."), 19, 0);
+    mEnhancedOcclusionAdaptiveMinBenefitRatio = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
+        tr("Adaptive min benefit"), tr("Minimum occluded/tested ratio required to keep static occluders active."), 20,
+        0.0, 1.0, 3);
+    mEnhancedOcclusionAdaptiveCooldownFrames = addSpinBoxRow(*occlusionLayout, occlusionGroup,
+        tr("Adaptive cooldown"), tr("Frames to keep static occluders disabled after an expensive low-benefit pass."), 21,
+        0, 10000);
     QLabel* occlusionWaterCamerasLabel = nullptr;
     addComboRow(*occlusionLayout, occlusionWaterCamerasLabel, mEnhancedOcclusionWaterCameras, occlusionGroup,
-        tr("Water cameras"), tr("Select which cameras participate in enhanced water occlusion handling."), 15);
+        tr("Water cameras"), tr("Select which cameras participate in enhanced water occlusion handling."), 22);
     mEnhancedOcclusionWaterCameras->addItem(tr("Main"), QStringLiteral("main"));
     mEnhancedOcclusionWaterCameras->addItem(tr("Water"), QStringLiteral("water"));
     mEnhancedOcclusionWaterCameras->addItem(tr("All"), QStringLiteral("all"));
+    mEnhancedOcclusionWaterStaticOccluders = addCheckBox(*occlusionLayout, occlusionGroup,
+        tr("Water static occluders"), tr("Allow static occluder rasterization in water reflection/refraction cameras."),
+        23, 0);
     pageLayout->addWidget(occlusionGroup);
 
     auto* waterGroup = new QGroupBox(tr("Water"), enhancedContent);
@@ -417,6 +440,10 @@ void Launcher::SettingsPage::loadEnhancedSettings()
         SceneUtil::Enhanced::occlusionCullingTerrain() ? Qt::Checked : Qt::Unchecked);
     mEnhancedOcclusionCullingStatics->setCheckState(
         SceneUtil::Enhanced::occlusionCullingStatics() ? Qt::Checked : Qt::Unchecked);
+    mEnhancedOcclusionCullingStaticOccluders->setCheckState(
+        SceneUtil::Enhanced::occlusionCullingStaticOccluders() ? Qt::Checked : Qt::Unchecked);
+    mEnhancedOcclusionCullingSmallObjects->setCheckState(
+        SceneUtil::Enhanced::occlusionCullingSmallObjects() ? Qt::Checked : Qt::Unchecked);
     mEnhancedOcclusionCullingInteriors->setCheckState(
         SceneUtil::Enhanced::occlusionCullingInteriors() ? Qt::Checked : Qt::Unchecked);
     mEnhancedOcclusionDebugOverlay->setCheckState(
@@ -436,8 +463,20 @@ void Launcher::SettingsPage::loadEnhancedSettings()
     mEnhancedOcclusionOccluderInsideThreshold->setValue(SceneUtil::Enhanced::occlusionOccluderInsideThreshold());
     mEnhancedOcclusionOccluderMaxDistance->setValue(SceneUtil::Enhanced::occlusionOccluderMaxDistance());
     mEnhancedOcclusionMaxTriangles->setValue(SceneUtil::Enhanced::occlusionMaxTriangles());
+    mEnhancedOcclusionStaticRasterTimeBudgetMs->setValue(
+        SceneUtil::Enhanced::occlusionStaticRasterTimeBudgetMs());
+    mEnhancedOcclusionMinOccluderScreenRatio->setValue(SceneUtil::Enhanced::occlusionMinOccluderScreenRatio());
+    mEnhancedOcclusionMinOccludeeScreenRatio->setValue(SceneUtil::Enhanced::occlusionMinOccludeeScreenRatio());
+    mEnhancedOcclusionAdaptiveStatics->setCheckState(
+        SceneUtil::Enhanced::occlusionAdaptiveStatics() ? Qt::Checked : Qt::Unchecked);
+    mEnhancedOcclusionAdaptiveMinBenefitRatio->setValue(
+        SceneUtil::Enhanced::occlusionAdaptiveMinBenefitRatio());
+    mEnhancedOcclusionAdaptiveCooldownFrames->setValue(
+        SceneUtil::Enhanced::occlusionAdaptiveCooldownFrames());
     setComboValue(*mEnhancedOcclusionWaterCameras,
         QString::fromStdString(SceneUtil::Enhanced::occlusionWaterCameras()));
+    mEnhancedOcclusionWaterStaticOccluders->setCheckState(
+        SceneUtil::Enhanced::occlusionWaterStaticOccluders() ? Qt::Checked : Qt::Unchecked);
 
     mEnhancedWaterSurface->setCheckState(
         SceneUtil::Enhanced::settingBool("Water", "surface", true) ? Qt::Checked : Qt::Unchecked);
@@ -485,6 +524,9 @@ void Launcher::SettingsPage::saveEnhancedSettings() const
     stream << "occlusion culling = " << boolText(*mEnhancedOcclusionCulling) << '\n';
     stream << "occlusion culling terrain = " << boolText(*mEnhancedOcclusionCullingTerrain) << '\n';
     stream << "occlusion culling statics = " << boolText(*mEnhancedOcclusionCullingStatics) << '\n';
+    stream << "occlusion culling static occluders = " << boolText(*mEnhancedOcclusionCullingStaticOccluders)
+           << '\n';
+    stream << "occlusion culling small objects = " << boolText(*mEnhancedOcclusionCullingSmallObjects) << '\n';
     stream << "occlusion buffer width = " << mEnhancedOcclusionBufferWidth->value() << '\n';
     stream << "occlusion buffer height = " << mEnhancedOcclusionBufferHeight->value() << '\n';
     stream << "occlusion terrain lod = " << mEnhancedOcclusionTerrainLod->value() << '\n';
@@ -502,7 +544,18 @@ void Launcher::SettingsPage::saveEnhancedSettings() const
     stream << "occlusion debug messages = " << boolText(*mEnhancedOcclusionDebugMessages) << '\n';
     stream << "occlusion culling interiors = " << boolText(*mEnhancedOcclusionCullingInteriors) << '\n';
     stream << "occlusion max triangles = " << mEnhancedOcclusionMaxTriangles->value() << '\n';
-    stream << "occlusion water cameras = " << comboValue(*mEnhancedOcclusionWaterCameras) << "\n\n";
+    stream << "occlusion static raster time budget ms = "
+           << numberText(*mEnhancedOcclusionStaticRasterTimeBudgetMs) << '\n';
+    stream << "occlusion min occluder screen ratio = " << numberText(*mEnhancedOcclusionMinOccluderScreenRatio)
+           << '\n';
+    stream << "occlusion min occludee screen ratio = " << numberText(*mEnhancedOcclusionMinOccludeeScreenRatio)
+           << '\n';
+    stream << "occlusion adaptive statics = " << boolText(*mEnhancedOcclusionAdaptiveStatics) << '\n';
+    stream << "occlusion adaptive min benefit ratio = "
+           << numberText(*mEnhancedOcclusionAdaptiveMinBenefitRatio) << '\n';
+    stream << "occlusion adaptive cooldown frames = " << mEnhancedOcclusionAdaptiveCooldownFrames->value() << '\n';
+    stream << "occlusion water cameras = " << comboValue(*mEnhancedOcclusionWaterCameras) << '\n';
+    stream << "occlusion water static occluders = " << boolText(*mEnhancedOcclusionWaterStaticOccluders) << "\n\n";
 
     stream << "[Water]\n";
     stream << "surface = " << boolText(*mEnhancedWaterSurface) << '\n';

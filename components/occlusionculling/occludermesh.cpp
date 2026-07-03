@@ -1,6 +1,7 @@
 #include "occludermesh.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <cmath>
 #include <unordered_map>
 #include <unordered_set>

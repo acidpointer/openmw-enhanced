@@ -58,12 +58,35 @@ namespace SceneUtil
         unsigned int getRasterizeCalls() const { return mRasterizeCalls; }
         unsigned int getTestCalls() const { return mTestCalls; }
         unsigned int getMeshBuilds() const { return mMeshBuilds; }
+        unsigned int getStaticOccluderCandidates() const { return mStaticOccluderCandidates; }
+        unsigned int getStaticOccludersSkippedBudget() const { return mStaticOccludersSkippedBudget; }
+        unsigned int getStaticOccludersSkippedDistance() const { return mStaticOccludersSkippedDistance; }
+        unsigned int getStaticOccludersSkippedScreen() const { return mStaticOccludersSkippedScreen; }
+        unsigned int getSmallOccludeesSkippedScreen() const { return mSmallOccludeesSkippedScreen; }
+        void setStaticOccludersEnabled(bool enabled) { mStaticOccludersEnabled = enabled; }
+        bool staticOccludersEnabled() const { return mStaticOccludersEnabled; }
+        void setSmallObjectTestingEnabled(bool enabled) { mSmallObjectTestingEnabled = enabled; }
+        bool smallObjectTestingEnabled() const { return mSmallObjectTestingEnabled; }
+        void setStaticRasterBudgetMs(double value) { mStaticRasterBudgetMs = value; }
+        void resetStaticRasterBudgetBaseline() { mStaticRasterBudgetBaselineMs = mRasterizeMs; }
+        double getStaticRasterMs() const;
+        bool staticRasterBudgetAvailable() const;
+        void setMinOccluderScreenRatio(double value) { mMinOccluderScreenRatio = value; }
+        double getMinOccluderScreenRatio() const { return mMinOccluderScreenRatio; }
+        void setMinOccludeeScreenRatio(double value) { mMinOccludeeScreenRatio = value; }
+        double getMinOccludeeScreenRatio() const { return mMinOccludeeScreenRatio; }
+        bool estimateScreenRatio(const osg::BoundingBox& worldBB, double& ratio) const;
         void incrementBuildingOccluders(unsigned int tris, unsigned int verts)
         {
             ++mNumBuildingOccluders;
             mNumBuildingTris += tris;
             mNumBuildingVerts += verts;
         }
+        void incrementStaticOccluderCandidates() { ++mStaticOccluderCandidates; }
+        void incrementStaticOccludersSkippedBudget() { ++mStaticOccludersSkippedBudget; }
+        void incrementStaticOccludersSkippedDistance() { ++mStaticOccludersSkippedDistance; }
+        void incrementStaticOccludersSkippedScreen() { ++mStaticOccludersSkippedScreen; }
+        void incrementSmallOccludeesSkippedScreen() { ++mSmallOccludeesSkippedScreen; }
         void recordMeshBuild(double ms)
         {
             mMeshBuildMs += ms;
@@ -95,6 +118,17 @@ namespace SceneUtil
         unsigned int mRasterizeCalls = 0;
         mutable unsigned int mTestCalls = 0;
         unsigned int mMeshBuilds = 0;
+        unsigned int mStaticOccluderCandidates = 0;
+        unsigned int mStaticOccludersSkippedBudget = 0;
+        unsigned int mStaticOccludersSkippedDistance = 0;
+        unsigned int mStaticOccludersSkippedScreen = 0;
+        unsigned int mSmallOccludeesSkippedScreen = 0;
+        bool mStaticOccludersEnabled = true;
+        bool mSmallObjectTestingEnabled = true;
+        double mStaticRasterBudgetMs = 0.0;
+        double mStaticRasterBudgetBaselineMs = 0.0;
+        double mMinOccluderScreenRatio = 0.0;
+        double mMinOccludeeScreenRatio = 0.0;
     };
 }
 

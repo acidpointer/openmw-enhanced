@@ -4,6 +4,7 @@
 
 #include <components/sceneutil/occlusionculling.hpp>
 
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -861,7 +862,7 @@ namespace MWRender
         CopyOp copyop(activeGrid, copyMask);
 
         const bool buildOccluders
-            = SceneUtil::Enhanced::occlusionCulling() && SceneUtil::Enhanced::occlusionCullingStatics();
+            = SceneUtil::Enhanced::occlusionCulling() && SceneUtil::Enhanced::occlusionCullingStaticOccluders();
         osg::ref_ptr<PagedOccluderData> pagedOccluderData;
         float occluderMinRadius = 0;
         int occluderMeshRes = 6;
@@ -1079,6 +1080,7 @@ namespace MWRender
         udc->addUserObject(templateRefs);
         if (pagedOccluderData && !pagedOccluderData->mOccluderMeshes.empty())
         {
+            pagedOccluderData->buildSpatialBins();
             udc->addUserObject(pagedOccluderData);
             if (mOcclusionCuller)
             {

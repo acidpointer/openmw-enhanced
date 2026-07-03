@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <osg/Timer>
 
@@ -65,6 +66,12 @@ namespace SceneUtil
         mRasterizeCalls = 0;
         mTestCalls = 0;
         mMeshBuilds = 0;
+        mStaticOccluderCandidates = 0;
+        mStaticOccludersSkippedBudget = 0;
+        mStaticOccludersSkippedDistance = 0;
+        mStaticOccludersSkippedScreen = 0;
+        mSmallOccludeesSkippedScreen = 0;
+        mStaticRasterBudgetBaselineMs = 0.0;
         mFrameActive = true;
     }
 
@@ -305,6 +312,70 @@ namespace SceneUtil
         if (!visible)
             ++mNumOccluded;
         return visible;
+    }
+
+    double OcclusionCuller::getStaticRasterMs() const
+    {
+        return std::max(0.0, mRasterizeMs - mStaticRasterBudgetBaselineMs);
+    }
+
+    bool OcclusionCuller::staticRasterBudgetAvailable() const
+    {
+        return mStaticRasterBudgetMs <= 0.0 || getStaticRasterMs() < mStaticRasterBudgetMs;
+    }
+
+    bool OcclusionCuller::estimateScreenRatio(const osg::BoundingBox& worldBB, double& ratio) const
+    {
+        ratio = 0.0;
+        if (!mFrameActive || !worldBB.valid())
+            return false;
+
+        float ndcMinX = 1.0f;
+        float ndcMinY = 1.0f;
+        float ndcMaxX = -1.0f;
+        float ndcMaxY = -1.0f;
+        bool anyInFront = false;
+
+        const double* m = mViewProjection.ptr();
+        for (unsigned int i = 0; i < 8; ++i)
+        {
+            const osg::Vec3f corner = worldBB.corner(i);
+            const double x = corner.x();
+            const double y = corner.y();
+            const double z = corner.z();
+            const float cx = static_cast<float>(x * m[0] + y * m[4] + z * m[8] + m[12]);
+            const float cy = static_cast<float>(x * m[1] + y * m[5] + z * m[9] + m[13]);
+            const float cw = static_cast<float>(x * m[3] + y * m[7] + z * m[11] + m[15]);
+
+            if (cw <= 0.001f || !std::isfinite(cw))
+                return false;
+
+            anyInFront = true;
+            const float invW = 1.0f / cw;
+            const float ndcX = cx * invW;
+            const float ndcY = cy * invW;
+            if (!std::isfinite(ndcX) || !std::isfinite(ndcY))
+                return false;
+
+            ndcMinX = std::min(ndcMinX, ndcX);
+            ndcMinY = std::min(ndcMinY, ndcY);
+            ndcMaxX = std::max(ndcMaxX, ndcX);
+            ndcMaxY = std::max(ndcMaxY, ndcY);
+        }
+
+        if (!anyInFront)
+            return false;
+
+        ndcMinX = std::max(ndcMinX, -1.0f);
+        ndcMinY = std::max(ndcMinY, -1.0f);
+        ndcMaxX = std::min(ndcMaxX, 1.0f);
+        ndcMaxY = std::min(ndcMaxY, 1.0f);
+
+        if (ndcMinX >= ndcMaxX || ndcMinY >= ndcMaxY)
+            return false;
+
+        ratio = static_cast<double>((ndcMaxX - ndcMinX) * (ndcMaxY - ndcMinY)) * 0.25;
+        return true;
     }
 
     void OcclusionCuller::computePixelDepthBuffer(float* depthData) const
