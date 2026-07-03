@@ -119,6 +119,18 @@ shared {
         return sceneDepth + 4.0 < worldDepth;
     }
 
+    float depthLayerTolerance(float depth)
+    {
+        return mix(10.0, 70.0, saturate(depth / 5200.0)) + depth * 0.006;
+    }
+
+    float depthLayerWeight(float centerDepth, float sampleDepth, float rangeScale)
+    {
+        float tolerance = depthLayerTolerance(centerDepth) * rangeScale;
+        float delta = abs(sampleDepth - centerDepth);
+        return 1.0 - smoothstep(tolerance, tolerance * 2.4, delta);
+    }
+
     vec3 normalWorldFromBuffer(vec2 uv)
     {
         return normalize(omw_GetNormalsWorldSpace(uv));
@@ -182,7 +194,7 @@ fragment shadow_raw(target=RT_ShadowRaw) {
 #endif
 
     float sampleRayHit(vec2 sampleUv, vec3 rayView, vec3 originWorld, vec3 normalWorld, vec3 toLightWorld,
-        float rayDistance, float raySpan, float maxDistance, float receiverDepth)
+        float rayDistance, float raySpan, float maxDistance, float receiverDepth, float receiverLinearDepth)
     {
         float edgeFade = screenEdgeFade(sampleUv);
         if (edgeFade <= 0.0)
@@ -193,6 +205,10 @@ fragment shadow_raw(target=RT_ShadowRaw) {
 
         float sampleDepth = omw_GetWorldLinearDepth(sampleUv);
         if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION)
+            return 0.0;
+
+        float receiverLayerWeight = depthLayerWeight(receiverLinearDepth, sampleDepth, 3.0);
+        if (receiverLayerWeight <= 0.0)
             return 0.0;
 
         vec3 sampleWorld = omw_GetWorldPosFromWorldDepthUV(sampleUv);
@@ -244,7 +260,7 @@ fragment shadow_raw(target=RT_ShadowRaw) {
         float selfReject = 1.0;
 #endif
 
-        return depthHit * lateralHit * alongHit * casterHeight * selfReject * edgeFade;
+        return depthHit * lateralHit * alongHit * casterHeight * selfReject * receiverLayerWeight * edgeFade;
     }
 
     float traceScreenSpaceShadow(vec2 uv, vec3 originWorld, vec3 normalWorld, vec3 toLightWorld, float receiverDepth)
@@ -262,6 +278,7 @@ fragment shadow_raw(target=RT_ShadowRaw) {
         float stability = clamp(uStability, 0.0, 2.0);
 
         vec3 originView = viewPosFromWorld(originWorld + normalWorld * receiverBias);
+        float receiverLinearDepth = max(-viewPosFromWorld(originWorld).z, 1.0);
         vec3 lightView = normalize((omw.viewMatrix * vec4(toLightWorld, 0.0)).xyz);
 
         vec2 stableCell = floor(originWorld.xz * mix(0.035, 0.090, stability * 0.5));
@@ -283,7 +300,7 @@ fragment shadow_raw(target=RT_ShadowRaw) {
             vec2 sampleUv = projectViewToUv(rayView);
             float hit = sampleRayHit(
                 sampleUv, rayView, originWorld, normalWorld, toLightWorld, rayDistance, raySpan, maxDistance,
-                receiverDepth);
+                receiverDepth, receiverLinearDepth);
 
             float distanceWeight = 1.0 - smoothstep(0.05, 0.92, stepPosition);
             float sampleWeight = mix(0.65, 1.35, stepPosition);
@@ -368,7 +385,11 @@ fragment shadow_directional(target=RT_ShadowDirectional, rt1=RT_ShadowRaw) {
             if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION)
                 continue;
 
-            float depthWeight = exp2(-abs(sampleDepth - centerDepth) / max(centerDepth, 1.0) * 70.0);
+            float layerWeight = depthLayerWeight(centerDepth, sampleDepth, 1.0);
+            if (layerWeight <= 0.0)
+                continue;
+
+            float depthWeight = layerWeight * layerWeight;
 #if OMW_NORMALS
             vec3 sampleNormal = normalWorldFromBuffer(sampleUv);
             float normalWeight = smoothstep(0.35, 0.95, dot(centerNormal, sampleNormal));
@@ -424,7 +445,11 @@ fragment shadow_cross(target=RT_ShadowBlur, rt1=RT_ShadowDirectional) {
             if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION)
                 continue;
 
-            float depthWeight = exp2(-abs(sampleDepth - centerDepth) / max(centerDepth, 1.0) * 105.0);
+            float layerWeight = depthLayerWeight(centerDepth, sampleDepth, 0.85);
+            if (layerWeight <= 0.0)
+                continue;
+
+            float depthWeight = layerWeight * layerWeight;
 #if OMW_NORMALS
             vec3 sampleNormal = normalWorldFromBuffer(sampleUv);
             float normalWeight = smoothstep(0.45, 0.96, dot(centerNormal, sampleNormal));
