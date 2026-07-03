@@ -1,5 +1,6 @@
 #include "occlusionculling.hpp"
 
+#include "enhancedperf.hpp"
 #include "objects.hpp"
 
 #include <algorithm>
@@ -162,10 +163,13 @@ namespace MWRender
 
     void SceneOcclusionCallback::operator()(osg::Node* node, osgUtil::CullVisitor* cv)
     {
-        // Only run occlusion for the main scene camera.
-        // Skip shadow cameras, water reflection, and any other cameras.
         osg::Camera* cam = cv->getCurrentCamera();
-        if (cam->getName() != Constants::SceneCamera)
+        const std::string& cameraName = cam->getName();
+        const bool sceneCamera = cameraName == Constants::SceneCamera;
+        const bool waterCamera = Enhanced::waterOcclusionEnabled()
+            && (cameraName == "ReflectionCamera" || cameraName == "RefractionCamera");
+
+        if (!sceneCamera && !waterCamera)
         {
             traverse(node, cv);
             return;
@@ -175,12 +179,13 @@ namespace MWRender
         // and again by MWShadowTechnique::cullShadowReceivingScene (same camera name).
         // Only set up MOC on the first traversal; subsequent passes just traverse normally.
         unsigned int frameNumber = cv->getFrameStamp()->getFrameNumber();
-        if (frameNumber == mLastFrameNumber)
+        unsigned int& lastFrameNumber = mLastFrameNumbers[cameraName];
+        if (frameNumber == lastFrameNumber)
         {
             traverse(node, cv);
             return;
         }
-        mLastFrameNumber = frameNumber;
+        lastFrameNumber = frameNumber;
 
         // Skip MSOC entirely in interiors (unless enabled via setting)
         if (mIsInterior && !mEnableInteriors)
@@ -212,14 +217,14 @@ namespace MWRender
         mCuller->endFrame();
 
         // Update debug overlay AFTER traversal (terrain + building occluders now in buffer)
-        if (mEnableDebugOverlay)
+        if (sceneCamera && mEnableDebugOverlay)
         {
             if (!mDebugCamera)
                 setupDebugOverlay();
             updateDebugOverlay(cv);
         }
 
-        if (mEnableDebugMessages)
+        if (sceneCamera && mEnableDebugMessages)
         {
             static int frameCount = 0;
             if (++frameCount % 300 == 0)

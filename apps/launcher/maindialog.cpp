@@ -594,7 +594,11 @@ void Launcher::MainDialog::play()
 
     // Launch the game detached
 
-    if (mGameInvoker->startProcess(QLatin1String("openmw"), true))
+    QStringList arguments;
+    for (const std::filesystem::path& path : mCfgMgr.getActiveConfigPaths())
+        arguments << QLatin1String("--config") << Files::pathToQString(path);
+
+    if (mGameInvoker->startProcess(QLatin1String("openmw"), arguments, true))
         return qApp->quit();
 }
 

@@ -169,6 +169,7 @@ set(BUILTIN_DATA_FILES
     shaders/bloomlinear.omwfx
     shaders/debug.omwfx
     shaders/internal_distortion.omwfx
+    shaders/screen_space_shadows.omwfx
 
     mygui/core.skin
     mygui/core.xml

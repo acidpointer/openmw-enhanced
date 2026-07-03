@@ -39,6 +39,10 @@ if [[ -f "${BUILD_DIR}/openmw.cfg" ]]; then
         "${APPDIR}/usr/bin/openmw.cfg"
 fi
 
+if [[ -f "${APPDIR}/etc/openmw/openmw-enhanced.cfg" ]]; then
+    cp "${APPDIR}/etc/openmw/openmw-enhanced.cfg" "${APPDIR}/usr/bin/openmw-enhanced.cfg"
+fi
+
 for settings_file in defaults.bin defaults-cs.bin; do
     if [[ -f "${APPDIR}/etc/openmw/${settings_file}" ]]; then
         cp "${APPDIR}/etc/openmw/${settings_file}" "${APPDIR}/usr/bin/${settings_file}"

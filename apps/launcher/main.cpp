@@ -5,12 +5,15 @@
 #include <boost/program_options/options_description.hpp>
 #include <boost/program_options/variables_map.hpp>
 
+#include <filesystem>
+
 #include <components/debug/debugging.hpp>
 #include <components/files/configurationmanager.hpp>
 #include <components/files/qtconversion.hpp>
 #include <components/l10n/qttranslations.hpp>
 #include <components/platform/application.hpp>
 #include <components/platform/platform.hpp>
+#include <components/sceneutil/enhancedsettings.hpp>
 
 #ifdef MAC_OS_X_VERSION_MIN_REQUIRED
 #undef MAC_OS_X_VERSION_MIN_REQUIRED
@@ -28,9 +31,14 @@ int runLauncher(int argc, char* argv[])
     boost::program_options::options_description description;
     Files::ConfigurationManager configurationManager;
     configurationManager.addCommonOptions(description);
+
+    Files::parseArgs(argc, argv, variables, description);
+    boost::program_options::notify(variables);
+    configurationManager.processPaths(variables, std::filesystem::current_path());
     configurationManager.readConfiguration(variables, description, true);
 
     Debug::setupLogging(configurationManager.getLogPath(), "Launcher");
+    SceneUtil::Enhanced::ensureUserSettingsFile(configurationManager);
 
     try
     {

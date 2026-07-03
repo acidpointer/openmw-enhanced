@@ -59,12 +59,14 @@ namespace Fx
             osg::ref_ptr<osg::StateSet> mStateSet = new osg::StateSet;
             osg::ref_ptr<osg::FrameBufferObject> mRenderTarget;
             osg::ref_ptr<osg::Texture2D> mRenderTexture;
+            std::string mName;
             bool mResolve = false;
             Types::SizeProxy mSize;
             bool mMipMap = false;
 
             SubPass(const SubPass& other, const osg::CopyOp& copyOp = osg::CopyOp::SHALLOW_COPY)
                 : mStateSet(new osg::StateSet(*other.mStateSet, copyOp))
+                , mName(other.mName)
                 , mResolve(other.mResolve)
                 , mSize(other.mSize)
                 , mMipMap(other.mMipMap)

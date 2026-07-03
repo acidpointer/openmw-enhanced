@@ -72,6 +72,7 @@ esac
 rm -rf "${APPDIR}"
 ensure_cmake_build_dir "${SOURCE_DIR}" "${BUILD_DIR}"
 mkdir -p "${APPDIR}" /ccache /cargo
+rm -rf "${BUILD_DIR}/resources/vfs"
 
 cmake -S "${SOURCE_DIR}" -B "${BUILD_DIR}" -G Ninja \
     -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \

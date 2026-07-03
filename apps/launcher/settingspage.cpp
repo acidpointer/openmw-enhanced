@@ -6,12 +6,26 @@
 
 #include <QCompleter>
 #include <QDesktopServices>
+#include <QCheckBox>
+#include <QComboBox>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QDir>
+#include <QFile>
+#include <QGridLayout>
+#include <QGroupBox>
+#include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QString>
+#include <QTextStream>
+#include <QVBoxLayout>
+#include <QVariant>
 
 #include <components/config/gamesettings.hpp>
+#include <components/debug/debuglog.hpp>
 #include <components/files/qtconversion.hpp>
+#include <components/sceneutil/enhancedsettings.hpp>
 #include <components/settings/values.hpp>
 
 #include "utils/openalutil.hpp"
@@ -82,6 +96,7 @@ namespace
         Role_OpenMWLog,
         Role_OpenMWCSLog,
         Role_SettingsCfg,
+        Role_OpenMWEnhancedCfg,
     };
 
     struct FileType
@@ -97,7 +112,46 @@ namespace
         FileType{ Role_OpenMWLog, "openmw.log", false },
         FileType{ Role_OpenMWCSLog, "openmw-cs.log", false },
         FileType{ Role_SettingsCfg, "settings.cfg", true },
+        FileType{ Role_OpenMWEnhancedCfg, "openmw-enhanced.cfg", true },
     };
+
+    QCheckBox* addCheckBox(QGridLayout& layout, QWidget* parent, const QString& text, const QString& tooltip, int row,
+        int column)
+    {
+        auto* checkBox = new QCheckBox(text, parent);
+        checkBox->setToolTip(tooltip);
+        layout.addWidget(checkBox, row, column);
+        return checkBox;
+    }
+
+    void addComboRow(QGridLayout& layout, QLabel*& label, QComboBox*& comboBox, QWidget* parent, const QString& text,
+        const QString& tooltip, int row)
+    {
+        label = new QLabel(text, parent);
+        label->setToolTip(tooltip);
+        comboBox = new QComboBox(parent);
+        comboBox->setToolTip(tooltip);
+        layout.addWidget(label, row, 0);
+        layout.addWidget(comboBox, row, 1);
+    }
+
+    void setComboValue(QComboBox& comboBox, const QString& value)
+    {
+        const int index = comboBox.findData(value);
+        if (index >= 0)
+            comboBox.setCurrentIndex(index);
+    }
+
+    QString comboValue(const QComboBox& comboBox)
+    {
+        const QVariant data = comboBox.currentData();
+        return data.isValid() ? data.toString() : comboBox.currentText();
+    }
+
+    QString boolText(const QCheckBox& checkbox)
+    {
+        return checkbox.checkState() == Qt::Checked ? QStringLiteral("true") : QStringLiteral("false");
+    }
 }
 
 Launcher::SettingsPage::SettingsPage(
@@ -108,6 +162,7 @@ Launcher::SettingsPage::SettingsPage(
 {
     setObjectName("SettingsPage");
     setupUi(this);
+    setupEnhancedTab();
 
     for (const std::string& name : Launcher::enumerateOpenALDevices())
     {
@@ -169,6 +224,163 @@ Launcher::SettingsPage::SettingsPage(
             contextMenu.exec(configsList->mapToGlobal(pos));
         }
     });
+}
+
+void Launcher::SettingsPage::setupEnhancedTab()
+{
+    auto* enhancedPage = new QWidget(AdvancedTabWidget);
+    auto* pageLayout = new QVBoxLayout(enhancedPage);
+
+    auto* performanceGroup = new QGroupBox(tr("Performance diagnostics"), enhancedPage);
+    auto* performanceLayout = new QGridLayout(performanceGroup);
+    mEnhancedGpuProfile = addCheckBox(*performanceLayout, performanceGroup, tr("GPU profile"),
+        tr("Enable GPU timer queries for enhanced performance diagnostics."), 0, 0);
+    mEnhancedSceneProfile = addCheckBox(*performanceLayout, performanceGroup, tr("Scene profile"),
+        tr("Record scene-level GPU timing. Requires GPU profile."), 0, 1);
+    mEnhancedCameraProfile = addCheckBox(*performanceLayout, performanceGroup, tr("Camera profile"),
+        tr("Record per-camera GPU timing. Requires scene profile."), 1, 0);
+    mEnhancedRenderbinProfile = addCheckBox(*performanceLayout, performanceGroup, tr("Render bin profile"),
+        tr("Record render-bin GPU timing. Intended for diagnostics, not normal play."), 1, 1);
+    mEnhancedDrawableProfile = addCheckBox(*performanceLayout, performanceGroup, tr("Drawable profile"),
+        tr("Record drawable-level GPU timing. This can be expensive."), 2, 0);
+
+    auto* csvLabel = new QLabel(tr("GPU profile CSV"), performanceGroup);
+    csvLabel->setToolTip(tr("Optional path for GPU profile CSV output. Leave empty to disable CSV output."));
+    mEnhancedGpuProfileCsv = new QLineEdit(performanceGroup);
+    mEnhancedGpuProfileCsv->setToolTip(csvLabel->toolTip());
+    performanceLayout->addWidget(csvLabel, 3, 0);
+    performanceLayout->addWidget(mEnhancedGpuProfileCsv, 3, 1);
+    pageLayout->addWidget(performanceGroup);
+
+    auto* rendererGroup = new QGroupBox(tr("Renderer diagnostics"), enhancedPage);
+    auto* rendererLayout = new QGridLayout(rendererGroup);
+    mEnhancedDisableActors = addCheckBox(*rendererLayout, rendererGroup, tr("Disable actors"),
+        tr("Do not render actor scene categories. Diagnostic switch only."), 0, 0);
+    mEnhancedDisableObjects = addCheckBox(*rendererLayout, rendererGroup, tr("Disable objects"),
+        tr("Do not render object/static scene categories. Diagnostic switch only."), 0, 1);
+
+    QLabel* transparentDepthModeLabel = nullptr;
+    addComboRow(*rendererLayout, transparentDepthModeLabel, mEnhancedTransparentDepthMode, rendererGroup,
+        tr("Transparent depth mode"), tr("Controls how transparent geometry participates in enhanced depth passes."), 1);
+    mEnhancedTransparentDepthMode->addItem(tr("Legacy"), QStringLiteral("legacy"));
+    mEnhancedTransparentDepthMode->addItem(tr("Alpha test only"), QStringLiteral("alpha-test-only"));
+    mEnhancedTransparentDepthMode->addItem(tr("Off"), QStringLiteral("off"));
+    mEnhancedTransparentDepthMode->addItem(tr("Profile only"), QStringLiteral("profile-only"));
+    pageLayout->addWidget(rendererGroup);
+
+    auto* waterGroup = new QGroupBox(tr("Water"), enhancedPage);
+    auto* waterLayout = new QGridLayout(waterGroup);
+    mEnhancedWaterSurface = addCheckBox(*waterLayout, waterGroup, tr("Surface"), tr("Render water surface."), 0, 0);
+    mEnhancedWaterReflection
+        = addCheckBox(*waterLayout, waterGroup, tr("Reflection"), tr("Render water reflections."), 0, 1);
+    mEnhancedWaterRefraction
+        = addCheckBox(*waterLayout, waterGroup, tr("Refraction"), tr("Render water refractions."), 1, 0);
+
+    QLabel* waterOcclusionLabel = nullptr;
+    addComboRow(*waterLayout, waterOcclusionLabel, mEnhancedWaterOcclusionCameras, waterGroup, tr("Occlusion cameras"),
+        tr("Select which cameras participate in enhanced water occlusion handling."), 2);
+    mEnhancedWaterOcclusionCameras->addItem(tr("Main"), QStringLiteral("main"));
+    mEnhancedWaterOcclusionCameras->addItem(tr("Water"), QStringLiteral("water"));
+    mEnhancedWaterOcclusionCameras->addItem(tr("All"), QStringLiteral("all"));
+    pageLayout->addWidget(waterGroup);
+
+    auto* shadowsGroup = new QGroupBox(tr("Shadows"), enhancedPage);
+    auto* enhancedShadowsLayout = new QGridLayout(shadowsGroup);
+    mEnhancedScreenSpaceShadows = addCheckBox(*enhancedShadowsLayout, shadowsGroup, tr("Screen-space shadows"),
+        tr("Auto-enable the OpenMW Enhanced screen-space shadow post-processing shader."), 0, 0);
+    mEnhancedScreenSpaceShadowsForcePostprocess
+        = addCheckBox(*enhancedShadowsLayout, shadowsGroup, tr("Force post-processing"),
+            tr("Keep post-processing active when screen-space shadows are enabled, even if the normal OpenMW "
+               "post-processing switch is off."),
+            0, 1);
+    pageLayout->addWidget(shadowsGroup);
+
+    pageLayout->addStretch(1);
+    AdvancedTabWidget->addTab(enhancedPage, tr("Enhanced"));
+}
+
+void Launcher::SettingsPage::loadEnhancedSettings()
+{
+    SceneUtil::Enhanced::loadSettings(mCfgMgr);
+
+    mEnhancedGpuProfile->setCheckState(
+        SceneUtil::Enhanced::settingBool("Performance", "gpu profile") ? Qt::Checked : Qt::Unchecked);
+    mEnhancedSceneProfile->setCheckState(
+        SceneUtil::Enhanced::settingBool("Performance", "scene profile") ? Qt::Checked : Qt::Unchecked);
+    mEnhancedCameraProfile->setCheckState(
+        SceneUtil::Enhanced::settingBool("Performance", "camera profile") ? Qt::Checked : Qt::Unchecked);
+    mEnhancedRenderbinProfile->setCheckState(
+        SceneUtil::Enhanced::settingBool("Performance", "renderbin profile") ? Qt::Checked : Qt::Unchecked);
+    mEnhancedDrawableProfile->setCheckState(
+        SceneUtil::Enhanced::settingBool("Performance", "drawable profile") ? Qt::Checked : Qt::Unchecked);
+    mEnhancedGpuProfileCsv->setText(
+        QString::fromStdString(SceneUtil::Enhanced::settingString("Performance", "gpu profile csv")));
+
+    mEnhancedDisableActors->setCheckState(
+        SceneUtil::Enhanced::settingBool("Renderer", "disable actors") ? Qt::Checked : Qt::Unchecked);
+    mEnhancedDisableObjects->setCheckState(
+        SceneUtil::Enhanced::settingBool("Renderer", "disable objects") ? Qt::Checked : Qt::Unchecked);
+    setComboValue(*mEnhancedTransparentDepthMode,
+        QString::fromStdString(SceneUtil::Enhanced::settingString("Renderer", "transparent depth mode", "legacy")));
+
+    mEnhancedWaterSurface->setCheckState(
+        SceneUtil::Enhanced::settingBool("Water", "surface", true) ? Qt::Checked : Qt::Unchecked);
+    mEnhancedWaterReflection->setCheckState(
+        SceneUtil::Enhanced::settingBool("Water", "reflection", true) ? Qt::Checked : Qt::Unchecked);
+    mEnhancedWaterRefraction->setCheckState(
+        SceneUtil::Enhanced::settingBool("Water", "refraction", true) ? Qt::Checked : Qt::Unchecked);
+    setComboValue(*mEnhancedWaterOcclusionCameras,
+        QString::fromStdString(SceneUtil::Enhanced::settingString("Water", "occlusion cameras", "main")));
+
+    mEnhancedScreenSpaceShadows->setCheckState(
+        SceneUtil::Enhanced::settingBool("Shadows", "screen space shadows", true) ? Qt::Checked : Qt::Unchecked);
+    mEnhancedScreenSpaceShadowsForcePostprocess->setCheckState(
+        SceneUtil::Enhanced::settingBool("Shadows", "screen space shadows force postprocess", true) ? Qt::Checked
+                                                                                                    : Qt::Unchecked);
+}
+
+void Launcher::SettingsPage::saveEnhancedSettings() const
+{
+    const auto settingsPath = mCfgMgr.getUserConfigPath() / "openmw-enhanced.cfg";
+    QDir().mkpath(QFileInfo(Files::pathToQString(settingsPath)).absolutePath());
+
+    QFile file(Files::pathToQString(settingsPath));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+    {
+        Log(Debug::Error) << "Could not write OpenMW Enhanced settings: " << settingsPath;
+        return;
+    }
+
+    QTextStream stream(&file);
+    stream << "# OpenMW Enhanced fork-specific settings.\n";
+    stream << "# This file is managed by the launcher Enhanced settings tab.\n\n";
+
+    stream << "[Performance]\n";
+    stream << "gpu profile = " << boolText(*mEnhancedGpuProfile) << '\n';
+    stream << "scene profile = " << boolText(*mEnhancedSceneProfile) << '\n';
+    stream << "camera profile = " << boolText(*mEnhancedCameraProfile) << '\n';
+    stream << "renderbin profile = " << boolText(*mEnhancedRenderbinProfile) << '\n';
+    stream << "drawable profile = " << boolText(*mEnhancedDrawableProfile) << '\n';
+    stream << "gpu profile csv = " << mEnhancedGpuProfileCsv->text() << "\n\n";
+
+    stream << "[Renderer]\n";
+    stream << "disable actors = " << boolText(*mEnhancedDisableActors) << '\n';
+    stream << "disable objects = " << boolText(*mEnhancedDisableObjects) << '\n';
+    stream << "transparent depth mode = " << comboValue(*mEnhancedTransparentDepthMode) << "\n\n";
+
+    stream << "[Water]\n";
+    stream << "surface = " << boolText(*mEnhancedWaterSurface) << '\n';
+    stream << "reflection = " << boolText(*mEnhancedWaterReflection) << '\n';
+    stream << "refraction = " << boolText(*mEnhancedWaterRefraction) << '\n';
+    stream << "occlusion cameras = " << comboValue(*mEnhancedWaterOcclusionCameras) << "\n\n";
+
+    stream << "[Shadows]\n";
+    stream << "screen space shadows = " << boolText(*mEnhancedScreenSpaceShadows) << '\n';
+    stream << "screen space shadows force postprocess = " << boolText(*mEnhancedScreenSpaceShadowsForcePostprocess)
+           << '\n';
+
+    file.close();
+    SceneUtil::Enhanced::loadSettings(mCfgMgr);
 }
 
 void Launcher::SettingsPage::loadCellsForAutocomplete(QStringList cellNames)
@@ -413,6 +625,8 @@ bool Launcher::SettingsPage::loadSettings()
         startDefaultCharacterAtField->setText(mGameSettings.value("start").value);
         runScriptAfterStartupField->setText(mGameSettings.value("script-run").value);
     }
+
+    loadEnhancedSettings();
     return true;
 }
 
@@ -688,6 +902,8 @@ void Launcher::SettingsPage::saveSettings()
         if (scriptRun != mGameSettings.value("script-run").value)
             mGameSettings.setValue("script-run", { scriptRun });
     }
+
+    saveEnhancedSettings();
 }
 
 void Launcher::SettingsPage::slotLoadedCellsChanged(QStringList cellNames)

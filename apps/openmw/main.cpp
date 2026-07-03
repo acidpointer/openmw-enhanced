@@ -5,6 +5,7 @@
 #include <components/misc/osgpluginchecker.hpp>
 #include <components/misc/rng.hpp>
 #include <components/platform/platform.hpp>
+#include <components/sceneutil/enhancedsettings.hpp>
 #include <components/version/version.hpp>
 
 #include "mwgui/debugwindow.hpp"
@@ -69,6 +70,8 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
     Log(Debug::Info) << Version::getOpenmwVersionDescription();
 
     Settings::Manager::load(cfgMgr);
+    SceneUtil::Enhanced::ensureUserSettingsFile(cfgMgr);
+    SceneUtil::Enhanced::loadSettings(cfgMgr);
 
     MWGui::DebugWindow::startLogRecording();
 

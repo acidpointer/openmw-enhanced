@@ -3,6 +3,8 @@
 #include <osg/ClusterCullingCallback>
 #include <osgUtil/CullVisitor>
 
+#include <string>
+
 #include <components/sceneutil/lightmanager.hpp>
 
 #include "compositemaprenderer.hpp"
@@ -66,7 +68,8 @@ namespace Terrain
         if (_cullingActive && cv->isCulled(getBoundingBox()))
             return;
 
-        bool shadowcam = cv->getCurrentCamera()->getName() == "ShadowCamera";
+        const std::string& cameraName = cv->getCurrentCamera()->getName();
+        bool shadowcam = cameraName == "ShadowCamera" || cameraName.find("ShadowCamera:") == 0;
 
         if (cv->getCullingMode() & osg::CullStack::CLUSTER_CULLING
             && clusterCull(mClusterCullingCallback, cv->getEyePoint(), shadowcam))

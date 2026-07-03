@@ -141,9 +141,6 @@ namespace MWRender
         template <class T>
         void setUniform(std::shared_ptr<Fx::Technique> technique, const std::string& name, const T& value)
         {
-            if (!isEnabled())
-                return;
-
             auto it = technique->findUniform(name);
 
             if (it == technique->getUniformMap().end())

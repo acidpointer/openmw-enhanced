@@ -1,6 +1,7 @@
 #include "pingpongcanvas.hpp"
 
 #include <cassert>
+#include <string>
 
 #include <components/shader/shadermanager.hpp>
 #include <components/stereo/multiview.hpp>
@@ -8,6 +9,7 @@
 
 #include <osg/Texture2DArray>
 
+#include "enhancedperf.hpp"
 #include "postprocessor.hpp"
 
 namespace MWRender
@@ -95,26 +97,31 @@ namespace MWRender
 
         if (filtered.empty() || !mPostprocessing)
         {
-            state.pushStateSet(mFallbackStateSet);
-            state.apply();
-
-            if (Stereo::getMultiview())
             {
-                state.pushStateSet(mMultiviewResolveStateSet);
+                Enhanced::GpuScope fallbackScope(state, "postprocess:fallback");
+
+                state.pushStateSet(mFallbackStateSet);
                 state.apply();
-            }
 
-            state.applyTextureAttribute(0, mTextureScene);
-            resolveViewport->apply(state);
+                if (Stereo::getMultiview())
+                {
+                    state.pushStateSet(mMultiviewResolveStateSet);
+                    state.apply();
+                }
 
-            drawGeometry(renderInfo);
-            state.popStateSet();
+                state.applyTextureAttribute(0, mTextureScene);
+                resolveViewport->apply(state);
 
-            if (Stereo::getMultiview())
-            {
+                drawGeometry(renderInfo);
                 state.popStateSet();
+
+                if (Stereo::getMultiview())
+                {
+                    state.popStateSet();
+                }
             }
 
+            Enhanced::flushGpuProfile(state);
             return;
         }
 
@@ -198,6 +205,9 @@ namespace MWRender
             }
         };
 
+        {
+            Enhanced::GpuScope chainScope(state, "postprocess:chain", "passes=" + std::to_string(filtered.size()));
+
         // When textures are created (or resized) we need to either dirty them and/or clear them.
         // Otherwise, there will be undefined behavior when reading from a texture that has yet to be written to in a
         // later pass.
@@ -234,6 +244,9 @@ namespace MWRender
         for (const size_t& index : filtered)
         {
             const auto& node = mPasses[index];
+            const std::string techniqueName = node.mHandle ? node.mHandle->getName() : "<unknown>";
+            Enhanced::GpuScope techniqueScope(
+                state, "postprocess:" + techniqueName, "subpasses=" + std::to_string(node.mPasses.size()));
 
             node.mRootStateSet->setTextureAttribute(PostProcessor::Unit_Depth, mTextureDepth);
 
@@ -314,6 +327,10 @@ namespace MWRender
                 if (!state.getLastAppliedProgramObject())
                     mFallbackProgram->apply(state);
 
+                Enhanced::GpuScope passScope(state, "postprocess:" + techniqueName + ":" + pass.mName,
+                    "target=" + std::to_string(pass.mRenderTarget != nullptr)
+                        + ";resolve=" + std::to_string(pass.mResolve) + ";last=" + std::to_string(lastPass));
+
                 drawGeometry(renderInfo);
 
                 if (pass.mRenderTarget && pass.mRenderTexture->getNumMipmapLevels() > 0)
@@ -352,6 +369,8 @@ namespace MWRender
             bindDestinationFbo();
         }
 
-        mDirtyAttachments.clear();
+            mDirtyAttachments.clear();
+        }
+        Enhanced::flushGpuProfile(state);
     }
 }

@@ -73,6 +73,7 @@
 #include "actorspaths.hpp"
 #include "camera.hpp"
 #include "effectmanager.hpp"
+#include "enhancedperf.hpp"
 #include "fogmanager.hpp"
 #include "groundcover.hpp"
 #include "navmesh.hpp"
@@ -430,8 +431,10 @@ namespace MWRender
         mViewer->getCamera()->setComputeNearFarMode(osg::Camera::DO_NOT_COMPUTE_NEAR_FAR);
         mViewer->getCamera()->setCullingMode(cullingMode);
         mViewer->getCamera()->setName(Constants::SceneCamera);
+        Enhanced::installCameraProfiler(*mViewer->getCamera(), "camera:scene", "camera=" + Constants::SceneCamera);
 
         auto mask = ~(Mask_UpdateVisitor | Mask_SimpleWater);
+        mask = Enhanced::applySceneCategoryMask(mask, Mask_Actor | Mask_Player | Mask_FirstPerson, Mask_Object);
         MWBase::Environment::get().getWindowManager()->setCullMask(mask);
         NifOsg::Loader::setHiddenNodeMask(Mask_UpdateVisitor);
         NifOsg::Loader::setIntersectionDisabledNodeMask(Mask_Effect);
@@ -718,6 +721,7 @@ namespace MWRender
                 mask |= sToggleWorldMask;
             else
                 mask &= ~sToggleWorldMask;
+            mask = Enhanced::applySceneCategoryMask(mask, Mask_Actor | Mask_Player | Mask_FirstPerson, Mask_Object);
             mWater->showWorld(enabled);
             wm->setCullMask(mask);
             return enabled;

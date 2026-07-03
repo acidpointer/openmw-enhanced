@@ -573,6 +573,11 @@ else ()
         "${OpenMW_BINARY_DIR}" "openmw.cfg.install")
 endif ()
 
+configure_resource_file(${OpenMW_SOURCE_DIR}/files/openmw-enhanced.cfg
+    "${OpenMW_BINARY_DIR}" "openmw-enhanced.cfg")
+configure_resource_file(${OpenMW_SOURCE_DIR}/files/openmw-enhanced.cfg
+    "${OpenMW_BINARY_DIR}" "openmw-enhanced.cfg.install")
+
 pack_resource_file(${OpenMW_SOURCE_DIR}/files/openmw-cs.cfg
     "${OpenMW_BINARY_DIR}" "defaults-cs.bin")
 
@@ -1074,6 +1079,7 @@ elseif(NOT APPLE)
         # Install global configuration files
         INSTALL(FILES "${INSTALL_SOURCE}/defaults.bin" DESTINATION "${SYSCONFDIR}" COMPONENT "openmw")
         INSTALL(FILES "${INSTALL_SOURCE}/openmw.cfg.install" DESTINATION "${SYSCONFDIR}" RENAME "openmw.cfg" COMPONENT "openmw")
+        INSTALL(FILES "${INSTALL_SOURCE}/openmw-enhanced.cfg.install" DESTINATION "${SYSCONFDIR}" RENAME "openmw-enhanced.cfg" COMPONENT "openmw")
         INSTALL(FILES "${INSTALL_SOURCE}/gamecontrollerdb.txt" DESTINATION "${SYSCONFDIR}" COMPONENT "openmw")
 
         IF(BUILD_OPENCS)

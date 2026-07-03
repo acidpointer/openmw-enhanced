@@ -9,6 +9,7 @@
 #include <osg/Vec3f>
 #include <osg/ref_ptr>
 
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -94,7 +95,7 @@ namespace MWRender
         bool mEnableInteriors;
         bool mIsInterior = false;
         bool mIsQuasiExterior = false;
-        unsigned int mLastFrameNumber = 0;
+        std::unordered_map<std::string, unsigned int> mLastFrameNumbers;
         OcclusionStorage* mStorage = nullptr;
 
         // Scratch buffers reused across frames

@@ -18,6 +18,7 @@
 #include <components/resource/scenemanager.hpp>
 #include <components/sceneutil/color.hpp>
 #include <components/sceneutil/depth.hpp>
+#include <components/sceneutil/enhancedsettings.hpp>
 #include <components/sceneutil/nodecallback.hpp>
 #include <components/settings/values.hpp>
 #include <components/shader/shadermanager.hpp>
@@ -32,6 +33,7 @@
 #include "../mwgui/postprocessorhud.hpp"
 
 #include "distortion.hpp"
+#include "enhancedperf.hpp"
 #include "pingpongcull.hpp"
 #include "renderbin.hpp"
 #include "renderingmanager.hpp"
@@ -41,6 +43,19 @@
 
 namespace
 {
+    constexpr std::string_view EnhancedScreenSpaceShadowsTechnique = "screen_space_shadows";
+
+    bool enhancedScreenSpaceShadowsEnabled()
+    {
+        return SceneUtil::Enhanced::settingBool("Shadows", "screen space shadows", false);
+    }
+
+    bool enhancedScreenSpaceShadowsRequirePostProcessing()
+    {
+        return enhancedScreenSpaceShadowsEnabled()
+            && SceneUtil::Enhanced::settingBool("Shadows", "screen space shadows force postprocess", true);
+    }
+
     struct ResizedCallback : osg::GraphicsContext::ResizedCallback
     {
         ResizedCallback(MWRender::PostProcessor* postProcessor)
@@ -121,11 +136,14 @@ namespace MWRender
         , mRendering(rendering)
         , mViewer(viewer)
         , mVFS(vfs)
-        , mUsePostProcessing(Settings::postProcessing().mEnabled)
+        , mUsePostProcessing(Settings::postProcessing().mEnabled || enhancedScreenSpaceShadowsRequirePostProcessing())
         , mSamples(Settings::video().mAntialiasing)
         , mPingPongCull(new PingPongCull(this))
         , mDistortionCallback(new DistortionCallback)
     {
+        Enhanced::logPerfConfigurationOnce();
+        Enhanced::installRenderBinProfiler();
+
         auto& shaderManager = mRendering.getResourceSystem()->getSceneManager()->getShaderManager();
 
         std::shared_ptr<LuminanceCalculator> luminanceCalculator = std::make_shared<LuminanceCalculator>(shaderManager);
@@ -268,7 +286,7 @@ namespace MWRender
 
     void PostProcessor::disable()
     {
-        mUsePostProcessing = false;
+        mUsePostProcessing = enhancedScreenSpaceShadowsRequirePostProcessing();
         mRendering.getSkyManager()->setSunglare(true);
     }
 
@@ -639,6 +657,7 @@ namespace MWRender
             {
                 int subTexUnit = texUnit;
                 Fx::DispatchNode::SubPass subPass;
+                subPass.mName = pass->getName();
 
                 pass->prepareStateSet(subPass.mStateSet, technique->getName());
 
@@ -714,6 +733,11 @@ namespace MWRender
 
         if (mUsePostProcessing)
             mRendering.getSkyManager()->setSunglare(sunglare);
+
+        if (mUsePostProcessing)
+            Log(Debug::Info) << "OpenMW Enhanced postprocess buffers: hdr=" << mHDR << " normals=" << mNormals
+                             << " lights=" << mPassLights
+                             << " transparent_postpass=" << Settings::postProcessing().mTransparentPostpass;
 
         if (dirtyAttachments)
             mCanvases[frameId]->setDirtyAttachments(attachmentsToDirty);
@@ -814,12 +838,31 @@ namespace MWRender
             mTechniques.push_back(technique);
         }
 
-        for (const std::string& techniqueName : Settings::postProcessing().mChain.get())
+        if (Settings::postProcessing().mEnabled)
         {
-            if (techniqueName.empty())
-                continue;
+            for (const std::string& techniqueName : Settings::postProcessing().mChain.get())
+            {
+                if (techniqueName.empty())
+                    continue;
 
-            mTechniques.push_back(loadTechnique(techniqueName));
+                mTechniques.push_back(loadTechnique(techniqueName));
+            }
+        }
+
+        if (enhancedScreenSpaceShadowsEnabled())
+        {
+            const auto hasScreenSpaceShadows = std::any_of(mTechniques.begin(), mTechniques.end(), [](const auto& technique) {
+                return technique->getName() == EnhancedScreenSpaceShadowsTechnique;
+            });
+
+            if (!hasScreenSpaceShadows)
+            {
+                auto technique = loadTechnique(EnhancedScreenSpaceShadowsTechnique);
+                mTechniques.insert(mTechniques.begin() + static_cast<std::ptrdiff_t>(mInternalTechniques.size()),
+                    std::move(technique));
+            }
+
+            Log(Debug::Info) << "OpenMW Enhanced screen-space shadows active as post-processing shader.";
         }
 
         dirtyTechniques();

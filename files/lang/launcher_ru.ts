@@ -620,6 +620,170 @@ Logs and settings changed through the launcher and in-game will be saved here.</
         <source>User config directory used because %1 contains the line config=%2.</source>
         <translation>Эта пользовательская директория конфигурации используется, потому что в %1 содержится строка config=%2.</translation>
     </message>
+    <message>
+        <source>Performance diagnostics</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>GPU profile</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Enable GPU timer queries for enhanced performance diagnostics.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Scene profile</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Record scene-level GPU timing. Requires GPU profile.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Camera profile</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Record per-camera GPU timing. Requires scene profile.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Render bin profile</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Record render-bin GPU timing. Intended for diagnostics, not normal play.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Drawable profile</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Record drawable-level GPU timing. This can be expensive.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>GPU profile CSV</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Optional path for GPU profile CSV output. Leave empty to disable CSV output.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Renderer diagnostics</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Disable actors</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Do not render actor scene categories. Diagnostic switch only.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Disable objects</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Do not render object/static scene categories. Diagnostic switch only.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Transparent depth mode</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Controls how transparent geometry participates in enhanced depth passes.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Legacy</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Alpha test only</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Off</source>
+        <translation type="unfinished">Отключено</translation>
+    </message>
+    <message>
+        <source>Profile only</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Water</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Surface</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Render water surface.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Reflection</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Render water reflections.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Refraction</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Render water refractions.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Occlusion cameras</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Select which cameras participate in enhanced water occlusion handling.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Main</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>All</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Shadows</source>
+        <translation type="unfinished">Тени</translation>
+    </message>
+    <message>
+        <source>Screen-space shadows</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Auto-enable the OpenMW Enhanced screen-space shadow post-processing shader.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Force post-processing</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Keep post-processing active when screen-space shadows are enabled, even if the normal OpenMW post-processing switch is off.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Enhanced</source>
+        <translation type="unfinished"></translation>
+    </message>
 </context>
 <context>
     <name>MainWindow</name>

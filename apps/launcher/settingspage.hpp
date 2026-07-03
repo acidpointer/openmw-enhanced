@@ -15,6 +15,15 @@ namespace Config
 
 namespace Launcher
 {
+    class SettingsPage;
+}
+
+class QCheckBox;
+class QComboBox;
+class QLineEdit;
+
+namespace Launcher
+{
     class SettingsPage : public QWidget, private Ui::SettingsPage
     {
         Q_OBJECT
@@ -41,6 +50,9 @@ namespace Launcher
         void slotOpenFile(QTreeWidgetItem* item);
 
     private:
+        void setupEnhancedTab();
+        void loadEnhancedSettings();
+        void saveEnhancedSettings() const;
         void populateLoadedConfigs();
 
         const Files::ConfigurationManager& mCfgMgr;
@@ -48,6 +60,25 @@ namespace Launcher
         Config::GameSettings& mGameSettings;
         QCompleter mCellNameCompleter;
         QStringListModel mCellNameCompleterModel;
+
+        QCheckBox* mEnhancedGpuProfile = nullptr;
+        QCheckBox* mEnhancedSceneProfile = nullptr;
+        QCheckBox* mEnhancedCameraProfile = nullptr;
+        QCheckBox* mEnhancedRenderbinProfile = nullptr;
+        QCheckBox* mEnhancedDrawableProfile = nullptr;
+        QLineEdit* mEnhancedGpuProfileCsv = nullptr;
+
+        QCheckBox* mEnhancedDisableActors = nullptr;
+        QCheckBox* mEnhancedDisableObjects = nullptr;
+        QComboBox* mEnhancedTransparentDepthMode = nullptr;
+
+        QCheckBox* mEnhancedWaterSurface = nullptr;
+        QCheckBox* mEnhancedWaterReflection = nullptr;
+        QCheckBox* mEnhancedWaterRefraction = nullptr;
+        QComboBox* mEnhancedWaterOcclusionCameras = nullptr;
+
+        QCheckBox* mEnhancedScreenSpaceShadows = nullptr;
+        QCheckBox* mEnhancedScreenSpaceShadowsForcePostprocess = nullptr;
 
         /**
          * Load the cells associated with the given content files for use in autocomplete
