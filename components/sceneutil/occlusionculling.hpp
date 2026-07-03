@@ -46,6 +46,7 @@ namespace SceneUtil
         bool isActive() const { return mMOC != nullptr; }
         bool isFrameActive() const { return mFrameActive; }
         void endFrame() { mFrameActive = false; }
+        const char* getImplementationName() const;
 
         unsigned int getNumOccluded() const { return mNumOccluded; }
         unsigned int getNumTested() const { return mNumTested; }
@@ -55,6 +56,12 @@ namespace SceneUtil
         double getRasterizeMs() const { return mRasterizeMs; }
         double getTestMs() const { return mTestMs; }
         double getMeshBuildMs() const { return mMeshBuildMs; }
+        double getPagedCallbackMs() const { return mPagedCallbackMs; }
+        double getCellCallbackMs() const { return mCellCallbackMs; }
+        double getSceneCallbackMs() const { return mSceneCallbackMs; }
+        double getChildTraverseMs() const { return mChildTraverseMs; }
+        double getStaticCandidateMs() const { return mStaticCandidateMs; }
+        double getSmallTestMs() const { return mSmallTestMs; }
         unsigned int getRasterizeCalls() const { return mRasterizeCalls; }
         unsigned int getTestCalls() const { return mTestCalls; }
         unsigned int getMeshBuilds() const { return mMeshBuilds; }
@@ -87,6 +94,12 @@ namespace SceneUtil
         void incrementStaticOccludersSkippedDistance() { ++mStaticOccludersSkippedDistance; }
         void incrementStaticOccludersSkippedScreen() { ++mStaticOccludersSkippedScreen; }
         void incrementSmallOccludeesSkippedScreen() { ++mSmallOccludeesSkippedScreen; }
+        void recordPagedCallback(double ms) { mPagedCallbackMs += ms; }
+        void recordCellCallback(double ms) { mCellCallbackMs += ms; }
+        void recordSceneCallback(double ms) { mSceneCallbackMs += ms; }
+        void recordChildTraverse(double ms) { mChildTraverseMs += ms; }
+        void recordStaticCandidate(double ms) { mStaticCandidateMs += ms; }
+        void recordSmallTest(double ms) { mSmallTestMs += ms; }
         void recordMeshBuild(double ms)
         {
             mMeshBuildMs += ms;
@@ -115,6 +128,12 @@ namespace SceneUtil
         double mRasterizeMs = 0.0;
         mutable double mTestMs = 0.0;
         double mMeshBuildMs = 0.0;
+        double mPagedCallbackMs = 0.0;
+        double mCellCallbackMs = 0.0;
+        double mSceneCallbackMs = 0.0;
+        double mChildTraverseMs = 0.0;
+        double mStaticCandidateMs = 0.0;
+        double mSmallTestMs = 0.0;
         unsigned int mRasterizeCalls = 0;
         mutable unsigned int mTestCalls = 0;
         unsigned int mMeshBuilds = 0;

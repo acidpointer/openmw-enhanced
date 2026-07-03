@@ -367,8 +367,8 @@ void Launcher::SettingsPage::setupEnhancedTab()
     mEnhancedOcclusionMinOccludeeScreenRatio = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
         tr("Min occludee screen"), tr("Minimum approximate screen coverage for objects to run an occlusion test."), 18,
         0.0, 1.0, 5);
-    mEnhancedOcclusionAdaptiveStatics = addCheckBox(*occlusionLayout, occlusionGroup, tr("Adaptive statics"),
-        tr("Temporarily back off static occluders when cost is high and benefit is low."), 19, 0);
+    mEnhancedOcclusionAdaptiveStatics = addCheckBox(*occlusionLayout, occlusionGroup, tr("Adaptive occlusion"),
+        tr("Temporarily use terrain-only occlusion when enhanced cell occlusion is expensive and low benefit."), 19, 0);
     mEnhancedOcclusionAdaptiveMinBenefitRatio = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
         tr("Adaptive min benefit"), tr("Minimum occluded/tested ratio required to keep static occluders active."), 20,
         0.0, 1.0, 3);

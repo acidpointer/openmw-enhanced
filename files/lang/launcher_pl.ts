@@ -975,14 +975,6 @@ Logi i ustawienia zmienione za pomocą programu uruchamiającego i w grze zostan
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <source>Adaptive statics</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Temporarily back off static occluders when cost is high and benefit is low.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>Adaptive min benefit</source>
         <translation type="unfinished"></translation>
     </message>
@@ -1004,6 +996,14 @@ Logi i ustawienia zmienione za pomocą programu uruchamiającego i w grze zostan
     </message>
     <message>
         <source>Allow static occluder rasterization in water reflection/refraction cameras.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Adaptive occlusion</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Temporarily use terrain-only occlusion when enhanced cell occlusion is expensive and low benefit.</source>
         <translation type="unfinished"></translation>
     </message>
 </context>

@@ -331,7 +331,7 @@ namespace SceneUtil::Enhanced
 
     double occlusionStaticRasterTimeBudgetMs()
     {
-        return std::clamp(settingDouble("Occlusion", "occlusion static raster time budget ms", 1.0), 0.0, 50.0);
+        return std::clamp(settingDouble("Occlusion", "occlusion static raster time budget ms", 0.5), 0.0, 50.0);
     }
 
     double occlusionMinOccluderScreenRatio()

@@ -63,6 +63,12 @@ namespace SceneUtil
         mRasterizeMs = 0.0;
         mTestMs = 0.0;
         mMeshBuildMs = 0.0;
+        mPagedCallbackMs = 0.0;
+        mCellCallbackMs = 0.0;
+        mSceneCallbackMs = 0.0;
+        mChildTraverseMs = 0.0;
+        mStaticCandidateMs = 0.0;
+        mSmallTestMs = 0.0;
         mRasterizeCalls = 0;
         mTestCalls = 0;
         mMeshBuilds = 0;
@@ -312,6 +318,26 @@ namespace SceneUtil
         if (!visible)
             ++mNumOccluded;
         return visible;
+    }
+
+    const char* OcclusionCuller::getImplementationName() const
+    {
+        if (!mMOC)
+            return "none";
+
+        switch (mMOC->GetImplementation())
+        {
+            case MaskedOcclusionCulling::SSE2:
+                return "SSE2";
+            case MaskedOcclusionCulling::SSE41:
+                return "SSE4.1";
+            case MaskedOcclusionCulling::AVX2:
+                return "AVX2";
+            case MaskedOcclusionCulling::AVX512:
+                return "AVX512";
+        }
+
+        return "unknown";
     }
 
     double OcclusionCuller::getStaticRasterMs() const

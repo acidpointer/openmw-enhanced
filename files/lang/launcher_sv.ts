@@ -974,14 +974,6 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <source>Adaptive statics</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Temporarily back off static occluders when cost is high and benefit is low.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>Adaptive min benefit</source>
         <translation type="unfinished"></translation>
     </message>
@@ -1003,6 +995,14 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>Allow static occluder rasterization in water reflection/refraction cameras.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Adaptive occlusion</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Temporarily use terrain-only occlusion when enhanced cell occlusion is expensive and low benefit.</source>
         <translation type="unfinished"></translation>
     </message>
 </context>
