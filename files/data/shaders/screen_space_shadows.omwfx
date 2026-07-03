@@ -54,7 +54,7 @@ uniform_float uCasterBias {
 
 uniform_float uSoftness {
     header = "Denoising";
-    default = 1.20;
+    default = 1.00;
     min = 0.0;
     max = 2.50;
     step = 0.05;
@@ -148,9 +148,16 @@ shared {
             return vec2(1.0, 0.0);
         return normalize(axis);
     }
+
+    vec2 shadowBufferTexel()
+    {
+        return omw.rcpResolution * 2.0;
+    }
 }
 
 render_target RT_ShadowRaw {
+    width_ratio = 0.5;
+    height_ratio = 0.5;
     internal_format = r16f;
     source_type = half_float;
     source_format = red;
@@ -160,6 +167,8 @@ render_target RT_ShadowRaw {
 }
 
 render_target RT_ShadowDirectional {
+    width_ratio = 0.5;
+    height_ratio = 0.5;
     internal_format = r16f;
     source_type = half_float;
     source_format = red;
@@ -169,6 +178,8 @@ render_target RT_ShadowDirectional {
 }
 
 render_target RT_ShadowBlur {
+    width_ratio = 0.5;
+    height_ratio = 0.5;
     internal_format = r16f;
     source_type = half_float;
     source_format = red;
@@ -180,7 +191,7 @@ render_target RT_ShadowBlur {
 fragment shadow_raw(target=RT_ShadowRaw) {
     omw_In vec2 omw_TexCoord;
 
-    const int SHADOW_STEPS = 128;
+    const int SHADOW_STEPS = 64;
 
 #if !OMW_NORMALS
     vec3 fallbackWorldNormal(vec2 uv)
@@ -309,7 +320,7 @@ fragment shadow_raw(target=RT_ShadowRaw) {
         }
 
         float averageHit = integrated / float(SHADOW_STEPS);
-        float loss = max(strongest * 0.50, averageHit * 7.5);
+        float loss = max(strongest * 0.54, averageHit * 8.5);
         return saturate(loss * 1.8) * lit;
     }
 
@@ -364,14 +375,14 @@ fragment shadow_directional(target=RT_ShadowDirectional, rt1=RT_ShadowRaw) {
 #endif
 
         vec2 axis = projectedLightAxis(omw_TexCoord, centerDepth);
-        vec2 texel = omw.rcpResolution;
+        vec2 texel = shadowBufferTexel();
         float softness = clamp(uSoftness, 0.0, 2.5);
-        float radius = mix(1.0, 4.5, softness / 2.5);
+        float radius = mix(0.9, 3.8, softness / 2.5);
         float center = omw_Texture2D(RT_ShadowRaw, omw_TexCoord).r;
-        float sum = center * 8.0;
-        float weight = 8.0;
+        float sum = center * 6.0;
+        float weight = 6.0;
 
-        for (int i = -8; i <= 8; ++i)
+        for (int i = -5; i <= 5; ++i)
         {
             if (i == 0)
                 continue;
@@ -396,7 +407,7 @@ fragment shadow_directional(target=RT_ShadowDirectional, rt1=RT_ShadowRaw) {
 #else
             float normalWeight = 1.0;
 #endif
-            float kernelWeight = exp2(-sampleIndex * sampleIndex / 38.0);
+            float kernelWeight = exp2(-sampleIndex * sampleIndex / 18.0);
             float sampleWeight = depthWeight * normalWeight * kernelWeight * softness;
             sum += omw_Texture2D(RT_ShadowRaw, sampleUv).r * sampleWeight;
             weight += sampleWeight;
@@ -424,14 +435,14 @@ fragment shadow_cross(target=RT_ShadowBlur, rt1=RT_ShadowDirectional) {
 
         vec2 axis = projectedLightAxis(omw_TexCoord, centerDepth);
         vec2 crossAxis = vec2(-axis.y, axis.x);
-        vec2 texel = omw.rcpResolution;
+        vec2 texel = shadowBufferTexel();
         float softness = clamp(uSoftness, 0.0, 2.5);
-        float radius = mix(0.7, 2.2, softness / 2.5);
+        float radius = mix(0.6, 1.9, softness / 2.5);
         float center = omw_Texture2D(RT_ShadowDirectional, omw_TexCoord).r;
-        float sum = center * 7.0;
-        float weight = 7.0;
+        float sum = center * 5.0;
+        float weight = 5.0;
 
-        for (int i = -4; i <= 4; ++i)
+        for (int i = -3; i <= 3; ++i)
         {
             if (i == 0)
                 continue;
@@ -456,7 +467,7 @@ fragment shadow_cross(target=RT_ShadowBlur, rt1=RT_ShadowDirectional) {
 #else
             float normalWeight = 1.0;
 #endif
-            float kernelWeight = exp2(-sampleIndex * sampleIndex / 9.0);
+            float kernelWeight = exp2(-sampleIndex * sampleIndex / 5.5);
             float sampleWeight = depthWeight * normalWeight * kernelWeight * softness;
             sum += omw_Texture2D(RT_ShadowDirectional, sampleUv).r * sampleWeight;
             weight += sampleWeight;
@@ -498,7 +509,7 @@ fragment final(rt1=RT_ShadowBlur) {
 
 technique {
     description = "Screen-space directional contact shadows for OpenMW Enhanced";
-    version = "0.3";
+    version = "0.4";
     author = "OpenMW Enhanced";
     passes = shadow_raw, shadow_directional, shadow_cross, final;
     pass_normals = true;
