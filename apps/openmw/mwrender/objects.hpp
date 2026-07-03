@@ -67,6 +67,7 @@ namespace MWRender
         Resource::ResourceSystem* mResourceSystem;
         SceneUtil::UnrefQueue& mUnrefQueue;
 
+        osg::ref_ptr<CellOcclusionCallback> makeCellOcclusionCallback() const;
         void insertBegin(const MWWorld::Ptr& ptr);
 
     public:

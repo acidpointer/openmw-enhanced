@@ -34,6 +34,7 @@
 #include <components/misc/resourcehelpers.hpp>
 #include <components/misc/rng.hpp>
 #include <components/resource/scenemanager.hpp>
+#include <components/sceneutil/enhancedsettings.hpp>
 #include <components/sceneutil/lightmanager.hpp>
 #include <components/sceneutil/morphgeometry.hpp>
 #include <components/sceneutil/optimizer.hpp>
@@ -76,6 +77,26 @@ namespace MWRender
                 default:
                     return false;
             }
+        }
+
+        OccluderMesh transformOccluderMesh(const OccluderMesh& localMesh, const osg::Matrixf& matrix,
+            const osg::Vec3f& worldOffset)
+        {
+            OccluderMesh worldMesh;
+            worldMesh.indices = localMesh.indices;
+            worldMesh.vertices.reserve(localMesh.vertices.size());
+            for (const auto& v : localMesh.vertices)
+            {
+                const osg::Vec3f transformed = (v * matrix) + worldOffset;
+                worldMesh.vertices.push_back(transformed);
+                worldMesh.aabb.expandBy(transformed);
+            }
+            if (localMesh.vertices.empty() && localMesh.aabb.valid())
+            {
+                for (unsigned int i = 0; i < 8; ++i)
+                    worldMesh.aabb.expandBy((localMesh.aabb.corner(i) * matrix) + worldOffset);
+            }
+            return worldMesh;
         }
 
         template <typename Record>
@@ -515,10 +536,12 @@ namespace MWRender
     {
     }
 
-    void ObjectPaging::setOcclusionCuller(SceneUtil::OcclusionCuller* culler, unsigned int maxTriangles)
+    void ObjectPaging::setOcclusionCuller(
+        SceneUtil::OcclusionCuller* culler, unsigned int maxTriangles, OcclusionCulling::OcclusionStorage* storage)
     {
         mOcclusionCuller = culler;
         mMaxTriangles = maxTriangles;
+        mOcclusionStorage = storage;
     }
 
     namespace
@@ -704,6 +727,7 @@ namespace MWRender
             static_cast<int>(std::ceil(maxBound.x())), static_cast<int>(std::ceil(maxBound.y())));
         struct InstanceList
         {
+            VFS::Path::Normalized mModel;
             std::vector<const PagedCellRef*> mInstances;
             AnalyzeVisitor::Result mAnalyzeResult;
             bool mNeedCompile = false;
@@ -815,6 +839,7 @@ namespace MWRender
             const auto emplaced = nodes.emplace(std::move(cnode), InstanceList());
             if (emplaced.second)
             {
+                emplaced.first->second.mModel = model;
                 analyzeVisitor.mDistances = LODRange{ smallestDistanceToChunk, higherDistanceToChunk } / ref.mScale;
                 const osg::Node* const nodePtr = emplaced.first->first.get();
                 // const-trickery required because there is no const version of NodeVisitor
@@ -835,7 +860,8 @@ namespace MWRender
         osgUtil::StateToCompile stateToCompile(0, nullptr);
         CopyOp copyop(activeGrid, copyMask);
 
-        const bool buildOccluders = Settings::camera().mOcclusionCulling && Settings::camera().mOcclusionCullingStatics;
+        const bool buildOccluders
+            = SceneUtil::Enhanced::occlusionCulling() && SceneUtil::Enhanced::occlusionCullingStatics();
         osg::ref_ptr<PagedOccluderData> pagedOccluderData;
         float occluderMinRadius = 0;
         int occluderMeshRes = 6;
@@ -844,10 +870,10 @@ namespace MWRender
         if (buildOccluders)
         {
             pagedOccluderData = new PagedOccluderData;
-            occluderMinRadius = Settings::camera().mOcclusionOccluderMinRadius;
-            occluderMeshRes = Settings::camera().mOcclusionOccluderMeshResolution;
-            occluderMaxMeshRes = Settings::camera().mOcclusionOccluderMaxMeshResolution;
-            occluderShrinkFactor = Settings::camera().mOcclusionOccluderShrinkFactor;
+            occluderMinRadius = SceneUtil::Enhanced::occlusionOccluderMinRadius();
+            occluderMeshRes = SceneUtil::Enhanced::occlusionOccluderMeshResolution();
+            occluderMaxMeshRes = SceneUtil::Enhanced::occlusionOccluderMaxMeshResolution();
+            occluderShrinkFactor = SceneUtil::Enhanced::occlusionOccluderShrinkFactor();
         }
 
         for (const auto& pair : nodes)
@@ -933,17 +959,35 @@ namespace MWRender
                             adaptiveRes = std::clamp(
                                 static_cast<int>(occluderMeshRes * scale), occluderMeshRes, occluderMaxMeshRes);
                         }
-                        auto occMesh = buildSimplifiedMesh(trans, adaptiveRes, occluderShrinkFactor);
-                        if (!occMesh.indices.empty())
+                        OccluderMesh localMesh;
+                        const std::string_view modelPath = pair.second.mModel.value();
+                        if (mOcclusionStorage && mOcclusionStorage->isOpen() && !modelPath.empty())
                         {
-                            // Offset from chunk-relative to world-space
-                            for (auto& v : occMesh.vertices)
-                                v += worldCenter;
-                            occMesh.aabb = osg::BoundingBox();
-                            for (const auto& v : occMesh.vertices)
-                                occMesh.aabb.expandBy(v);
-                            pagedOccluderData->mOccluderMeshes.push_back(std::move(occMesh));
+                            if (!mOcclusionStorage->get(
+                                    modelPath, adaptiveRes, OcclusionStorage::makeShrinkKey(occluderShrinkFactor),
+                                    localMesh))
+                            {
+                                mOcclusionStorage->recordMiss();
+                                localMesh = buildSimplifiedMesh(
+                                    const_cast<osg::Node*>(cnode), adaptiveRes, occluderShrinkFactor);
+                                mOcclusionStorage->put(
+                                    modelPath, adaptiveRes, OcclusionStorage::makeShrinkKey(occluderShrinkFactor),
+                                    localMesh);
+                            }
                         }
+                        else
+                            localMesh = buildSimplifiedMesh(const_cast<osg::Node*>(cnode), adaptiveRes,
+                                occluderShrinkFactor);
+
+                        osg::Matrixf occluderMatrix;
+                        occluderMatrix.makeIdentity();
+                        occluderMatrix.preMultTranslate(nodePos);
+                        occluderMatrix.preMultRotate(nodeAttitude);
+                        occluderMatrix.preMultScale(nodeScale);
+
+                        auto occMesh = transformOccluderMesh(localMesh, occluderMatrix, worldCenter);
+                        if (!occMesh.indices.empty())
+                            pagedOccluderData->mOccluderMeshes.push_back(std::move(occMesh));
                     }
                 }
 
@@ -1038,7 +1082,7 @@ namespace MWRender
             udc->addUserObject(pagedOccluderData);
             if (mOcclusionCuller)
             {
-                float maxDist = Settings::camera().mOcclusionOccluderMaxDistance;
+                float maxDist = SceneUtil::Enhanced::occlusionOccluderMaxDistance();
                 group->addCullCallback(new PagedOccluderCallback(mOcclusionCuller, maxDist, mMaxTriangles));
             }
         }

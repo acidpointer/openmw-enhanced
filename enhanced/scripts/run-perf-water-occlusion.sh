@@ -10,8 +10,8 @@ enhanced_perf_write_config <<EOF
 gpu profile = true
 gpu profile csv = ${OPENMW_ENHANCED_CSV_FILE}
 
-[Water]
-occlusion cameras = water
+[Occlusion]
+occlusion water cameras = water
 EOF
 
 enhanced_perf_exec "$@"

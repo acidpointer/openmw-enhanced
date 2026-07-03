@@ -17,8 +17,9 @@ namespace
     class CollectMeshVisitor : public osg::NodeVisitor
     {
     public:
-        CollectMeshVisitor()
+        explicit CollectMeshVisitor(osg::Transform* skippedRootTransform = nullptr)
             : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+            , mSkippedRootTransform(skippedRootTransform)
         {
         }
 
@@ -27,7 +28,8 @@ namespace
             osg::Matrix matrix;
             if (!mMatrixStack.empty())
                 matrix = mMatrixStack.back();
-            transform.computeLocalToWorldMatrix(matrix, this);
+            if (&transform != mSkippedRootTransform)
+                transform.computeLocalToWorldMatrix(matrix, this);
             mMatrixStack.push_back(matrix);
             traverse(transform);
             mMatrixStack.pop_back();
@@ -120,16 +122,20 @@ namespace
         }
 
         std::vector<osg::Matrix> mMatrixStack;
+        osg::Transform* mSkippedRootTransform = nullptr;
     };
 }
 
 namespace OcclusionCulling
 {
-    OccluderMesh buildSimplifiedMesh(osg::Node* node, int gridRes, float shrinkFactor)
+    namespace
+    {
+    OccluderMesh buildSimplifiedMeshImpl(
+        osg::Node* node, int gridRes, float shrinkFactor, osg::Transform* skippedRootTransform)
     {
         OccluderMesh mesh;
 
-        CollectMeshVisitor cmv;
+        CollectMeshVisitor cmv(skippedRootTransform);
         node->accept(cmv);
 
         if (cmv.mIndices.empty() || cmv.mVertices.size() < 3)
@@ -226,5 +232,16 @@ namespace OcclusionCulling
         }
 
         return mesh;
+    }
+    }
+
+    OccluderMesh buildSimplifiedMesh(osg::Node* node, int gridRes, float shrinkFactor)
+    {
+        return buildSimplifiedMeshImpl(node, gridRes, shrinkFactor, nullptr);
+    }
+
+    OccluderMesh buildSimplifiedMeshWithoutRootTransform(osg::Node* node, int gridRes, float shrinkFactor)
+    {
+        return buildSimplifiedMeshImpl(node, gridRes, shrinkFactor, node ? node->asTransform() : nullptr);
     }
 }

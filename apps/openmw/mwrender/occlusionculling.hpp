@@ -101,6 +101,8 @@ namespace MWRender
         // Scratch buffers reused across frames
         std::vector<osg::Vec3f> mPositions;
         std::vector<unsigned int> mIndices;
+        double mTerrainBuildMs = 0.0;
+        double mTerrainRasterMs = 0.0;
 
         // Debug overlay
         osg::ref_ptr<osg::Camera> mDebugCamera;

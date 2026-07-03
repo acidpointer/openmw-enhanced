@@ -12,6 +12,7 @@
 #include <osg/Geometry>
 #include <osg/Geode>
 #include <osg/Group>
+#include <osg/Timer>
 #include <osgUtil/CullVisitor>
 
 #include <components/debug/debuglog.hpp>
@@ -196,16 +197,24 @@ namespace MWRender
 
         // Begin occlusion frame with camera matrices
         mCuller->beginFrame(cam->getViewMatrix(), cam->getProjectionMatrix());
+        mTerrainBuildMs = 0.0;
+        mTerrainRasterMs = 0.0;
 
         // Build and rasterize terrain occluder mesh (skip for quasi-exteriors and interiors — no real terrain)
         if (mEnableTerrainOccluder && !mIsQuasiExterior && !mIsInterior && mTerrainOccluder->hasTerrainData())
         {
             mPositions.clear();
             mIndices.clear();
+            osg::Timer_t start = osg::Timer::instance()->tick();
             mTerrainOccluder->build(cv->getEyePoint(), mRadiusCells, mPositions, mIndices);
+            mTerrainBuildMs = osg::Timer::instance()->delta_m(start, osg::Timer::instance()->tick());
 
             if (!mPositions.empty())
+            {
+                start = osg::Timer::instance()->tick();
                 mCuller->rasterizeTerrainOccluder(mPositions, mIndices);
+                mTerrainRasterMs = osg::Timer::instance()->delta_m(start, osg::Timer::instance()->tick());
+            }
         }
 
         // Continue normal cull traversal — CellOcclusionCallbacks will test against the buffer
@@ -239,7 +248,15 @@ namespace MWRender
                                  << " total tris=" << (terrainTris + bldgTris)
                                  << " total verts=" << (terrainVerts + bldgVerts)
                                  << " tested=" << mCuller->getNumTested()
-                                 << " occluded=" << mCuller->getNumOccluded();
+                                 << " occluded=" << mCuller->getNumOccluded()
+                                 << " terrain_build_ms=" << mTerrainBuildMs
+                                 << " terrain_raster_ms=" << mTerrainRasterMs
+                                 << " raster_ms=" << mCuller->getRasterizeMs()
+                                 << " raster_calls=" << mCuller->getRasterizeCalls()
+                                 << " test_ms=" << mCuller->getTestMs()
+                                 << " test_calls=" << mCuller->getTestCalls()
+                                 << " mesh_build_ms=" << mCuller->getMeshBuildMs()
+                                 << " mesh_builds=" << mCuller->getMeshBuilds();
                 if (mStorage)
                 {
                     const auto s = mStorage->getAndResetStats();
@@ -355,28 +372,31 @@ namespace MWRender
         }
 
         OccluderMesh mesh;
+        OccluderMesh localMesh;
+        const auto nodePaths = node->getParentalNodePaths();
+        osg::Matrixf localToWorld;
+        localToWorld.makeIdentity();
+        if (!nodePaths.empty())
+            localToWorld = osg::computeLocalToWorld(nodePaths.front());
+
         const std::string_view modelPath = getModelPathForNode(node);
         if (mStorage && mStorage->isOpen() && !modelPath.empty())
         {
-            OccluderMesh localMesh;
             if (mStorage->get(modelPath, meshRes, OcclusionStorage::makeShrinkKey(mOccluderShrinkFactor), localMesh))
-            {
-                const auto nodePaths = node->getParentalNodePaths();
-                osg::Matrixf localToWorld;
-                if (!nodePaths.empty())
-                    localToWorld = osg::computeLocalToWorld(nodePaths.front());
                 mesh = transformLocalMesh(localMesh, localToWorld);
-            }
         }
 
         if (!mesh.aabb.valid() && mesh.vertices.empty() && mesh.indices.empty())
         {
             if (mStorage)
                 mStorage->recordMiss();
-            mesh = OcclusionCulling::buildSimplifiedMesh(node, meshRes, mOccluderShrinkFactor);
+            const osg::Timer_t start = osg::Timer::instance()->tick();
+            localMesh = OcclusionCulling::buildSimplifiedMeshWithoutRootTransform(node, meshRes, mOccluderShrinkFactor);
+            mCuller->recordMeshBuild(osg::Timer::instance()->delta_m(start, osg::Timer::instance()->tick()));
             // Persist to SQLite so future sessions skip buildSimplifiedMesh entirely.
             if (mStorage && mStorage->isOpen() && !modelPath.empty())
-                mStorage->put(modelPath, meshRes, OcclusionStorage::makeShrinkKey(mOccluderShrinkFactor), mesh);
+                mStorage->put(modelPath, meshRes, OcclusionStorage::makeShrinkKey(mOccluderShrinkFactor), localMesh);
+            mesh = transformLocalMesh(localMesh, localToWorld);
         }
 
         return mMeshCache.emplace(node, std::move(mesh)).first->second;

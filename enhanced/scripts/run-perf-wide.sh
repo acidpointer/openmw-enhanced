@@ -13,8 +13,8 @@ gpu profile csv = ${OPENMW_ENHANCED_CSV_FILE}
 [Renderer]
 transparent depth mode = alpha-test-only
 
-[Water]
-occlusion cameras = water
+[Occlusion]
+occlusion water cameras = water
 EOF
 
 enhanced_perf_exec "$@"

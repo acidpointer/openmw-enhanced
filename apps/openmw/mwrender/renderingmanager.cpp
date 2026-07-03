@@ -32,6 +32,7 @@
 
 #include <components/sceneutil/cullsafeboundsvisitor.hpp>
 #include <components/sceneutil/depth.hpp>
+#include <components/sceneutil/enhancedsettings.hpp>
 #include <components/sceneutil/lightmanager.hpp>
 #include <components/sceneutil/occlusionculling.hpp>
 #include <components/occlusionculling/occlusionstorage.hpp>
@@ -313,45 +314,46 @@ namespace MWRender
         mGroundcover = chunkMgr.mGroundcover.get();
         mObjectPaging = chunkMgr.mObjectPaging.get();
 
-        if (Settings::camera().mOcclusionCulling)
+        if (SceneUtil::Enhanced::occlusionCulling())
         {
             // Path is set later via setOcclusionCachePath() called from World::init().
             // Create a no-op placeholder so get() safely returns false until then.
             mOcclusionStorage = std::make_unique<OcclusionStorage>("");
 
-            const int bufW = Settings::camera().mOcclusionBufferWidth;
-            const int bufH = Settings::camera().mOcclusionBufferHeight;
+            const int bufW = SceneUtil::Enhanced::occlusionBufferWidth();
+            const int bufH = SceneUtil::Enhanced::occlusionBufferHeight();
             mOcclusionCuller = new SceneUtil::OcclusionCuller(bufW, bufH);
 
             const float cellWorldSize = Constants::CellSizeInUnits;
             mTerrainOccluder = std::make_unique<Terrain::TerrainOccluder>(mTerrainStorage.get(), cellWorldSize);
             mTerrainOccluder->setWorldspace(ESM::Cell::sDefaultWorldspaceId);
-            mTerrainOccluder->setLodLevel(Settings::camera().mOcclusionTerrainLod);
+            mTerrainOccluder->setLodLevel(SceneUtil::Enhanced::occlusionTerrainLod());
 
-            const int radius = Settings::camera().mOcclusionTerrainRadius;
-            const bool enableTerrain = Settings::camera().mOcclusionCullingTerrain;
-            const bool debugOverlay = Settings::camera().mOcclusionDebugOverlay;
-            const bool debugMessages = Settings::camera().mOcclusionDebugMessages;
-            const bool enableInteriors = Settings::camera().mOcclusionCullingInteriors;
-            const unsigned int maxTriangles = static_cast<unsigned int>(Settings::camera().mOcclusionMaxTriangles);
+            const int radius = SceneUtil::Enhanced::occlusionTerrainRadius();
+            const bool enableTerrain = SceneUtil::Enhanced::occlusionCullingTerrain();
+            const bool debugOverlay = SceneUtil::Enhanced::occlusionDebugOverlay();
+            const bool debugMessages = SceneUtil::Enhanced::occlusionDebugMessages();
+            const bool enableInteriors = SceneUtil::Enhanced::occlusionCullingInteriors();
+            const unsigned int maxTriangles
+                = static_cast<unsigned int>(SceneUtil::Enhanced::occlusionMaxTriangles());
             mSceneOcclusionCallback = new SceneOcclusionCallback(
                 mOcclusionCuller, mTerrainOccluder.get(), radius, enableTerrain, debugOverlay, debugMessages,
                 enableInteriors, mOcclusionStorage.get());
             sceneRoot->addCullCallback(mSceneOcclusionCallback);
 
-            const float occluderMinRadius = Settings::camera().mOcclusionOccluderMinRadius;
-            const float occluderMaxRadius = Settings::camera().mOcclusionOccluderMaxRadius;
-            const float occluderShrinkFactor = Settings::camera().mOcclusionOccluderShrinkFactor;
-            const int occluderMeshRes = Settings::camera().mOcclusionOccluderMeshResolution;
-            const int occluderMaxMeshRes = Settings::camera().mOcclusionOccluderMaxMeshResolution;
-            const float occluderInsideThreshold = Settings::camera().mOcclusionOccluderInsideThreshold;
-            const float occluderMaxDistance = Settings::camera().mOcclusionOccluderMaxDistance;
-            const bool enableStatics = Settings::camera().mOcclusionCullingStatics;
+            const float occluderMinRadius = SceneUtil::Enhanced::occlusionOccluderMinRadius();
+            const float occluderMaxRadius = SceneUtil::Enhanced::occlusionOccluderMaxRadius();
+            const float occluderShrinkFactor = SceneUtil::Enhanced::occlusionOccluderShrinkFactor();
+            const int occluderMeshRes = SceneUtil::Enhanced::occlusionOccluderMeshResolution();
+            const int occluderMaxMeshRes = SceneUtil::Enhanced::occlusionOccluderMaxMeshResolution();
+            const float occluderInsideThreshold = SceneUtil::Enhanced::occlusionOccluderInsideThreshold();
+            const float occluderMaxDistance = SceneUtil::Enhanced::occlusionOccluderMaxDistance();
+            const bool enableStatics = SceneUtil::Enhanced::occlusionCullingStatics();
             mObjects->setOcclusionCuller(mOcclusionCuller, occluderMinRadius, occluderMaxRadius, occluderShrinkFactor,
                 occluderMeshRes, occluderMaxMeshRes, occluderInsideThreshold, occluderMaxDistance, enableStatics,
                 maxTriangles, mOcclusionStorage.get());
             if (mObjectPaging)
-                mObjectPaging->setOcclusionCuller(mOcclusionCuller, maxTriangles);
+                mObjectPaging->setOcclusionCuller(mOcclusionCuller, maxTriangles, mOcclusionStorage.get());
         }
 
         mStateUpdater = new SceneUtil::StateUpdater();
@@ -1757,20 +1759,22 @@ namespace MWRender
         if (!mOcclusionCuller)
             return;
         mOcclusionStorage = std::make_unique<OcclusionStorage>(path);
-        const float occluderMinRadius = Settings::camera().mOcclusionOccluderMinRadius;
-        const float occluderMaxRadius = Settings::camera().mOcclusionOccluderMaxRadius;
-        const float occluderShrinkFactor = Settings::camera().mOcclusionOccluderShrinkFactor;
-        const int occluderMeshRes = Settings::camera().mOcclusionOccluderMeshResolution;
-        const int occluderMaxMeshRes = Settings::camera().mOcclusionOccluderMaxMeshResolution;
-        const float occluderInsideThreshold = Settings::camera().mOcclusionOccluderInsideThreshold;
-        const float occluderMaxDistance = Settings::camera().mOcclusionOccluderMaxDistance;
-        const bool enableStatics = Settings::camera().mOcclusionCullingStatics;
-        const unsigned int maxTriangles = static_cast<unsigned int>(Settings::camera().mOcclusionMaxTriangles);
+        const float occluderMinRadius = SceneUtil::Enhanced::occlusionOccluderMinRadius();
+        const float occluderMaxRadius = SceneUtil::Enhanced::occlusionOccluderMaxRadius();
+        const float occluderShrinkFactor = SceneUtil::Enhanced::occlusionOccluderShrinkFactor();
+        const int occluderMeshRes = SceneUtil::Enhanced::occlusionOccluderMeshResolution();
+        const int occluderMaxMeshRes = SceneUtil::Enhanced::occlusionOccluderMaxMeshResolution();
+        const float occluderInsideThreshold = SceneUtil::Enhanced::occlusionOccluderInsideThreshold();
+        const float occluderMaxDistance = SceneUtil::Enhanced::occlusionOccluderMaxDistance();
+        const bool enableStatics = SceneUtil::Enhanced::occlusionCullingStatics();
+        const unsigned int maxTriangles = static_cast<unsigned int>(SceneUtil::Enhanced::occlusionMaxTriangles());
         mObjects->setOcclusionCuller(mOcclusionCuller, occluderMinRadius, occluderMaxRadius, occluderShrinkFactor,
             occluderMeshRes, occluderMaxMeshRes, occluderInsideThreshold, occluderMaxDistance, enableStatics,
             maxTriangles, mOcclusionStorage.get());
         if (mSceneOcclusionCallback)
             mSceneOcclusionCallback->setStorage(mOcclusionStorage.get());
+        if (mObjectPaging)
+            mObjectPaging->setOcclusionCuller(mOcclusionCuller, maxTriangles, mOcclusionStorage.get());
     }
 
 }

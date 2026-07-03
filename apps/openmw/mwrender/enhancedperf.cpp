@@ -201,7 +201,7 @@ namespace MWRender::Enhanced
 
     bool waterOcclusionEnabled()
     {
-        const std::string value = ::SceneUtil::Enhanced::settingString("Water", "occlusion cameras", "main");
+        const std::string value = ::SceneUtil::Enhanced::occlusionWaterCameras();
         return value.find("water") != std::string::npos || value.find("all") != std::string::npos;
     }
 

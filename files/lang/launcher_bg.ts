@@ -745,10 +745,6 @@ Logs and settings changed through the launcher and in-game will be saved here.</
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <source>Occlusion cameras</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>Select which cameras participate in enhanced water occlusion handling.</source>
         <translation type="unfinished"></translation>
     </message>
@@ -782,6 +778,158 @@ Logs and settings changed through the launcher and in-game will be saved here.</
     </message>
     <message>
         <source>Enhanced</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Occlusion</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Enable</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Enable software occlusion culling using a CPU depth buffer.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Terrain</source>
+        <translation type="unfinished">Терен</translation>
+    </message>
+    <message>
+        <source>Rasterize terrain heightmaps into the occlusion depth buffer.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Statics</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Rasterize simplified static object meshes into the occlusion depth buffer.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Interiors</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Enable software occlusion culling in interior cells.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Debug overlay</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Show the software occlusion depth buffer as an overlay.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Debug messages</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Log periodic occlusion culling statistics.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Buffer width</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Software occlusion depth buffer width in pixels.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Buffer height</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Software occlusion depth buffer height in pixels.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Terrain LOD</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Terrain LOD level for the occlusion mesh.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Terrain radius</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Radius in cells around the camera to include terrain as an occluder.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Occluder min radius</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Minimum bounding sphere radius for static objects used as occluders.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Occluder max radius</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Maximum bounding sphere radius for unpaged occluder candidates.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Occluder shrink factor</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Shrink factor applied to occluder meshes toward their centroid.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Occluder mesh resolution</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Base grid resolution for vertex clustering of occluder meshes.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Occluder max mesh resolution</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Maximum grid resolution for adaptive scaling of large occluders.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Inside threshold</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Scale factor for the AABB used to detect if the camera is inside an occluder.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Occluder max distance</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Maximum distance for rasterizing a building as an occluder.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Max triangles</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Maximum number of building occluder triangles to rasterize per frame. Use 0 for unlimited.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Water cameras</source>
         <translation type="unfinished"></translation>
     </message>
 </context>

@@ -31,6 +31,10 @@ namespace OcclusionCulling
     /// @param shrinkFactor How much to shrink toward centroid (0..1, 1 = no shrink)
     /// @return Simplified mesh with AABB, or empty mesh if no geometry found
     OccluderMesh buildSimplifiedMesh(osg::Node* node, int gridRes, float shrinkFactor);
+
+    /// Build a reusable local-space mesh without applying the root node's
+    /// placement transform. Child transforms are still applied.
+    OccluderMesh buildSimplifiedMeshWithoutRootTransform(osg::Node* node, int gridRes, float shrinkFactor);
 }
 
 #endif

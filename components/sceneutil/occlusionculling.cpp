@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include <osg/Timer>
+
 namespace SceneUtil
 {
     OcclusionCuller::OcclusionCuller(unsigned int bufferWidth, unsigned int bufferHeight)
@@ -57,6 +59,12 @@ namespace SceneUtil
         mNumBuildingOccluders = 0;
         mNumBuildingTris = 0;
         mNumBuildingVerts = 0;
+        mRasterizeMs = 0.0;
+        mTestMs = 0.0;
+        mMeshBuildMs = 0.0;
+        mRasterizeCalls = 0;
+        mTestCalls = 0;
+        mMeshBuilds = 0;
         mFrameActive = true;
     }
 
@@ -73,6 +81,7 @@ namespace SceneUtil
         if (numTris <= 0)
             return;
 
+#ifndef NDEBUG
         const unsigned int vertexCount = static_cast<unsigned int>(worldPositions.size());
         for (const auto idx : indices)
             if (idx >= vertexCount)
@@ -84,10 +93,14 @@ namespace SceneUtil
             if (!std::isfinite(w) || std::abs(w) < 1e-6f)
                 return;
         }
+#endif
 
         MaskedOcclusionCulling::VertexLayout vtxLayout(12, 4, 8);
+        const osg::Timer_t start = osg::Timer::instance()->tick();
         mMOCTerrainOnly->RenderTriangles(reinterpret_cast<const float*>(worldPositions.data()), indices.data(), numTris,
             mVPFloat, MaskedOcclusionCulling::BACKFACE_NONE, MaskedOcclusionCulling::CLIP_PLANE_ALL, vtxLayout);
+        mRasterizeMs += osg::Timer::instance()->delta_m(start, osg::Timer::instance()->tick());
+        ++mRasterizeCalls;
     }
 
     void OcclusionCuller::rasterizeOccluder(
@@ -101,6 +114,7 @@ namespace SceneUtil
             return;
 
         // Validate all vertex indices are in range to prevent out-of-bounds reads.
+#ifndef NDEBUG
         const unsigned int vertexCount = static_cast<unsigned int>(worldPositions.size());
         for (const auto idx : indices)
         {
@@ -116,14 +130,18 @@ namespace SceneUtil
             if (!std::isfinite(w) || std::abs(w) < 1e-6f)
                 return;
         }
+#endif
 
         // Vec3f layout: stride=12 bytes, yOffset=4, zOffset=8
         // MOC treats (x,y,z) as (x,y,w_component) and transforms via the VP matrix
         MaskedOcclusionCulling::VertexLayout vtxLayout(12, 4, 8);
 
+        const osg::Timer_t start = osg::Timer::instance()->tick();
         mMOC->RenderTriangles(reinterpret_cast<const float*>(worldPositions.data()), indices.data(), numTris, mVPFloat,
             MaskedOcclusionCulling::BACKFACE_NONE, // terrain can be seen from below at edges
             MaskedOcclusionCulling::CLIP_PLANE_ALL, vtxLayout);
+        mRasterizeMs += osg::Timer::instance()->delta_m(start, osg::Timer::instance()->tick());
+        ++mRasterizeCalls;
     }
 
     void OcclusionCuller::rasterizeAABBOccluder(const osg::BoundingBox& worldBB)
@@ -261,7 +279,10 @@ namespace SceneUtil
         if (ndcMinX >= ndcMaxX || ndcMinY >= ndcMaxY)
             return true; // degenerate rect, assume visible
 
+        const osg::Timer_t start = osg::Timer::instance()->tick();
         auto result = moc->TestRect(ndcMinX, ndcMinY, ndcMaxX, ndcMaxY, wMin);
+        mTestMs += osg::Timer::instance()->delta_m(start, osg::Timer::instance()->tick());
+        ++mTestCalls;
         return result != MaskedOcclusionCulling::OCCLUDED;
     }
 

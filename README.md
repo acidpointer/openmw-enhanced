@@ -21,8 +21,8 @@ used only as an external reference/source and is not vendored as a Git
 repository.
 
 Occlusion culling is enabled by default in this fork. To verify it at runtime,
-set `occlusion debug messages = true` under `[Camera]` in
-`~/.config/openmw/settings.cfg`; the log should periodically print
+set `occlusion debug messages = true` under `[Occlusion]` in
+`~/.config/openmw/openmw-enhanced.cfg`; the log should periodically print
 `OcclusionCull` statistics while in exterior cells.
 
 Font Licenses:

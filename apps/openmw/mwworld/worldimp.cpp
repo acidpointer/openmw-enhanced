@@ -1,6 +1,7 @@
 #include "worldimp.hpp"
 
 #include <charconv>
+#include <filesystem>
 #include <vector>
 
 #include <osg/ComputeBoundsVisitor>
@@ -247,6 +248,9 @@ namespace MWWorld
 
         mRendering = std::make_unique<MWRender::RenderingManager>(
             viewer, rootNode, mResourceSystem, workQueue, *mNavigator, mGroundcoverStore, unrefQueue);
+        std::error_code ec;
+        std::filesystem::create_directories(mUserDataPath, ec);
+        mRendering->setOcclusionCachePath((mUserDataPath / "occlusion-meshes.sqlite").string());
         mProjectileManager = std::make_unique<ProjectileManager>(
             mRendering->getLightRoot()->asGroup(), mResourceSystem, mRendering.get(), mPhysics.get());
         mRendering->preloadCommonAssets();

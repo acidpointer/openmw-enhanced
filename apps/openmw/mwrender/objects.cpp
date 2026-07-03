@@ -40,6 +40,13 @@ namespace MWRender
         mCellSceneNodes.clear();
     }
 
+    osg::ref_ptr<CellOcclusionCallback> Objects::makeCellOcclusionCallback() const
+    {
+        return new CellOcclusionCallback(mOcclusionCuller, mOccluderMinRadius, mOccluderMaxRadius,
+            mOccluderShrinkFactor, mOccluderMeshResolution, mOccluderMaxMeshResolution, mOccluderInsideThreshold,
+            mOccluderMaxDistance, mEnableStaticOccluders, mMaxTriangles, mOcclusionStorage);
+    }
+
     void Objects::insertBegin(const MWWorld::Ptr& ptr)
     {
         assert(mObjects.find(ptr.mRef) == mObjects.end());
@@ -52,9 +59,7 @@ namespace MWRender
             cellnode = new osg::Group;
             cellnode->setName("Cell Root");
             if (mOcclusionCuller)
-                cellnode->addCullCallback(new CellOcclusionCallback(mOcclusionCuller, mOccluderMinRadius,
-                    mOccluderMaxRadius, mOccluderShrinkFactor, mOccluderMeshResolution, mOccluderMaxMeshResolution,
-                    mOccluderInsideThreshold, mOccluderMaxDistance, mEnableStaticOccluders, mMaxTriangles));
+                cellnode->addCullCallback(makeCellOcclusionCallback());
             mRootNode->addChild(cellnode);
             mCellSceneNodes[ptr.getCell()] = cellnode;
         }
@@ -219,9 +224,7 @@ namespace MWRender
         {
             cellnode = new osg::Group;
             if (mOcclusionCuller)
-                cellnode->addCullCallback(new CellOcclusionCallback(mOcclusionCuller, mOccluderMinRadius,
-                    mOccluderMaxRadius, mOccluderShrinkFactor, mOccluderMeshResolution, mOccluderMaxMeshResolution,
-                    mOccluderInsideThreshold, mOccluderMaxDistance, mEnableStaticOccluders, mMaxTriangles));
+                cellnode->addCullCallback(makeCellOcclusionCallback());
             mRootNode->addChild(cellnode);
             mCellSceneNodes[newCell] = cellnode;
         }

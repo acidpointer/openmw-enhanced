@@ -52,11 +52,22 @@ namespace SceneUtil
         unsigned int getNumBuildingOccluders() const { return mNumBuildingOccluders; }
         unsigned int getNumBuildingTris() const { return mNumBuildingTris; }
         unsigned int getNumBuildingVerts() const { return mNumBuildingVerts; }
+        double getRasterizeMs() const { return mRasterizeMs; }
+        double getTestMs() const { return mTestMs; }
+        double getMeshBuildMs() const { return mMeshBuildMs; }
+        unsigned int getRasterizeCalls() const { return mRasterizeCalls; }
+        unsigned int getTestCalls() const { return mTestCalls; }
+        unsigned int getMeshBuilds() const { return mMeshBuilds; }
         void incrementBuildingOccluders(unsigned int tris, unsigned int verts)
         {
             ++mNumBuildingOccluders;
             mNumBuildingTris += tris;
             mNumBuildingVerts += verts;
+        }
+        void recordMeshBuild(double ms)
+        {
+            mMeshBuildMs += ms;
+            ++mMeshBuilds;
         }
 
         /// Write the per-pixel depth buffer to depthData (width*height floats, bottom-to-top).
@@ -78,6 +89,12 @@ namespace SceneUtil
         unsigned int mNumBuildingOccluders = 0;
         unsigned int mNumBuildingTris = 0;
         unsigned int mNumBuildingVerts = 0;
+        double mRasterizeMs = 0.0;
+        mutable double mTestMs = 0.0;
+        double mMeshBuildMs = 0.0;
+        unsigned int mRasterizeCalls = 0;
+        mutable unsigned int mTestCalls = 0;
+        unsigned int mMeshBuilds = 0;
     };
 }
 

@@ -218,4 +218,112 @@ namespace SceneUtil::Enhanced
             return std::string(defaultValue);
         return *value;
     }
+
+    int occlusionSettingInt(std::string_view setting, int defaultValue, int min, int max)
+    {
+        return std::clamp(settingInt("Occlusion", setting, defaultValue), min, max);
+    }
+
+    float occlusionSettingFloat(std::string_view setting, double defaultValue, double min, double max)
+    {
+        return static_cast<float>(std::clamp(settingDouble("Occlusion", setting, defaultValue), min, max));
+    }
+
+    bool occlusionCulling()
+    {
+        return settingBool("Occlusion", "occlusion culling", true);
+    }
+
+    bool occlusionCullingTerrain()
+    {
+        return settingBool("Occlusion", "occlusion culling terrain", true);
+    }
+
+    bool occlusionCullingStatics()
+    {
+        return settingBool("Occlusion", "occlusion culling statics", true);
+    }
+
+    int occlusionBufferWidth()
+    {
+        return occlusionSettingInt("occlusion buffer width", 512, 64, 2048);
+    }
+
+    int occlusionBufferHeight()
+    {
+        return occlusionSettingInt("occlusion buffer height", 256, 64, 1024);
+    }
+
+    int occlusionTerrainLod()
+    {
+        return occlusionSettingInt("occlusion terrain lod", 3, 0, 6);
+    }
+
+    int occlusionTerrainRadius()
+    {
+        return occlusionSettingInt("occlusion terrain radius", 2, 1, 20);
+    }
+
+    float occlusionOccluderMinRadius()
+    {
+        return occlusionSettingFloat("occlusion occluder min radius", 300.0, 50.0, 50000.0);
+    }
+
+    float occlusionOccluderMaxRadius()
+    {
+        return occlusionSettingFloat("occlusion occluder max radius", 5000.0, 500.0, 100000.0);
+    }
+
+    float occlusionOccluderShrinkFactor()
+    {
+        return occlusionSettingFloat("occlusion occluder shrink factor", 1.0, 0.1, 2.0);
+    }
+
+    int occlusionOccluderMeshResolution()
+    {
+        return occlusionSettingInt("occlusion occluder mesh resolution", 7, 4, 32);
+    }
+
+    int occlusionOccluderMaxMeshResolution()
+    {
+        return occlusionSettingInt("occlusion occluder max mesh resolution", 24, 4, 64);
+    }
+
+    float occlusionOccluderInsideThreshold()
+    {
+        return occlusionSettingFloat("occlusion occluder inside threshold", 1.0, 0.1, 5.0);
+    }
+
+    float occlusionOccluderMaxDistance()
+    {
+        return occlusionSettingFloat("occlusion occluder max distance", 6144.0, 1000.0, 100000.0);
+    }
+
+    bool occlusionDebugOverlay()
+    {
+        return settingBool("Occlusion", "occlusion debug overlay", false);
+    }
+
+    bool occlusionDebugMessages()
+    {
+        return settingBool("Occlusion", "occlusion debug messages", false);
+    }
+
+    bool occlusionCullingInteriors()
+    {
+        return settingBool("Occlusion", "occlusion culling interiors", false);
+    }
+
+    int occlusionMaxTriangles()
+    {
+        return occlusionSettingInt("occlusion max triangles", 30000, 0, 500000);
+    }
+
+    std::string occlusionWaterCameras()
+    {
+        const std::string value = settingString("Occlusion", "occlusion water cameras");
+        if (!value.empty())
+            return value;
+        return settingString("Water", "occlusion cameras", "main");
+    }
 }

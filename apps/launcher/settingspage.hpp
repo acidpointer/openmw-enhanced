@@ -20,7 +20,9 @@ namespace Launcher
 
 class QCheckBox;
 class QComboBox;
+class QDoubleSpinBox;
 class QLineEdit;
+class QSpinBox;
 
 namespace Launcher
 {
@@ -72,10 +74,29 @@ namespace Launcher
         QCheckBox* mEnhancedDisableObjects = nullptr;
         QComboBox* mEnhancedTransparentDepthMode = nullptr;
 
+        QCheckBox* mEnhancedOcclusionCulling = nullptr;
+        QCheckBox* mEnhancedOcclusionCullingTerrain = nullptr;
+        QCheckBox* mEnhancedOcclusionCullingStatics = nullptr;
+        QCheckBox* mEnhancedOcclusionCullingInteriors = nullptr;
+        QCheckBox* mEnhancedOcclusionDebugOverlay = nullptr;
+        QCheckBox* mEnhancedOcclusionDebugMessages = nullptr;
+        QSpinBox* mEnhancedOcclusionBufferWidth = nullptr;
+        QSpinBox* mEnhancedOcclusionBufferHeight = nullptr;
+        QSpinBox* mEnhancedOcclusionTerrainLod = nullptr;
+        QSpinBox* mEnhancedOcclusionTerrainRadius = nullptr;
+        QDoubleSpinBox* mEnhancedOcclusionOccluderMinRadius = nullptr;
+        QDoubleSpinBox* mEnhancedOcclusionOccluderMaxRadius = nullptr;
+        QDoubleSpinBox* mEnhancedOcclusionOccluderShrinkFactor = nullptr;
+        QSpinBox* mEnhancedOcclusionOccluderMeshResolution = nullptr;
+        QSpinBox* mEnhancedOcclusionOccluderMaxMeshResolution = nullptr;
+        QDoubleSpinBox* mEnhancedOcclusionOccluderInsideThreshold = nullptr;
+        QDoubleSpinBox* mEnhancedOcclusionOccluderMaxDistance = nullptr;
+        QSpinBox* mEnhancedOcclusionMaxTriangles = nullptr;
+        QComboBox* mEnhancedOcclusionWaterCameras = nullptr;
+
         QCheckBox* mEnhancedWaterSurface = nullptr;
         QCheckBox* mEnhancedWaterReflection = nullptr;
         QCheckBox* mEnhancedWaterRefraction = nullptr;
-        QComboBox* mEnhancedWaterOcclusionCameras = nullptr;
 
         QCheckBox* mEnhancedScreenSpaceShadows = nullptr;
         QCheckBox* mEnhancedScreenSpaceShadowsForcePostprocess = nullptr;
