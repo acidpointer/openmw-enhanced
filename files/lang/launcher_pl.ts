@@ -623,127 +623,7 @@ Logi i ustawienia zmienione za pomocą programu uruchamiającego i w grze zostan
         <translation>Katalog konfiguracyjny użytkownika używany, ponieważ %1 zawiera wiersz config=%2.</translation>
     </message>
     <message>
-        <source>Performance diagnostics</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>GPU profile</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Enable GPU timer queries for enhanced performance diagnostics.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Scene profile</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Record scene-level GPU timing. Requires GPU profile.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Camera profile</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Record per-camera GPU timing. Requires scene profile.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Render bin profile</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Record render-bin GPU timing. Intended for diagnostics, not normal play.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Drawable profile</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Record drawable-level GPU timing. This can be expensive.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>GPU profile CSV</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Optional path for GPU profile CSV output. Leave empty to disable CSV output.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Renderer diagnostics</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Disable actors</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Do not render actor scene categories. Diagnostic switch only.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Disable objects</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Do not render object/static scene categories. Diagnostic switch only.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Transparent depth mode</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Controls how transparent geometry participates in enhanced depth passes.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Legacy</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Alpha test only</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Off</source>
-        <translation type="unfinished">Wyłączone</translation>
-    </message>
-    <message>
-        <source>Profile only</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>Water</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Surface</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Render water surface.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Reflection</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Render water reflections.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Refraction</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Render water refractions.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
@@ -768,14 +648,6 @@ Logi i ustawienia zmienione za pomocą programu uruchamiającego i w grze zostan
     </message>
     <message>
         <source>Auto-enable the OpenMW Enhanced screen-space shadow post-processing shader.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Force post-processing</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Keep post-processing active when screen-space shadows are enabled, even if the normal OpenMW post-processing switch is off.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
@@ -1239,10 +1111,6 @@ Logi i ustawienia zmienione za pomocą programu uruchamiającego i w grze zostan
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;This setting controls the behavior of factoring of Strength attribute into hand-to-hand damage: damage is multiplied by Strength value divided by 40.&lt;/p&gt;&lt;p&gt;Can apply to all actors or only to non-werewolf actors.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
         <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;To ustawienie kontroluje uwzględnianie atrybutu Siła przy obrażeniach w walce wręcz: obrażenia są mnożone przez wartość Siły podzieloną przez 40.&lt;/p&gt;&lt;p&gt;Może dotyczyć wszystkich postaci lub tylko postaci niebędących wilkołakami.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
-    </message>
-    <message>
-        <source>Off</source>
-        <translation>Wyłączone</translation>
     </message>
     <message>
         <source>Affect Werewolves</source>
@@ -1900,6 +1768,10 @@ Logi i ustawienia zmienione za pomocą programu uruchamiającego i w grze zostan
     <message>
         <source>Active Config Directories</source>
         <translation>Aktywne katalogi konfiguracyjne</translation>
+    </message>
+    <message>
+        <source>Off</source>
+        <translation type="unfinished"></translation>
     </message>
 </context>
 </TS>

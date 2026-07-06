@@ -21,7 +21,6 @@ namespace Launcher
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
-class QLineEdit;
 class QSpinBox;
 
 namespace Launcher
@@ -63,17 +62,6 @@ namespace Launcher
         QCompleter mCellNameCompleter;
         QStringListModel mCellNameCompleterModel;
 
-        QCheckBox* mEnhancedGpuProfile = nullptr;
-        QCheckBox* mEnhancedSceneProfile = nullptr;
-        QCheckBox* mEnhancedCameraProfile = nullptr;
-        QCheckBox* mEnhancedRenderbinProfile = nullptr;
-        QCheckBox* mEnhancedDrawableProfile = nullptr;
-        QLineEdit* mEnhancedGpuProfileCsv = nullptr;
-
-        QCheckBox* mEnhancedDisableActors = nullptr;
-        QCheckBox* mEnhancedDisableObjects = nullptr;
-        QComboBox* mEnhancedTransparentDepthMode = nullptr;
-
         QCheckBox* mEnhancedOcclusionCulling = nullptr;
         QCheckBox* mEnhancedOcclusionCullingTerrain = nullptr;
         QCheckBox* mEnhancedOcclusionCullingStatics = nullptr;
@@ -103,12 +91,7 @@ namespace Launcher
         QComboBox* mEnhancedOcclusionWaterCameras = nullptr;
         QCheckBox* mEnhancedOcclusionWaterStaticOccluders = nullptr;
 
-        QCheckBox* mEnhancedWaterSurface = nullptr;
-        QCheckBox* mEnhancedWaterReflection = nullptr;
-        QCheckBox* mEnhancedWaterRefraction = nullptr;
-
         QCheckBox* mEnhancedScreenSpaceShadows = nullptr;
-        QCheckBox* mEnhancedScreenSpaceShadowsForcePostprocess = nullptr;
 
         /**
          * Load the cells associated with the given content files for use in autocomplete

@@ -24,9 +24,10 @@ namespace SceneUtil
         /// Clears the depth buffer and stores the view-projection matrix.
         void beginFrame(const osg::Matrixd& viewMatrix, const osg::Matrixd& projectionMatrix);
 
-        /// Rasterize terrain into the full buffer AND the terrain-only snapshot.
+        /// Rasterize terrain into the terrain-only snapshot, and optionally the full buffer.
         /// Call this only for terrain, before any building occluders are added.
-        void rasterizeTerrainOccluder(const std::vector<osg::Vec3f>& worldPositions, const std::vector<unsigned int>& indices);
+        void rasterizeTerrainOccluder(const std::vector<osg::Vec3f>& worldPositions,
+            const std::vector<unsigned int>& indices, bool fullBuffer = true);
 
         /// Rasterize world-space triangles as occluders into the full buffer only (not the terrain snapshot).
         /// Use for buildings.
@@ -60,6 +61,7 @@ namespace SceneUtil
         double getCellCallbackMs() const { return mCellCallbackMs; }
         double getSceneCallbackMs() const { return mSceneCallbackMs; }
         double getChildTraverseMs() const { return mChildTraverseMs; }
+        double getOcclusionOverheadMs() const { return mOcclusionOverheadMs; }
         double getStaticCandidateMs() const { return mStaticCandidateMs; }
         double getSmallTestMs() const { return mSmallTestMs; }
         unsigned int getRasterizeCalls() const { return mRasterizeCalls; }
@@ -70,6 +72,10 @@ namespace SceneUtil
         unsigned int getStaticOccludersSkippedDistance() const { return mStaticOccludersSkippedDistance; }
         unsigned int getStaticOccludersSkippedScreen() const { return mStaticOccludersSkippedScreen; }
         unsigned int getSmallOccludeesSkippedScreen() const { return mSmallOccludeesSkippedScreen; }
+        unsigned int getTerrainCellTests() const { return mTerrainCellTests; }
+        unsigned int getTerrainCellOccluded() const { return mTerrainCellOccluded; }
+        unsigned int getTerrainPagedTests() const { return mTerrainPagedTests; }
+        unsigned int getTerrainPagedOccluded() const { return mTerrainPagedOccluded; }
         void setStaticOccludersEnabled(bool enabled) { mStaticOccludersEnabled = enabled; }
         bool staticOccludersEnabled() const { return mStaticOccludersEnabled; }
         void setSmallObjectTestingEnabled(bool enabled) { mSmallObjectTestingEnabled = enabled; }
@@ -98,8 +104,21 @@ namespace SceneUtil
         void recordCellCallback(double ms) { mCellCallbackMs += ms; }
         void recordSceneCallback(double ms) { mSceneCallbackMs += ms; }
         void recordChildTraverse(double ms) { mChildTraverseMs += ms; }
+        void recordOcclusionOverhead(double ms) { mOcclusionOverheadMs += ms; }
         void recordStaticCandidate(double ms) { mStaticCandidateMs += ms; }
         void recordSmallTest(double ms) { mSmallTestMs += ms; }
+        void recordTerrainCellTest(bool visible)
+        {
+            ++mTerrainCellTests;
+            if (!visible)
+                ++mTerrainCellOccluded;
+        }
+        void recordTerrainPagedTest(bool visible)
+        {
+            ++mTerrainPagedTests;
+            if (!visible)
+                ++mTerrainPagedOccluded;
+        }
         void recordMeshBuild(double ms)
         {
             mMeshBuildMs += ms;
@@ -132,6 +151,7 @@ namespace SceneUtil
         double mCellCallbackMs = 0.0;
         double mSceneCallbackMs = 0.0;
         double mChildTraverseMs = 0.0;
+        double mOcclusionOverheadMs = 0.0;
         double mStaticCandidateMs = 0.0;
         double mSmallTestMs = 0.0;
         unsigned int mRasterizeCalls = 0;
@@ -142,6 +162,10 @@ namespace SceneUtil
         unsigned int mStaticOccludersSkippedDistance = 0;
         unsigned int mStaticOccludersSkippedScreen = 0;
         unsigned int mSmallOccludeesSkippedScreen = 0;
+        unsigned int mTerrainCellTests = 0;
+        unsigned int mTerrainCellOccluded = 0;
+        unsigned int mTerrainPagedTests = 0;
+        unsigned int mTerrainPagedOccluded = 0;
         bool mStaticOccludersEnabled = true;
         bool mSmallObjectTestingEnabled = true;
         double mStaticRasterBudgetMs = 0.0;

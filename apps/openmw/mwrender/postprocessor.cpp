@@ -34,7 +34,6 @@
 
 #include "distortion.hpp"
 #include "camera.hpp"
-#include "enhancedperf.hpp"
 #include "pingpongcull.hpp"
 #include "renderbin.hpp"
 #include "renderingmanager.hpp"
@@ -49,12 +48,6 @@ namespace
     bool enhancedScreenSpaceShadowsEnabled()
     {
         return SceneUtil::Enhanced::settingBool("Shadows", "screen space shadows", false);
-    }
-
-    bool enhancedScreenSpaceShadowsRequirePostProcessing()
-    {
-        return enhancedScreenSpaceShadowsEnabled()
-            && SceneUtil::Enhanced::settingBool("Shadows", "screen space shadows force postprocess", true);
     }
 
     struct ResizedCallback : osg::GraphicsContext::ResizedCallback
@@ -137,14 +130,11 @@ namespace MWRender
         , mRendering(rendering)
         , mViewer(viewer)
         , mVFS(vfs)
-        , mUsePostProcessing(Settings::postProcessing().mEnabled || enhancedScreenSpaceShadowsRequirePostProcessing())
+        , mUsePostProcessing(Settings::postProcessing().mEnabled)
         , mSamples(Settings::video().mAntialiasing)
         , mPingPongCull(new PingPongCull(this))
         , mDistortionCallback(new DistortionCallback)
     {
-        Enhanced::logPerfConfigurationOnce();
-        Enhanced::installRenderBinProfiler();
-
         auto& shaderManager = mRendering.getResourceSystem()->getSceneManager()->getShaderManager();
 
         std::shared_ptr<LuminanceCalculator> luminanceCalculator = std::make_shared<LuminanceCalculator>(shaderManager);
@@ -287,7 +277,7 @@ namespace MWRender
 
     void PostProcessor::disable()
     {
-        mUsePostProcessing = enhancedScreenSpaceShadowsRequirePostProcessing();
+        mUsePostProcessing = false;
         mRendering.getSkyManager()->setSunglare(true);
     }
 
@@ -867,7 +857,7 @@ namespace MWRender
             }
         }
 
-        if (enhancedScreenSpaceShadowsEnabled())
+        if (Settings::postProcessing().mEnabled && enhancedScreenSpaceShadowsEnabled())
         {
             const auto hasScreenSpaceShadows = std::any_of(mTechniques.begin(), mTechniques.end(), [](const auto& technique) {
                 return technique->getName() == EnhancedScreenSpaceShadowsTechnique;

@@ -67,6 +67,7 @@ namespace SceneUtil
         mCellCallbackMs = 0.0;
         mSceneCallbackMs = 0.0;
         mChildTraverseMs = 0.0;
+        mOcclusionOverheadMs = 0.0;
         mStaticCandidateMs = 0.0;
         mSmallTestMs = 0.0;
         mRasterizeCalls = 0;
@@ -77,16 +78,22 @@ namespace SceneUtil
         mStaticOccludersSkippedDistance = 0;
         mStaticOccludersSkippedScreen = 0;
         mSmallOccludeesSkippedScreen = 0;
+        mTerrainCellTests = 0;
+        mTerrainCellOccluded = 0;
+        mTerrainPagedTests = 0;
+        mTerrainPagedOccluded = 0;
         mStaticRasterBudgetBaselineMs = 0.0;
         mFrameActive = true;
     }
 
     void OcclusionCuller::rasterizeTerrainOccluder(
-        const std::vector<osg::Vec3f>& worldPositions, const std::vector<unsigned int>& indices)
+        const std::vector<osg::Vec3f>& worldPositions, const std::vector<unsigned int>& indices, bool fullBuffer)
     {
-        // Rasterize terrain into both buffers so buildings can be tested against
-        // terrain-only depth (via testVisibleAABBTerrainOnly).
-        rasterizeOccluder(worldPositions, indices);
+        // Rasterize terrain into the full buffer only when the full buffer will be
+        // queried later this frame. Terrain-only cooldown paths only need the
+        // terrain snapshot used by cell/chunk tests.
+        if (fullBuffer)
+            rasterizeOccluder(worldPositions, indices);
         if (!mFrameActive || !mMOCTerrainOnly || worldPositions.empty() || indices.empty())
             return;
 

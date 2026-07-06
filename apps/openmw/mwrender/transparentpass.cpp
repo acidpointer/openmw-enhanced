@@ -1,6 +1,5 @@
 #include "transparentpass.hpp"
 
-#include <osg/AlphaFunc>
 #include <osg/BlendFunc>
 #include <osg/Material>
 #include <osg/Texture2D>
@@ -16,46 +15,12 @@
 #include <components/stereo/multiview.hpp>
 #include <components/stereo/stereomanager.hpp>
 
-#include "enhancedperf.hpp"
 #include "vismask.hpp"
 
 namespace MWRender
 {
     namespace
     {
-        const char* transparentDepthModeName(Enhanced::TransparentDepthMode mode)
-        {
-            switch (mode)
-            {
-                case Enhanced::TransparentDepthMode::Legacy:
-                    return "legacy";
-                case Enhanced::TransparentDepthMode::AlphaTestOnly:
-                    return "alpha-test-only";
-                case Enhanced::TransparentDepthMode::Off:
-                    return "off";
-                case Enhanced::TransparentDepthMode::ProfileOnly:
-                    return "profile-only";
-            }
-            return "legacy";
-        }
-
-        bool hasAlphaTestState(osgUtil::StateGraph* stateGraph)
-        {
-            for (osgUtil::StateGraph* current = stateGraph; current; current = current->_parent)
-            {
-                const osg::StateSet* stateSet = current->getStateSet();
-                if (!stateSet)
-                    continue;
-
-                const auto* alphaFunc
-                    = static_cast<const osg::AlphaFunc*>(stateSet->getAttribute(osg::StateAttribute::ALPHAFUNC));
-                if (alphaFunc && alphaFunc->getFunction() != osg::AlphaFunc::ALWAYS)
-                    return true;
-            }
-
-            return false;
-        }
-
         bool materialAllowsDepthPostPass(const osg::StateSet* stateSet)
         {
             if (!stateSet || !stateSet->getAttribute(osg::StateAttribute::MATERIAL))
@@ -65,7 +30,7 @@ namespace MWRender
             return mat->getDiffuse(osg::Material::FRONT).a() >= 0.5f;
         }
 
-        bool shouldReplayTransparentLeaf(osgUtil::RenderLeaf* leaf, Enhanced::TransparentDepthMode mode)
+        bool shouldReplayTransparentLeaf(osgUtil::RenderLeaf* leaf)
         {
             if (!leaf || !leaf->_drawable || !leaf->_parent)
                 return false;
@@ -77,10 +42,7 @@ namespace MWRender
             if (!materialAllowsDepthPostPass(stateSet))
                 return false;
 
-            if (mode == Enhanced::TransparentDepthMode::AlphaTestOnly)
-                return hasAlphaTestState(leaf->_parent);
-
-            return mode == Enhanced::TransparentDepthMode::Legacy || mode == Enhanced::TransparentDepthMode::ProfileOnly;
+            return true;
         }
 
         struct TransparentDepthStats
@@ -89,14 +51,13 @@ namespace MWRender
             unsigned int mReplay = 0;
         };
 
-        TransparentDepthStats collectTransparentDepthStats(
-            osgUtil::RenderBin* bin, Enhanced::TransparentDepthMode mode)
+        TransparentDepthStats collectTransparentDepthStats(osgUtil::RenderBin* bin)
         {
             TransparentDepthStats stats;
             for (osgUtil::RenderLeaf* leaf : bin->getRenderLeafList())
             {
                 ++stats.mLeaves;
-                if (shouldReplayTransparentLeaf(leaf, mode))
+                if (shouldReplayTransparentLeaf(leaf))
                     ++stats.mReplay;
             }
             return stats;
@@ -153,65 +114,47 @@ namespace MWRender
 
         if (!validFbo)
         {
-            {
-                Enhanced::GpuScope mainScope(state, "transparent:main-untracked");
-                bin->drawImplementation(renderInfo, previous);
-            }
-            Enhanced::flushGpuProfile(state);
+            bin->drawImplementation(renderInfo, previous);
             return;
         }
-
-        const Enhanced::TransparentDepthMode mode = Enhanced::transparentDepthMode();
 
         const osg::Texture* tex
             = opaqueFbo->getAttachment(osg::FrameBufferObject::BufferComponent::PACKED_DEPTH_STENCIL_BUFFER)
                   .getTexture();
 
+        if (Stereo::getMultiview())
         {
-            Enhanced::GpuScope blitScope(state, "transparent:depth-blit");
-            if (Stereo::getMultiview())
+            if (!mMultiviewResolve[frameId])
             {
-                if (!mMultiviewResolve[frameId])
-                {
-                    mMultiviewResolve[frameId] = std::make_unique<Stereo::MultiviewFramebufferResolve>(
-                        msaaFbo ? msaaFbo : fbo, opaqueFbo, GL_DEPTH_BUFFER_BIT);
-                }
-                else
-                {
-                    mMultiviewResolve[frameId]->setResolveFbo(opaqueFbo);
-                    mMultiviewResolve[frameId]->setMsaaFbo(msaaFbo ? msaaFbo : fbo);
-                }
-                mMultiviewResolve[frameId]->resolveImplementation(state);
+                mMultiviewResolve[frameId] = std::make_unique<Stereo::MultiviewFramebufferResolve>(
+                    msaaFbo ? msaaFbo : fbo, opaqueFbo, GL_DEPTH_BUFFER_BIT);
             }
             else
             {
-                opaqueFbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
-                ext->glBlitFramebuffer(0, 0, tex->getTextureWidth(), tex->getTextureHeight(), 0, 0,
-                    tex->getTextureWidth(), tex->getTextureHeight(), GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+                mMultiviewResolve[frameId]->setResolveFbo(opaqueFbo);
+                mMultiviewResolve[frameId]->setMsaaFbo(msaaFbo ? msaaFbo : fbo);
             }
+            mMultiviewResolve[frameId]->resolveImplementation(state);
+        }
+        else
+        {
+            opaqueFbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
+            ext->glBlitFramebuffer(0, 0, tex->getTextureWidth(), tex->getTextureHeight(), 0, 0,
+                tex->getTextureWidth(), tex->getTextureHeight(), GL_DEPTH_BUFFER_BIT, GL_NEAREST);
         }
 
         msaaFbo ? msaaFbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER)
                 : fbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
 
         // draws scene into primary attachments
-        {
-            Enhanced::GpuScope mainScope(state, "transparent:main");
-            bin->drawImplementation(renderInfo, previous);
-        }
+        bin->drawImplementation(renderInfo, previous);
 
-        if (!mPostPass || mode == Enhanced::TransparentDepthMode::Off)
-        {
-            Enhanced::flushGpuProfile(state);
+        if (!mPostPass)
             return;
-        }
 
-        const TransparentDepthStats stats = collectTransparentDepthStats(bin, mode);
-        if (mode == Enhanced::TransparentDepthMode::ProfileOnly || stats.mReplay == 0)
-        {
-            Enhanced::flushGpuProfile(state);
+        const TransparentDepthStats stats = collectTransparentDepthStats(bin);
+        if (stats.mReplay == 0)
             return;
-        }
 
         opaqueFbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
 
@@ -223,26 +166,20 @@ namespace MWRender
         unsigned int insertStateSetPosition = state.getStateSetStackSize() - numToPop;
 
         state.insertStateSet(insertStateSetPosition, mStateSet);
+        for (auto rit = bin->getRenderLeafList().begin(); rit != bin->getRenderLeafList().end(); rit++)
         {
-            Enhanced::GpuScope postScope(state, "transparent:depth-postpass",
-                std::string("mode=") + transparentDepthModeName(mode) + ";leaves=" + std::to_string(stats.mLeaves)
-                    + ";replay=" + std::to_string(stats.mReplay));
-            for (auto rit = bin->getRenderLeafList().begin(); rit != bin->getRenderLeafList().end(); rit++)
-            {
-                osgUtil::RenderLeaf* rl = *rit;
+            osgUtil::RenderLeaf* rl = *rit;
 
-                if (!shouldReplayTransparentLeaf(rl, mode))
-                    continue;
+            if (!shouldReplayTransparentLeaf(rl))
+                continue;
 
-                rl->render(renderInfo, previous);
-                previous = rl;
-            }
+            rl->render(renderInfo, previous);
+            previous = rl;
         }
         state.removeStateSet(insertStateSetPosition);
 
         msaaFbo ? msaaFbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER)
                 : fbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
         state.checkGLErrors("after TransparentDepthBinCallback::drawImplementation");
-        Enhanced::flushGpuProfile(state);
     }
 }

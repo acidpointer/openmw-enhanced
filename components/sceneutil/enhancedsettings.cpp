@@ -366,9 +366,6 @@ namespace SceneUtil::Enhanced
 
     std::string occlusionWaterCameras()
     {
-        const std::string value = settingString("Occlusion", "occlusion water cameras");
-        if (!value.empty())
-            return value;
-        return settingString("Water", "occlusion cameras", "main");
+        return settingString("Occlusion", "occlusion water cameras", "main");
     }
 }

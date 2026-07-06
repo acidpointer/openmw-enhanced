@@ -16,7 +16,6 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QLabel>
-#include <QLineEdit>
 #include <QMenu>
 #include <QScrollArea>
 #include <QString>
@@ -272,43 +271,6 @@ void Launcher::SettingsPage::setupEnhancedTab()
     scrollArea->setWidget(enhancedContent);
     outerLayout->addWidget(scrollArea);
 
-    auto* performanceGroup = new QGroupBox(tr("Performance diagnostics"), enhancedContent);
-    auto* performanceLayout = new QGridLayout(performanceGroup);
-    mEnhancedGpuProfile = addCheckBox(*performanceLayout, performanceGroup, tr("GPU profile"),
-        tr("Enable GPU timer queries for enhanced performance diagnostics."), 0, 0);
-    mEnhancedSceneProfile = addCheckBox(*performanceLayout, performanceGroup, tr("Scene profile"),
-        tr("Record scene-level GPU timing. Requires GPU profile."), 0, 1);
-    mEnhancedCameraProfile = addCheckBox(*performanceLayout, performanceGroup, tr("Camera profile"),
-        tr("Record per-camera GPU timing. Requires scene profile."), 1, 0);
-    mEnhancedRenderbinProfile = addCheckBox(*performanceLayout, performanceGroup, tr("Render bin profile"),
-        tr("Record render-bin GPU timing. Intended for diagnostics, not normal play."), 1, 1);
-    mEnhancedDrawableProfile = addCheckBox(*performanceLayout, performanceGroup, tr("Drawable profile"),
-        tr("Record drawable-level GPU timing. This can be expensive."), 2, 0);
-
-    auto* csvLabel = new QLabel(tr("GPU profile CSV"), performanceGroup);
-    csvLabel->setToolTip(tr("Optional path for GPU profile CSV output. Leave empty to disable CSV output."));
-    mEnhancedGpuProfileCsv = new QLineEdit(performanceGroup);
-    mEnhancedGpuProfileCsv->setToolTip(csvLabel->toolTip());
-    performanceLayout->addWidget(csvLabel, 3, 0);
-    performanceLayout->addWidget(mEnhancedGpuProfileCsv, 3, 1);
-    pageLayout->addWidget(performanceGroup);
-
-    auto* rendererGroup = new QGroupBox(tr("Renderer diagnostics"), enhancedContent);
-    auto* rendererLayout = new QGridLayout(rendererGroup);
-    mEnhancedDisableActors = addCheckBox(*rendererLayout, rendererGroup, tr("Disable actors"),
-        tr("Do not render actor scene categories. Diagnostic switch only."), 0, 0);
-    mEnhancedDisableObjects = addCheckBox(*rendererLayout, rendererGroup, tr("Disable objects"),
-        tr("Do not render object/static scene categories. Diagnostic switch only."), 0, 1);
-
-    QLabel* transparentDepthModeLabel = nullptr;
-    addComboRow(*rendererLayout, transparentDepthModeLabel, mEnhancedTransparentDepthMode, rendererGroup,
-        tr("Transparent depth mode"), tr("Controls how transparent geometry participates in enhanced depth passes."), 1);
-    mEnhancedTransparentDepthMode->addItem(tr("Legacy"), QStringLiteral("legacy"));
-    mEnhancedTransparentDepthMode->addItem(tr("Alpha test only"), QStringLiteral("alpha-test-only"));
-    mEnhancedTransparentDepthMode->addItem(tr("Off"), QStringLiteral("off"));
-    mEnhancedTransparentDepthMode->addItem(tr("Profile only"), QStringLiteral("profile-only"));
-    pageLayout->addWidget(rendererGroup);
-
     auto* occlusionGroup = new QGroupBox(tr("Occlusion"), enhancedContent);
     auto* occlusionLayout = new QGridLayout(occlusionGroup);
     mEnhancedOcclusionCulling = addCheckBox(*occlusionLayout, occlusionGroup, tr("Enable"),
@@ -386,24 +348,10 @@ void Launcher::SettingsPage::setupEnhancedTab()
         23, 0);
     pageLayout->addWidget(occlusionGroup);
 
-    auto* waterGroup = new QGroupBox(tr("Water"), enhancedContent);
-    auto* waterLayout = new QGridLayout(waterGroup);
-    mEnhancedWaterSurface = addCheckBox(*waterLayout, waterGroup, tr("Surface"), tr("Render water surface."), 0, 0);
-    mEnhancedWaterReflection
-        = addCheckBox(*waterLayout, waterGroup, tr("Reflection"), tr("Render water reflections."), 0, 1);
-    mEnhancedWaterRefraction
-        = addCheckBox(*waterLayout, waterGroup, tr("Refraction"), tr("Render water refractions."), 1, 0);
-    pageLayout->addWidget(waterGroup);
-
     auto* shadowsGroup = new QGroupBox(tr("Shadows"), enhancedContent);
     auto* enhancedShadowsLayout = new QGridLayout(shadowsGroup);
     mEnhancedScreenSpaceShadows = addCheckBox(*enhancedShadowsLayout, shadowsGroup, tr("Screen-space shadows"),
         tr("Auto-enable the OpenMW Enhanced screen-space shadow post-processing shader."), 0, 0);
-    mEnhancedScreenSpaceShadowsForcePostprocess
-        = addCheckBox(*enhancedShadowsLayout, shadowsGroup, tr("Force post-processing"),
-            tr("Keep post-processing active when screen-space shadows are enabled, even if the normal OpenMW "
-               "post-processing switch is off."),
-            0, 1);
     pageLayout->addWidget(shadowsGroup);
 
     pageLayout->addStretch(1);
@@ -413,26 +361,6 @@ void Launcher::SettingsPage::setupEnhancedTab()
 void Launcher::SettingsPage::loadEnhancedSettings()
 {
     SceneUtil::Enhanced::loadSettings(mCfgMgr);
-
-    mEnhancedGpuProfile->setCheckState(
-        SceneUtil::Enhanced::settingBool("Performance", "gpu profile") ? Qt::Checked : Qt::Unchecked);
-    mEnhancedSceneProfile->setCheckState(
-        SceneUtil::Enhanced::settingBool("Performance", "scene profile") ? Qt::Checked : Qt::Unchecked);
-    mEnhancedCameraProfile->setCheckState(
-        SceneUtil::Enhanced::settingBool("Performance", "camera profile") ? Qt::Checked : Qt::Unchecked);
-    mEnhancedRenderbinProfile->setCheckState(
-        SceneUtil::Enhanced::settingBool("Performance", "renderbin profile") ? Qt::Checked : Qt::Unchecked);
-    mEnhancedDrawableProfile->setCheckState(
-        SceneUtil::Enhanced::settingBool("Performance", "drawable profile") ? Qt::Checked : Qt::Unchecked);
-    mEnhancedGpuProfileCsv->setText(
-        QString::fromStdString(SceneUtil::Enhanced::settingString("Performance", "gpu profile csv")));
-
-    mEnhancedDisableActors->setCheckState(
-        SceneUtil::Enhanced::settingBool("Renderer", "disable actors") ? Qt::Checked : Qt::Unchecked);
-    mEnhancedDisableObjects->setCheckState(
-        SceneUtil::Enhanced::settingBool("Renderer", "disable objects") ? Qt::Checked : Qt::Unchecked);
-    setComboValue(*mEnhancedTransparentDepthMode,
-        QString::fromStdString(SceneUtil::Enhanced::settingString("Renderer", "transparent depth mode", "legacy")));
 
     mEnhancedOcclusionCulling->setCheckState(
         SceneUtil::Enhanced::occlusionCulling() ? Qt::Checked : Qt::Unchecked);
@@ -478,17 +406,8 @@ void Launcher::SettingsPage::loadEnhancedSettings()
     mEnhancedOcclusionWaterStaticOccluders->setCheckState(
         SceneUtil::Enhanced::occlusionWaterStaticOccluders() ? Qt::Checked : Qt::Unchecked);
 
-    mEnhancedWaterSurface->setCheckState(
-        SceneUtil::Enhanced::settingBool("Water", "surface", true) ? Qt::Checked : Qt::Unchecked);
-    mEnhancedWaterReflection->setCheckState(
-        SceneUtil::Enhanced::settingBool("Water", "reflection", true) ? Qt::Checked : Qt::Unchecked);
-    mEnhancedWaterRefraction->setCheckState(
-        SceneUtil::Enhanced::settingBool("Water", "refraction", true) ? Qt::Checked : Qt::Unchecked);
     mEnhancedScreenSpaceShadows->setCheckState(
         SceneUtil::Enhanced::settingBool("Shadows", "screen space shadows", true) ? Qt::Checked : Qt::Unchecked);
-    mEnhancedScreenSpaceShadowsForcePostprocess->setCheckState(
-        SceneUtil::Enhanced::settingBool("Shadows", "screen space shadows force postprocess", true) ? Qt::Checked
-                                                                                                    : Qt::Unchecked);
 }
 
 void Launcher::SettingsPage::saveEnhancedSettings() const
@@ -506,19 +425,6 @@ void Launcher::SettingsPage::saveEnhancedSettings() const
     QTextStream stream(&file);
     stream << "# OpenMW Enhanced fork-specific settings.\n";
     stream << "# This file is managed by the launcher Enhanced settings tab.\n\n";
-
-    stream << "[Performance]\n";
-    stream << "gpu profile = " << boolText(*mEnhancedGpuProfile) << '\n';
-    stream << "scene profile = " << boolText(*mEnhancedSceneProfile) << '\n';
-    stream << "camera profile = " << boolText(*mEnhancedCameraProfile) << '\n';
-    stream << "renderbin profile = " << boolText(*mEnhancedRenderbinProfile) << '\n';
-    stream << "drawable profile = " << boolText(*mEnhancedDrawableProfile) << '\n';
-    stream << "gpu profile csv = " << mEnhancedGpuProfileCsv->text() << "\n\n";
-
-    stream << "[Renderer]\n";
-    stream << "disable actors = " << boolText(*mEnhancedDisableActors) << '\n';
-    stream << "disable objects = " << boolText(*mEnhancedDisableObjects) << '\n';
-    stream << "transparent depth mode = " << comboValue(*mEnhancedTransparentDepthMode) << "\n\n";
 
     stream << "[Occlusion]\n";
     stream << "occlusion culling = " << boolText(*mEnhancedOcclusionCulling) << '\n';
@@ -557,15 +463,8 @@ void Launcher::SettingsPage::saveEnhancedSettings() const
     stream << "occlusion water cameras = " << comboValue(*mEnhancedOcclusionWaterCameras) << '\n';
     stream << "occlusion water static occluders = " << boolText(*mEnhancedOcclusionWaterStaticOccluders) << "\n\n";
 
-    stream << "[Water]\n";
-    stream << "surface = " << boolText(*mEnhancedWaterSurface) << '\n';
-    stream << "reflection = " << boolText(*mEnhancedWaterReflection) << '\n';
-    stream << "refraction = " << boolText(*mEnhancedWaterRefraction) << "\n\n";
-
     stream << "[Shadows]\n";
     stream << "screen space shadows = " << boolText(*mEnhancedScreenSpaceShadows) << '\n';
-    stream << "screen space shadows force postprocess = " << boolText(*mEnhancedScreenSpaceShadowsForcePostprocess)
-           << '\n';
 
     file.close();
     SceneUtil::Enhanced::loadSettings(mCfgMgr);

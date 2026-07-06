@@ -618,127 +618,11 @@ Les logs et préférences modifiées y seront sauvegardés.</translation>
         <translation>Le dossier de configuration utilisateur est utilisé car %1 contient la ligne config=%2.</translation>
     </message>
     <message>
-        <source>Performance diagnostics</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>GPU profile</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Enable GPU timer queries for enhanced performance diagnostics.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Scene profile</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Record scene-level GPU timing. Requires GPU profile.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Camera profile</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Record per-camera GPU timing. Requires scene profile.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Render bin profile</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Record render-bin GPU timing. Intended for diagnostics, not normal play.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Drawable profile</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Record drawable-level GPU timing. This can be expensive.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>GPU profile CSV</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Optional path for GPU profile CSV output. Leave empty to disable CSV output.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Renderer diagnostics</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Disable actors</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Do not render actor scene categories. Diagnostic switch only.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Disable objects</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Do not render object/static scene categories. Diagnostic switch only.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Transparent depth mode</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Controls how transparent geometry participates in enhanced depth passes.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Legacy</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Alpha test only</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>Off</source>
-        <translation type="unfinished">Inactif</translation>
-    </message>
-    <message>
-        <source>Profile only</source>
-        <translation type="unfinished"></translation>
+        <translation type="obsolete">Inactif</translation>
     </message>
     <message>
         <source>Water</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Surface</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Render water surface.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Reflection</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Render water reflections.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Refraction</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Render water refractions.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
@@ -763,14 +647,6 @@ Les logs et préférences modifiées y seront sauvegardés.</translation>
     </message>
     <message>
         <source>Auto-enable the OpenMW Enhanced screen-space shadow post-processing shader.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Force post-processing</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Keep post-processing active when screen-space shadows are enabled, even if the normal OpenMW post-processing switch is off.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
@@ -1116,10 +992,6 @@ Les logs et préférences modifiées y seront sauvegardés.</translation>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;If this setting is true, the player is allowed to loot actors (e.g. summoned creatures) during death animation, if they are not in combat. In this case we have to increment death counter and run disposed actor&apos;s script instantly.&lt;/p&gt;&lt;p&gt;If this setting is false, player has to wait until end of death animation in all cases. Makes using of summoned creatures exploit (looting summoned Dremoras and Golden Saints for expensive weapons) a lot harder. Conflicts with mannequin mods, which use SkipAnim to prevent end of death animation.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
         <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Lorsque cette option est activée, le joueur est autorisé à piller créatures et PNJ (p. ex. les créatures invoquées) durant leur animation de mort, si elles ne sont pas en combat. Dans ce cas, le jeu incrémente le conteur de mort et lance son script instantanément.&lt;/p&gt;&lt;p&gt;Lorsque cette option est désactivée, le joueur doit attendre la fin de l&apos;animation de mort. Dans ce cas, l&apos;utilisation de l&apos;exploit des créatures invoquées (piller des créatures invoquées telles que des Drémoras ou des Saintes Dorées afin d&apos;obtenir des armes de grandes valeurs) est rendu beaucoup plus ardu. Cette option entre en confit avec les Mods de mannequin. En effet, ceux-ci utilisent SkipAnim afin d&apos;éviter la fin de l&apos;animation de mort.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
-    </message>
-    <message>
-        <source>Off</source>
-        <translation>Inactif</translation>
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;How many threads will be spawned to compute physics update in the background. A value of 0 means that the update will be performed in the main thread.&lt;/p&gt;&lt;p&gt;A value greater than 1 requires the Bullet library be compiled with multithreading support.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
@@ -1881,6 +1753,10 @@ Les logs et préférences modifiées y seront sauvegardés.</translation>
     <message>
         <source>Active Config Directories</source>
         <translation>Dossier de configuration actif</translation>
+    </message>
+    <message>
+        <source>Off</source>
+        <translation type="unfinished">Inactif</translation>
     </message>
 </context>
 </TS>

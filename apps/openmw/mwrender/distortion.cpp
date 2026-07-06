@@ -2,7 +2,6 @@
 
 #include <osg/FrameBufferObject>
 
-#include "enhancedperf.hpp"
 #include "postprocessor.hpp"
 
 namespace MWRender
@@ -29,14 +28,10 @@ namespace MWRender
         state->haveAppliedAttribute(osg::StateAttribute::Type::COLORMASK);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        {
-            Enhanced::GpuScope distortionScope(*state, "distortion");
-            bin->drawImplementation(renderInfo, previous);
-        }
+        bin->drawImplementation(renderInfo, previous);
 
         tex = mOriginalFBO[frameId]->getAttachment(osg::FrameBufferObject::BufferComponent::COLOR_BUFFER0).getTexture();
         glViewport(0, 0, tex->getTextureWidth(), tex->getTextureHeight());
         mOriginalFBO[frameId]->apply(*state);
-        Enhanced::flushGpuProfile(*state);
     }
 }

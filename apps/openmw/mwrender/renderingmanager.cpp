@@ -74,7 +74,6 @@
 #include "actorspaths.hpp"
 #include "camera.hpp"
 #include "effectmanager.hpp"
-#include "enhancedperf.hpp"
 #include "fogmanager.hpp"
 #include "groundcover.hpp"
 #include "navmesh.hpp"
@@ -229,6 +228,15 @@ namespace MWRender
         mSceneRoot = sceneRoot;
         sceneRoot->setNodeMask(Mask_Scene);
         sceneRoot->setName("Scene Root");
+        osg::ref_ptr<osg::Group> sceneContentRoot = sceneRoot.get();
+        if (SceneUtil::Enhanced::occlusionCulling())
+        {
+            mOcclusionWorldRoot = new osg::Group;
+            mOcclusionWorldRoot->setName("Occlusion World Root");
+            mOcclusionWorldRoot->setNodeMask(Mask_Scene);
+            mOcclusionWorldRoot->setCullingActive(false);
+            sceneContentRoot = mOcclusionWorldRoot;
+        }
 
         int shadowCastingTraversalMask = Mask_Scene;
         if (Settings::shadows().mActorShadows)
@@ -284,7 +292,7 @@ namespace MWRender
         mRecastMesh = std::make_unique<RecastMesh>(mRootNode, Settings::navigator().mEnableRecastMeshRender);
         mPathgrid = std::make_unique<Pathgrid>(mRootNode);
 
-        mObjects = std::make_unique<Objects>(mResourceSystem, sceneRoot, unrefQueue);
+        mObjects = std::make_unique<Objects>(mResourceSystem, sceneContentRoot, unrefQueue);
 
         if (getenv("OPENMW_DONT_PRECOMPILE") == nullptr)
         {
@@ -339,7 +347,20 @@ namespace MWRender
             mSceneOcclusionCallback = new SceneOcclusionCallback(
                 mOcclusionCuller, mTerrainOccluder.get(), radius, enableTerrain, debugOverlay, debugMessages,
                 enableInteriors, mOcclusionStorage.get());
-            sceneRoot->addCullCallback(mSceneOcclusionCallback);
+            osg::ref_ptr<osg::Group> occlusionBeginMarker = new osg::Group;
+            occlusionBeginMarker->setName("Occlusion Begin Marker");
+            occlusionBeginMarker->setNodeMask(Mask_Scene);
+            occlusionBeginMarker->setCullingActive(false);
+            occlusionBeginMarker->addCullCallback(mSceneOcclusionCallback);
+            osg::ref_ptr<osg::Group> occlusionEndMarker = new osg::Group;
+            occlusionEndMarker->setName("Occlusion End Marker");
+            occlusionEndMarker->setNodeMask(Mask_Scene);
+            occlusionEndMarker->setCullingActive(false);
+            occlusionEndMarker->addCullCallback(mSceneOcclusionCallback->createEndCallback());
+            sceneRoot->insertChild(0, occlusionBeginMarker);
+            if (mOcclusionWorldRoot && !mOcclusionWorldRoot->getNumParents())
+                sceneRoot->insertChild(1, mOcclusionWorldRoot);
+            sceneRoot->insertChild(2, occlusionEndMarker);
 
             const float occluderMinRadius = SceneUtil::Enhanced::occlusionOccluderMinRadius();
             const float occluderMaxRadius = SceneUtil::Enhanced::occlusionOccluderMaxRadius();
@@ -433,10 +454,7 @@ namespace MWRender
         mViewer->getCamera()->setComputeNearFarMode(osg::Camera::DO_NOT_COMPUTE_NEAR_FAR);
         mViewer->getCamera()->setCullingMode(cullingMode);
         mViewer->getCamera()->setName(Constants::SceneCamera);
-        Enhanced::installCameraProfiler(*mViewer->getCamera(), "camera:scene", "camera=" + Constants::SceneCamera);
-
         auto mask = ~(Mask_UpdateVisitor | Mask_SimpleWater);
-        mask = Enhanced::applySceneCategoryMask(mask, Mask_Actor | Mask_Player | Mask_FirstPerson, Mask_Object);
         MWBase::Environment::get().getWindowManager()->setCullMask(mask);
         NifOsg::Loader::setHiddenNodeMask(Mask_UpdateVisitor);
         NifOsg::Loader::setIntersectionDisabledNodeMask(Mask_Effect);
@@ -723,7 +741,6 @@ namespace MWRender
                 mask |= sToggleWorldMask;
             else
                 mask &= ~sToggleWorldMask;
-            mask = Enhanced::applySceneCategoryMask(mask, Mask_Actor | Mask_Player | Mask_FirstPerson, Mask_Object);
             mWater->showWorld(enabled);
             wm->setCullMask(mask);
             return enabled;
@@ -1339,6 +1356,7 @@ namespace MWRender
         const bool groundcover = Settings::groundcover().mEnabled && worldspace == ESM::Cell::sDefaultWorldspaceId;
         const bool distantTerrain = Settings::terrain().mDistantTerrain;
         const double expiryDelay = Settings::cells().mCacheExpiryDelay;
+        osg::Group* terrainParent = mOcclusionWorldRoot ? mOcclusionWorldRoot.get() : mSceneRoot.get();
         if (distantTerrain || groundcover)
         {
             const int compMapResolution = Settings::terrain().mCompositeMapResolution;
@@ -1347,7 +1365,7 @@ namespace MWRender
             const int vertexLodMod = Settings::terrain().mVertexLodMod;
             const float maxCompGeometrySize = Settings::terrain().mMaxCompositeGeometrySize;
             const bool debugChunks = Settings::terrain().mDebugChunks;
-            auto quadTreeWorld = std::make_unique<Terrain::QuadTreeWorld>(mSceneRoot, mRootNode, mResourceSystem,
+            auto quadTreeWorld = std::make_unique<Terrain::QuadTreeWorld>(terrainParent, mRootNode, mResourceSystem,
                 mTerrainStorage.get(), Mask_Terrain, Mask_PreCompile, Mask_Debug, compMapResolution, compMapLevel,
                 lodFactor, vertexLodMod, maxCompGeometrySize, debugChunks, worldspace, expiryDelay);
             if (Settings::terrain().mObjectPaging)
@@ -1370,7 +1388,7 @@ namespace MWRender
             newChunkMgr.mTerrain = std::move(quadTreeWorld);
         }
         else
-            newChunkMgr.mTerrain = std::make_unique<Terrain::TerrainGrid>(mSceneRoot, mRootNode, mResourceSystem,
+            newChunkMgr.mTerrain = std::make_unique<Terrain::TerrainGrid>(terrainParent, mRootNode, mResourceSystem,
                 mTerrainStorage.get(), Mask_Terrain, worldspace, expiryDelay, Mask_PreCompile, Mask_Debug);
 
         newChunkMgr.mTerrain->setTargetFrameRate(Settings::cells().mTargetFramerate);

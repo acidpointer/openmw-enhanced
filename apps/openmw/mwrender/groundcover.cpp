@@ -23,7 +23,6 @@
 
 #include "../mwworld/groundcoverstore.hpp"
 
-#include "enhancedperf.hpp"
 #include "vismask.hpp"
 
 namespace MWRender
@@ -461,8 +460,6 @@ namespace MWRender
             group->addCullCallback(new SceneUtil::LightListCallback);
         mSceneManager->recreateShaders(group, "groundcover", mProgramTemplate);
         mSceneManager->shareState(group);
-        Enhanced::installDrawableProfiler(
-            *group, "groundcover:drawable", std::string("chunk=") + std::to_string(center.x()) + "," + std::to_string(center.y()));
         group->getBound();
         return group;
     }

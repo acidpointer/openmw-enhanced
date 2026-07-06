@@ -39,7 +39,6 @@
 
 #include "../mwworld/cellstore.hpp"
 
-#include "enhancedperf.hpp"
 #include "renderbin.hpp"
 #include "ripples.hpp"
 #include "ripplesimulation.hpp"
@@ -251,7 +250,6 @@ namespace MWRender
             camera->setReferenceFrame(osg::Camera::RELATIVE_RF);
             camera->setSmallFeatureCullingPixelSize(Settings::water().mSmallFeatureCullingPixelSize);
             camera->setName("RefractionCamera");
-            Enhanced::installCameraProfiler(*camera, "camera:water-refraction", "camera=RefractionCamera");
             camera->addCullCallback(new InheritViewPointCallback);
             camera->setComputeNearFarMode(osg::CullSettings::DO_NOT_COMPUTE_NEAR_FAR);
 
@@ -274,8 +272,7 @@ namespace MWRender
         void apply(osg::Camera* camera) override
         {
             camera->setViewMatrix(mViewMatrix);
-            unsigned int mask = Enhanced::applySceneCategoryMask(mNodeMask, Mask_Actor | Mask_Player, Mask_Object);
-            camera->setCullMask(Enhanced::waterRefractionEnabled() ? mask : 0);
+            camera->setCullMask(mNodeMask);
         }
 
         void setScene(osg::Node* scene)
@@ -332,7 +329,6 @@ namespace MWRender
             camera->setReferenceFrame(osg::Camera::RELATIVE_RF);
             camera->setSmallFeatureCullingPixelSize(Settings::water().mSmallFeatureCullingPixelSize);
             camera->setName("ReflectionCamera");
-            Enhanced::installCameraProfiler(*camera, "camera:water-reflection", "camera=ReflectionCamera");
             camera->addCullCallback(new InheritViewPointCallback);
 
             // Inform the shader that we're in a reflection
@@ -352,8 +348,7 @@ namespace MWRender
         void apply(osg::Camera* camera) override
         {
             camera->setViewMatrix(mViewMatrix);
-            unsigned int mask = Enhanced::applySceneCategoryMask(mNodeMask, Mask_Actor | Mask_Player, Mask_Object);
-            camera->setCullMask(Enhanced::waterReflectionEnabled() ? mask : 0);
+            camera->setCullMask(mNodeMask);
         }
 
         void setInterior(bool isInterior)
@@ -815,7 +810,7 @@ namespace MWRender
     {
         bool visible = mEnabled && mToggled;
         mWaterNode->setNodeMask(visible ? ~0u : 0u);
-        mWaterGeom->setNodeMask(visible && Enhanced::waterSurfaceEnabled() ? Mask_Water : 0u);
+        mWaterGeom->setNodeMask(visible ? Mask_Water : 0u);
         if (mRefraction)
             mRefraction->setNodeMask(visible ? Mask_RenderToTexture : 0u);
         if (mReflection)

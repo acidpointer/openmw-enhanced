@@ -74,9 +74,9 @@ namespace Terrain
 
 namespace MWRender
 {
-    /// Installed on the SceneRoot (LightManager). At the start of each main-camera cull,
-    /// rasterizes terrain into the software occlusion buffer. Skips RTT cameras (shadows,
-    /// water reflection) and interiors (no terrain data).
+    /// Installed on lightweight marker nodes under the SceneRoot. The begin marker
+    /// rasterizes terrain into the software occlusion buffer before regular scene
+    /// children are traversed, and the end marker finalizes/logs after them.
     class SceneOcclusionCallback
         : public SceneUtil::NodeCallback<SceneOcclusionCallback, osg::Node*, osgUtil::CullVisitor*>
     {
@@ -86,6 +86,8 @@ namespace MWRender
             OcclusionStorage* storage = nullptr);
 
         void operator()(osg::Node* node, osgUtil::CullVisitor* cv);
+        osg::ref_ptr<osg::Callback> createEndCallback();
+        void endFrame(osg::Node* node, osgUtil::CullVisitor* cv);
 
         /// Update cell type flags. Call when the player transitions cells.
         void setCellType(bool isInterior, bool isQuasiExterior);
@@ -113,6 +115,15 @@ namespace MWRender
         std::vector<unsigned int> mIndices;
         double mTerrainBuildMs = 0.0;
         double mTerrainRasterMs = 0.0;
+        double mBeginCallbackMs = 0.0;
+        double mEndCallbackMs = 0.0;
+        unsigned int mActiveFrameNumber = 0;
+        std::string mActiveCameraName;
+        bool mFrameStarted = false;
+        bool mActiveSceneCamera = false;
+        bool mActiveAdaptiveStatics = false;
+        bool mActiveStaticOccludersEnabled = false;
+        bool mActiveSmallObjectTestingEnabled = false;
         int mAdaptiveStaticCooldownFrames = 0;
         int mAdaptiveStaticBadFrames = 0;
 
