@@ -26,6 +26,7 @@
 #include <osgDB/SharedStateManager>
 
 #include <components/debug/debuglog.hpp>
+#include <components/debug/frametrace.hpp>
 
 #include <components/nifosg/controller.hpp>
 #include <components/nifosg/nifloader.hpp>
@@ -1194,9 +1195,15 @@ namespace Resource
     {
         NodeResourceManager<std::string>::updateCache(referenceTime);
 
-        mSharedStateMutex.lock();
-        mSharedStateManager->prune();
-        mSharedStateMutex.unlock();
+        {
+            std::unique_lock lock(mSharedStateMutex, std::defer_lock);
+            {
+                Debug::Trace::Scope waiting("Wait for shared-state prune lock");
+                lock.lock();
+            }
+            Debug::Trace::Scope held("Prune shared states");
+            mSharedStateManager->prune();
+        }
 
         if (mIncrementalCompileOperation)
         {
@@ -1236,7 +1243,11 @@ namespace Resource
         }
 
         {
-            std::lock_guard<std::mutex> lock(mSharedStateMutex);
+            std::unique_lock lock(mSharedStateMutex, std::defer_lock);
+            {
+                Debug::Trace::Scope trace("Statistics wait for shared states", frameNumber);
+                lock.lock();
+            }
             stats->setAttribute(
                 frameNumber, "Texture", static_cast<double>(mSharedStateManager->getNumSharedTextures()));
             stats->setAttribute(

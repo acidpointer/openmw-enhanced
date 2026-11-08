@@ -20,6 +20,55 @@ namespace Resource
         // is cacheable, and expiry still knows whether anything outside holds it.
         using SharedCache = GenericObjectCache<int, std::shared_ptr<const std::string>>;
 
+        TEST(ResourceGenericObjectCacheTest, largeSweepVisitsEveryBatch)
+        {
+            SharedCache cache;
+            for (int i = 0; i < 513; ++i)
+                cache.addEntryToObjectCache(i, std::make_shared<const std::string>("expired"), 1);
+            const auto held = std::make_shared<const std::string>("held");
+            cache.addEntryToObjectCache(1024, held, 1);
+            cache.update(100, 1);
+            EXPECT_EQ(cache.getStats().mSize, 1);
+            EXPECT_EQ(cache.getStats().mExpired, 513);
+            EXPECT_EQ(cache.getRefFromObjectCache(1024), held);
+        }
+
+        TEST(ResourceGenericObjectCacheTest, batchedSweepDoesNotRequireAssignableKeys)
+        {
+            struct Key
+            {
+                const int value;
+                bool operator<(const Key& other) const { return value < other.value; }
+            };
+            GenericObjectCache<Key, std::shared_ptr<const std::string>> cache;
+            for (int i = 0; i < 130; ++i)
+                cache.addEntryToObjectCache(Key{ i }, std::make_shared<const std::string>("expired"), 1);
+            cache.update(100, 1);
+            EXPECT_EQ(cache.getStats().mSize, 0);
+        }
+
+        TEST(ResourceGenericObjectCacheTest, retiredValuesCanReenterCacheWithoutDeadlocking)
+        {
+            SharedCache cache;
+            int destroyed = 0;
+            auto add = [&] {
+                cache.addEntryToObjectCache(
+                    1, std::shared_ptr<const std::string>(new std::string("value"), [&](const std::string* value) {
+                        cache.getStats();
+                        ++destroyed;
+                        delete value;
+                    }));
+            };
+            add();
+            add();
+            EXPECT_EQ(destroyed, 1);
+            cache.removeFromObjectCache(1);
+            EXPECT_EQ(destroyed, 2);
+            add();
+            cache.clear();
+            EXPECT_EQ(destroyed, 3);
+        }
+
         TEST(ResourceGenericObjectCacheTest, getRefFromObjectCacheShouldReturnNullptrByDefault)
         {
             ObjectCache cache;

@@ -34,6 +34,7 @@ namespace Config
         constexpr char sMainWindowHeightKey[] = "MainWindow/height";
         constexpr char sMainWindowPosXKey[] = "MainWindow/posx";
         constexpr char sMainWindowPosYKey[] = "MainWindow/posy";
+        constexpr char sRenderGpuKey[] = "rendering-gpu";
         constexpr char sWatchdogKey[] = "watchdog";
 
         QString makeNewContentListName()
@@ -121,6 +122,11 @@ namespace Config
             if (key == sLanguageKey)
             {
                 settings.mLanguage = value;
+                return true;
+            }
+            if (key == sRenderGpuKey)
+            {
+                settings.mRenderGpu = value;
                 return true;
             }
             if (key == sWatchdogKey)
@@ -213,6 +219,8 @@ namespace Config
         {
             writeSectionHeader(sSettingsSection, stream);
             writeKeyValue(sLanguageKey, value.mLanguage, stream);
+            if (!value.mRenderGpu.isEmpty())
+                writeKeyValue(sRenderGpuKey, value.mRenderGpu, stream);
             writeKeyValue(sWatchdogKey, true, stream); // Set so future reads check for dropped launcher settings
             writeUnknownKeys(value.mUnknown, stream);
         }

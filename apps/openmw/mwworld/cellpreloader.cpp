@@ -6,6 +6,7 @@
 #include <span>
 
 #include <components/debug/debuglog.hpp>
+#include <components/debug/frametrace.hpp>
 #include <components/esm3/loadcell.hpp>
 #include <components/loadinglistener/reporter.hpp>
 #include <components/misc/constants.hpp>
@@ -344,6 +345,7 @@ namespace MWWorld
         {
             // the resource cache is cleared from the worker thread so that we're not holding up the main thread with
             // delete operations
+            Debug::Trace::Scope trace("Schedule periodic cache maintenance");
             mUpdateCacheItem = std::make_shared<UpdateCacheItem>(mResourceSystem, timestamp);
             mWorkQueue->addWorkItem(mUpdateCacheItem, true);
             mLastResourceCacheUpdate = timestamp;

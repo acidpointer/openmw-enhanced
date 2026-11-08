@@ -1,4 +1,5 @@
 #include "resourcesystem.hpp"
+#include <components/debug/frametrace.hpp>
 
 #include <algorithm>
 
@@ -83,6 +84,7 @@ namespace Resource
 
     void ResourceSystem::updateCache(double referenceTime)
     {
+        Debug::Trace::Scope trace("Resource cache maintenance");
         for (std::vector<BaseResourceManager*>::iterator it = mResourceManagers.begin(); it != mResourceManagers.end();
              ++it)
             (*it)->updateCache(referenceTime);

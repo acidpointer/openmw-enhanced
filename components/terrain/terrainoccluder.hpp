@@ -7,6 +7,9 @@
 
 #include <components/esm/refid.hpp>
 
+#include <algorithm>
+#include <map>
+#include <utility>
 #include <vector>
 
 namespace Terrain
@@ -21,19 +24,42 @@ namespace Terrain
     public:
         TerrainOccluder(Storage* storage, float cellWorldSize);
 
-        void setWorldspace(ESM::RefId worldspace) { mWorldspace = worldspace; }
-        void setLodLevel(int lod) { mLodLevel = lod; }
+        void setWorldspace(ESM::RefId worldspace);
+        void setLodLevel(int lod)
+        {
+            lod = std::clamp(lod, 0, 10);
+            if (mLodLevel != lod)
+            {
+                mLodLevel = lod;
+                invalidate();
+            }
+        }
 
         /// Build occluder geometry for terrain cells around the camera.
         /// Generates world-space positions and triangle indices.
         /// @param eyePoint Camera position in world space
         /// @param radius Radius in cells to include
-        void build(const osg::Vec3f& eyePoint, int radiusCells, std::vector<osg::Vec3f>& outPositions,
-            std::vector<unsigned int>& outIndices);
+        void update(const osg::Vec3f& eyePoint, int radiusCells);
+        const std::vector<osg::Vec3f>& getPositions() const { return mCachedPositions; }
+        const std::vector<unsigned int>& getIndices() const { return mCachedIndices; }
 
         bool hasTerrainData() const;
 
     private:
+        void invalidate()
+        {
+            mCacheValid = false;
+            mCells.clear();
+            mCachedPositions.clear();
+            mCachedIndices.clear();
+        }
+        struct CellMesh
+        {
+            std::vector<osg::Vec3f> positions;
+            std::vector<unsigned int> indices;
+        };
+        std::map<std::pair<int, int>, CellMesh> mCells;
+        bool mCacheValid = false;
         Storage* mStorage;
         ESM::RefId mWorldspace;
         float mCellWorldSize;

@@ -96,7 +96,9 @@ bool Process::ProcessInvoker::startProcess(const QString& name, const QStringLis
     // Start the executable
     if (detached)
     {
-        if (!mProcess->startDetached(path, arguments))
+        mProcess->setProgram(path);
+        mProcess->setArguments(arguments);
+        if (!mProcess->startDetached())
         {
             QMessageBox msgBox;
             msgBox.setWindowTitle(tr("Error starting executable"));

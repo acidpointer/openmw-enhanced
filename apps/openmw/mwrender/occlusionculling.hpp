@@ -4,11 +4,14 @@
 #include <osg/BoundingBox>
 #include <osg/Camera>
 #include <osg/Image>
+#include <osg/Matrixf>
 #include <osg/Object>
 #include <osg/Texture2D>
 #include <osg/Vec3f>
+#include <osg/observer_ptr>
 #include <osg/ref_ptr>
 
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -74,9 +77,8 @@ namespace Terrain
 
 namespace MWRender
 {
-    /// Installed on lightweight marker nodes under the SceneRoot. The begin marker
-    /// rasterizes terrain into the software occlusion buffer before regular scene
-    /// children are traversed, and the end marker finalizes/logs after them.
+    /// Wraps world traversal so a single camera owns the depth buffer for the
+    /// entire subtree. Nested/concurrent cameras fall back to normal traversal.
     class SceneOcclusionCallback
         : public SceneUtil::NodeCallback<SceneOcclusionCallback, osg::Node*, osgUtil::CullVisitor*>
     {
@@ -86,7 +88,6 @@ namespace MWRender
             OcclusionStorage* storage = nullptr);
 
         void operator()(osg::Node* node, osgUtil::CullVisitor* cv);
-        osg::ref_ptr<osg::Callback> createEndCallback();
         void endFrame(osg::Node* node, osgUtil::CullVisitor* cv);
 
         /// Update cell type flags. Call when the player transitions cells.
@@ -111,8 +112,8 @@ namespace MWRender
         OcclusionStorage* mStorage = nullptr;
 
         // Scratch buffers reused across frames
-        std::vector<osg::Vec3f> mPositions;
-        std::vector<unsigned int> mIndices;
+        std::size_t mTerrainVerts = 0;
+        std::size_t mTerrainTris = 0;
         double mTerrainBuildMs = 0.0;
         double mTerrainRasterMs = 0.0;
         double mBeginCallbackMs = 0.0;
@@ -120,6 +121,7 @@ namespace MWRender
         unsigned int mActiveFrameNumber = 0;
         std::string mActiveCameraName;
         bool mFrameStarted = false;
+        std::mutex mTraversalMutex;
         bool mActiveSceneCamera = false;
         bool mActiveAdaptiveStatics = false;
         bool mActiveStaticOccludersEnabled = false;
@@ -152,8 +154,8 @@ namespace MWRender
     };
 
     /// Installed on each Cell Root group. Two-pass approach:
-    /// Pass 1: Large objects (radius >= threshold) are tested against terrain depth, and if
-    ///         visible, their shrunken AABB is rasterized as an occluder, then traversed.
+    /// Pass 1: Large objects are traversed, and eligible opaque mesh subsets
+    ///         are rasterized within the static time/triangle budget.
     /// Pass 2: Small objects are tested against the enriched depth buffer (terrain + buildings).
     class CellOcclusionCallback
         : public SceneUtil::NodeCallback<CellOcclusionCallback, osg::Group*, osgUtil::CullVisitor*>
@@ -168,7 +170,8 @@ namespace MWRender
 
     private:
         /// Get cached occluder mesh (actual triangles + AABB) for a node.
-        const OccluderMesh& getOccluderMesh(osg::Node* node);
+        struct CachedMesh;
+        const CachedMesh* getOccluderMesh(osg::Node* node, const osg::Matrixd& parentToWorld);
 
         osg::ref_ptr<SceneUtil::OcclusionCuller> mCuller;
         float mOccluderMinRadius;
@@ -181,7 +184,15 @@ namespace MWRender
         bool mEnableStaticOccluders;
         unsigned int mMaxTriangles;
 
-        std::unordered_map<osg::Node*, OccluderMesh> mMeshCache;
+        struct CachedMesh
+        {
+            osg::observer_ptr<osg::Node> mNode;
+            osg::Matrixf mPlacement;
+            std::string mModel;
+            std::shared_ptr<const OccluderMesh> mMesh;
+            osg::BoundingBox mWorldBounds;
+        };
+        std::unordered_map<osg::Node*, CachedMesh> mMeshCache;
         OcclusionStorage* mStorage = nullptr;
     };
 }

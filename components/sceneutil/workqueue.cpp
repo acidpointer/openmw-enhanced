@@ -1,4 +1,5 @@
 #include "workqueue.hpp"
+#include <components/debug/frametrace.hpp>
 
 #include <components/debug/debuglog.hpp>
 
@@ -131,7 +132,10 @@ namespace SceneUtil
             if (!item)
                 return;
             mActive = true;
-            item->doWork();
+            {
+                Debug::Trace::Scope trace("Worker task");
+                item->doWork();
+            }
             item->signalDone();
             mActive = false;
         }

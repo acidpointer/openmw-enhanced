@@ -6,7 +6,9 @@
 #include <cmath>
 #include <limits>
 
+#include <osg/FrameStamp>
 #include <osg/Timer>
+#include <osgUtil/CullVisitor>
 
 namespace SceneUtil
 {
@@ -40,20 +42,33 @@ namespace SceneUtil
             MaskedOcclusionCulling::Destroy(mMOCTerrainOnly);
     }
 
-    void OcclusionCuller::beginFrame(const osg::Matrixd& viewMatrix, const osg::Matrixd& projectionMatrix)
+    void OcclusionCuller::beginFrame(
+        const osg::Matrixd& viewMatrix, const osg::Matrixd& projectionMatrix, float nearClip)
     {
+        mVisitor.store(nullptr, std::memory_order_release);
         mFrameActive = false;
-        if (!mMOC)
+        if (!mMOC || !std::isfinite(nearClip))
             return;
 
+        mNearClip = std::max(nearClip, 0.001f);
+        mMOC->SetNearClipPlane(mNearClip);
+        if (mMOCTerrainOnly)
+            mMOCTerrainOnly->SetNearClipPlane(mNearClip);
+        if (!mViewInverse.invert(viewMatrix))
+            return;
         mMOC->ClearBuffer();
         if (mMOCTerrainOnly)
             mMOCTerrainOnly->ClearBuffer();
         mViewProjection = viewMatrix * projectionMatrix;
+        mProjection = projectionMatrix;
 
         const double* vpDouble = mViewProjection.ptr();
         for (int i = 0; i < 16; ++i)
+        {
             mVPFloat[i] = static_cast<float>(vpDouble[i]);
+            if (!std::isfinite(mVPFloat[i]))
+                return;
+        }
 
         mNumOccluded = 0;
         mNumTested = 0;
@@ -86,16 +101,39 @@ namespace SceneUtil
         mFrameActive = true;
     }
 
+    void OcclusionCuller::bindVisitor(osgUtil::CullVisitor& visitor)
+    {
+        mCamera = visitor.getCurrentCamera();
+        mFrameNumber = visitor.getFrameStamp()->getFrameNumber();
+        mRootDepth = visitor.getNodePath().size();
+        mWorldRoot = mRootDepth ? visitor.getNodePath().back() : nullptr;
+        mVisitor.store(&visitor, std::memory_order_release);
+    }
+
+    bool OcclusionCuller::isFrameActiveFor(osgUtil::CullVisitor& visitor) const
+    {
+        // Other cull threads must return before reading mutable frame data.
+        return mVisitor.load(std::memory_order_acquire) == &visitor && mFrameActive
+            && mCamera == visitor.getCurrentCamera() && visitor.getFrameStamp()
+            && mFrameNumber == visitor.getFrameStamp()->getFrameNumber()
+            && mProjection == *visitor.getProjectionMatrix()
+            && (!mRootDepth
+                || (visitor.getNodePath().size() >= mRootDepth && visitor.getNodePath()[mRootDepth - 1] == mWorldRoot
+                    && std::find(visitor.getNodePath().begin() + mRootDepth, visitor.getNodePath().end(), mWorldRoot)
+                        == visitor.getNodePath().end()));
+    }
+
     void OcclusionCuller::rasterizeTerrainOccluder(
         const std::vector<osg::Vec3f>& worldPositions, const std::vector<unsigned int>& indices, bool fullBuffer)
     {
-        // Rasterize terrain into the full buffer only when the full buffer will be
-        // queried later this frame. Terrain-only cooldown paths only need the
-        // terrain snapshot used by cell/chunk tests.
-        if (fullBuffer)
-            rasterizeOccluder(worldPositions, indices);
-        if (!mFrameActive || !mMOCTerrainOnly || worldPositions.empty() || indices.empty())
+        if (!mFrameActive || worldPositions.empty() || indices.empty())
             return;
+        if (!mMOCTerrainOnly)
+        {
+            if (fullBuffer)
+                rasterizeOccluder(worldPositions, indices);
+            return;
+        }
 
         const int numTris = static_cast<int>(indices.size()) / 3;
         if (numTris <= 0)
@@ -118,13 +156,27 @@ namespace SceneUtil
         MaskedOcclusionCulling::VertexLayout vtxLayout(12, 4, 8);
         const osg::Timer_t start = osg::Timer::instance()->tick();
         mMOCTerrainOnly->RenderTriangles(reinterpret_cast<const float*>(worldPositions.data()), indices.data(), numTris,
-            mVPFloat, MaskedOcclusionCulling::BACKFACE_NONE, MaskedOcclusionCulling::CLIP_PLANE_ALL, vtxLayout);
+            mVPFloat, MaskedOcclusionCulling::BACKFACE_CW, MaskedOcclusionCulling::CLIP_PLANE_ALL, vtxLayout);
         mRasterizeMs += osg::Timer::instance()->delta_m(start, osg::Timer::instance()->tick());
         ++mRasterizeCalls;
+        if (fullBuffer)
+        {
+            if (mMOC->GetImplementation() == mMOCTerrainOnly->GetImplementation())
+            {
+                // Merge the SIMD depth tiles instead of transforming, clipping
+                // and rasterizing the same terrain triangles a second time.
+                // MOC's private tile layouts require matching implementations.
+                const auto mergeStart = osg::Timer::instance()->tick();
+                mMOC->MergeBuffer(mMOCTerrainOnly);
+                mRasterizeMs += osg::Timer::instance()->delta_m(mergeStart, osg::Timer::instance()->tick());
+            }
+            else
+                rasterizeOccluder(worldPositions, indices);
+        }
     }
 
-    void OcclusionCuller::rasterizeOccluder(
-        const std::vector<osg::Vec3f>& worldPositions, const std::vector<unsigned int>& indices)
+    void OcclusionCuller::rasterizeOccluder(const std::vector<osg::Vec3f>& worldPositions,
+        const std::vector<unsigned int>& indices, const osg::Matrixf* modelToWorld, bool backfaceCull)
     {
         if (!mFrameActive || worldPositions.empty() || indices.empty())
             return;
@@ -132,6 +184,9 @@ namespace SceneUtil
         const int numTris = static_cast<int>(indices.size()) / 3;
         if (numTris <= 0)
             return;
+
+        const osg::Matrixf modelToClip(modelToWorld ? osg::Matrixd(*modelToWorld) * mViewProjection : mViewProjection);
+        const float* transform = modelToWorld ? modelToClip.ptr() : mVPFloat;
 
         // Validate all vertex indices are in range to prevent out-of-bounds reads.
 #ifndef NDEBUG
@@ -146,7 +201,7 @@ namespace SceneUtil
         // extreme clip-space coordinates (w near zero after VP transform).
         for (const auto& v : worldPositions)
         {
-            float w = mVPFloat[3] * v.x() + mVPFloat[7] * v.y() + mVPFloat[11] * v.z() + mVPFloat[15];
+            float w = transform[3] * v.x() + transform[7] * v.y() + transform[11] * v.z() + transform[15];
             if (!std::isfinite(w) || std::abs(w) < 1e-6f)
                 return;
         }
@@ -157,150 +212,62 @@ namespace SceneUtil
         MaskedOcclusionCulling::VertexLayout vtxLayout(12, 4, 8);
 
         const osg::Timer_t start = osg::Timer::instance()->tick();
-        mMOC->RenderTriangles(reinterpret_cast<const float*>(worldPositions.data()), indices.data(), numTris, mVPFloat,
-            MaskedOcclusionCulling::BACKFACE_NONE, // terrain can be seen from below at edges
+        mMOC->RenderTriangles(reinterpret_cast<const float*>(worldPositions.data()), indices.data(), numTris, transform,
+            backfaceCull ? MaskedOcclusionCulling::BACKFACE_CW : MaskedOcclusionCulling::BACKFACE_NONE,
             MaskedOcclusionCulling::CLIP_PLANE_ALL, vtxLayout);
         mRasterizeMs += osg::Timer::instance()->delta_m(start, osg::Timer::instance()->tick());
         ++mRasterizeCalls;
     }
 
-    void OcclusionCuller::rasterizeAABBOccluder(const osg::BoundingBox& worldBB)
+    bool OcclusionCuller::projectBounds(const osg::BoundingBox& worldBB, ProjectedBounds& projected) const
     {
-        if (!mFrameActive)
-            return;
-
-        // 8 corners of the AABB
-        const osg::Vec3f verts[8] = {
-            osg::Vec3f(worldBB.xMin(), worldBB.yMin(), worldBB.zMin()), // 0
-            osg::Vec3f(worldBB.xMax(), worldBB.yMin(), worldBB.zMin()), // 1
-            osg::Vec3f(worldBB.xMin(), worldBB.yMax(), worldBB.zMin()), // 2
-            osg::Vec3f(worldBB.xMax(), worldBB.yMax(), worldBB.zMin()), // 3
-            osg::Vec3f(worldBB.xMin(), worldBB.yMin(), worldBB.zMax()), // 4
-            osg::Vec3f(worldBB.xMax(), worldBB.yMin(), worldBB.zMax()), // 5
-            osg::Vec3f(worldBB.xMin(), worldBB.yMax(), worldBB.zMax()), // 6
-            osg::Vec3f(worldBB.xMax(), worldBB.yMax(), worldBB.zMax()), // 7
-        };
-
-        // 12 triangles (6 faces x 2 tris)
-        static const unsigned int indices[36] = {
-            // -Z face
-            0,
-            1,
-            3,
-            0,
-            3,
-            2,
-            // +Z face
-            4,
-            6,
-            7,
-            4,
-            7,
-            5,
-            // -Y face
-            0,
-            4,
-            5,
-            0,
-            5,
-            1,
-            // +Y face
-            2,
-            3,
-            7,
-            2,
-            7,
-            6,
-            // -X face
-            0,
-            2,
-            6,
-            0,
-            6,
-            4,
-            // +X face
-            1,
-            5,
-            7,
-            1,
-            7,
-            3,
-        };
-
-        MaskedOcclusionCulling::VertexLayout vtxLayout(12, 4, 8);
-
-        mMOC->RenderTriangles(reinterpret_cast<const float*>(verts), indices, 12, mVPFloat,
-            MaskedOcclusionCulling::BACKFACE_NONE, // both sides, nearest depth wins
-            MaskedOcclusionCulling::CLIP_PLANE_ALL, vtxLayout);
-
-        ++mNumBuildingOccluders;
+        if (!mFrameActive || !worldBB.valid())
+            return false;
+        osg::Vec3f corners[8];
+        for (unsigned int i = 0; i < 8; ++i)
+            corners[i] = worldBB.corner(i);
+        float clip[8 * 4];
+        // Reuse MOC's SSE/NEON transform instead of scalar matrix products.
+        // Use the same float VP matrix as occluder rasterization.
+        MaskedOcclusionCulling::TransformVertices(mVPFloat, reinterpret_cast<const float*>(corners), clip, 8);
+        projected = { 1, 1, -1, -1, std::numeric_limits<float>::max() };
+        for (unsigned int i = 0; i < 8; ++i)
+        {
+            const float w = clip[i * 4 + 3];
+            if (!std::isfinite(w) || w <= mNearClip)
+                return false; // Near-plane crossings always remain visible.
+            const float inverseW = 1.f / w;
+            const float x = clip[i * 4] * inverseW;
+            const float y = clip[i * 4 + 1] * inverseW;
+            if (!std::isfinite(x) || !std::isfinite(y))
+                return false;
+            projected.minX = std::min(projected.minX, x);
+            projected.minY = std::min(projected.minY, y);
+            projected.maxX = std::max(projected.maxX, x);
+            projected.maxY = std::max(projected.maxY, y);
+            projected.minW = std::min(projected.minW, w);
+        }
+        projected.minX = std::max(projected.minX, -1.f);
+        projected.minY = std::max(projected.minY, -1.f);
+        projected.maxX = std::min(projected.maxX, 1.f);
+        projected.maxY = std::min(projected.maxY, 1.f);
+        return projected.minX < projected.maxX && projected.minY < projected.maxY;
     }
 
-    bool OcclusionCuller::testVisibleAABBImpl(MaskedOcclusionCulling* moc, const osg::BoundingBox& worldBB) const
+    bool OcclusionCuller::testVisibleAABBImpl(MaskedOcclusionCulling* moc, const ProjectedBounds& projected) const
     {
-        const osg::Vec3f corners[8] = {
-            osg::Vec3f(worldBB.xMin(), worldBB.yMin(), worldBB.zMin()),
-            osg::Vec3f(worldBB.xMax(), worldBB.yMin(), worldBB.zMin()),
-            osg::Vec3f(worldBB.xMin(), worldBB.yMax(), worldBB.zMin()),
-            osg::Vec3f(worldBB.xMax(), worldBB.yMax(), worldBB.zMin()),
-            osg::Vec3f(worldBB.xMin(), worldBB.yMin(), worldBB.zMax()),
-            osg::Vec3f(worldBB.xMax(), worldBB.yMin(), worldBB.zMax()),
-            osg::Vec3f(worldBB.xMin(), worldBB.yMax(), worldBB.zMax()),
-            osg::Vec3f(worldBB.xMax(), worldBB.yMax(), worldBB.zMax()),
-        };
-
-        float ndcMinX = 1.0f, ndcMinY = 1.0f;
-        float ndcMaxX = -1.0f, ndcMaxY = -1.0f;
-        float wMin = std::numeric_limits<float>::max();
-        bool anyInFront = false;
-
-        const double* m = mViewProjection.ptr();
-        for (int i = 0; i < 8; ++i)
-        {
-            // Transform to clip space: pos * ViewProjection
-            double x = corners[i].x(), y = corners[i].y(), z = corners[i].z();
-            float cx = static_cast<float>(x * m[0] + y * m[4] + z * m[8] + m[12]);
-            float cy = static_cast<float>(x * m[1] + y * m[5] + z * m[9] + m[13]);
-            float cw = static_cast<float>(x * m[3] + y * m[7] + z * m[11] + m[15]);
-
-            if (cw > 0.0f)
-            {
-                anyInFront = true;
-                float invW = 1.0f / cw;
-                float ndcX = cx * invW;
-                float ndcY = cy * invW;
-                ndcMinX = std::min(ndcMinX, ndcX);
-                ndcMinY = std::min(ndcMinY, ndcY);
-                ndcMaxX = std::max(ndcMaxX, ndcX);
-                ndcMaxY = std::max(ndcMaxY, ndcY);
-                wMin = std::min(wMin, cw);
-            }
-            else
-            {
-                // Corner is behind camera — conservatively expand to full screen
-                ndcMinX = -1.0f;
-                ndcMinY = -1.0f;
-                ndcMaxX = 1.0f;
-                ndcMaxY = 1.0f;
-                anyInFront = true; // still test it
-                wMin = std::min(wMin, 0.0001f);
-            }
-        }
-
-        if (!anyInFront)
-            return true; // entirely behind camera, let frustum culling handle it
-
-        // Clamp to NDC range
-        ndcMinX = std::max(ndcMinX, -1.0f);
-        ndcMinY = std::max(ndcMinY, -1.0f);
-        ndcMaxX = std::min(ndcMaxX, 1.0f);
-        ndcMaxY = std::min(ndcMaxY, 1.0f);
-
-        if (ndcMinX >= ndcMaxX || ndcMinY >= ndcMaxY)
-            return true; // degenerate rect, assume visible
-
+        if (!moc)
+            return true;
+        unsigned int width, height;
+        moc->GetResolution(width, height);
+        // Expand queries one software pixel and round depth towards the camera.
+        // Rounding can reduce culling, but must never hide a visible edge.
+        const float padX = 2.f / width;
+        const float padY = 2.f / height;
         const osg::Timer_t start = osg::Timer::instance()->tick();
-        auto result = moc->TestRect(ndcMinX, ndcMinY, ndcMaxX, ndcMaxY, wMin);
+        const auto result = moc->TestRect(std::max(-1.f, projected.minX - padX), std::max(-1.f, projected.minY - padY),
+            std::min(1.f, projected.maxX + padX), std::min(1.f, projected.maxY + padY),
+            std::nextafter(projected.minW, 0.f));
         mTestMs += osg::Timer::instance()->delta_m(start, osg::Timer::instance()->tick());
         ++mTestCalls;
         return result != MaskedOcclusionCulling::OCCLUDED;
@@ -308,20 +275,27 @@ namespace SceneUtil
 
     bool OcclusionCuller::testVisibleAABBTerrainOnly(const osg::BoundingBox& worldBB) const
     {
-        if (!mFrameActive || !mMOCTerrainOnly)
-            return true;
-        // No mNumTested/mNumOccluded tracking for terrain-only tests — those stats
-        // are for the main (full) buffer tests used to measure culling effectiveness.
-        return testVisibleAABBImpl(mMOCTerrainOnly, worldBB);
+        ProjectedBounds projected;
+        return !projectBounds(worldBB, projected) || testVisibleAABBTerrainOnly(projected);
+    }
+
+    bool OcclusionCuller::testVisibleAABBTerrainOnly(const ProjectedBounds& projected) const
+    {
+        return !mFrameActive || testVisibleAABBImpl(mMOCTerrainOnly, projected);
     }
 
     bool OcclusionCuller::testVisibleAABB(const osg::BoundingBox& worldBB) const
     {
-        if (!mFrameActive)
+        ProjectedBounds projected;
+        if (!projectBounds(worldBB, projected))
             return true;
-
+        if (projected.screenRatio() < mMinOccludeeScreenRatio)
+        {
+            ++mSmallOccludeesSkippedScreen;
+            return true;
+        }
         ++mNumTested;
-        const bool visible = testVisibleAABBImpl(mMOC, worldBB);
+        const bool visible = testVisibleAABBImpl(mMOC, projected);
         if (!visible)
             ++mNumOccluded;
         return visible;
@@ -354,60 +328,18 @@ namespace SceneUtil
 
     bool OcclusionCuller::staticRasterBudgetAvailable() const
     {
-        return mStaticRasterBudgetMs <= 0.0 || getStaticRasterMs() < mStaticRasterBudgetMs;
+        return mStaticRasterBudgetMs <= 0.0 || getStaticRasterMs() + mStaticCandidateMs < mStaticRasterBudgetMs;
     }
 
     bool OcclusionCuller::estimateScreenRatio(const osg::BoundingBox& worldBB, double& ratio) const
     {
-        ratio = 0.0;
-        if (!mFrameActive || !worldBB.valid())
-            return false;
-
-        float ndcMinX = 1.0f;
-        float ndcMinY = 1.0f;
-        float ndcMaxX = -1.0f;
-        float ndcMaxY = -1.0f;
-        bool anyInFront = false;
-
-        const double* m = mViewProjection.ptr();
-        for (unsigned int i = 0; i < 8; ++i)
+        ProjectedBounds projected;
+        if (!projectBounds(worldBB, projected))
         {
-            const osg::Vec3f corner = worldBB.corner(i);
-            const double x = corner.x();
-            const double y = corner.y();
-            const double z = corner.z();
-            const float cx = static_cast<float>(x * m[0] + y * m[4] + z * m[8] + m[12]);
-            const float cy = static_cast<float>(x * m[1] + y * m[5] + z * m[9] + m[13]);
-            const float cw = static_cast<float>(x * m[3] + y * m[7] + z * m[11] + m[15]);
-
-            if (cw <= 0.001f || !std::isfinite(cw))
-                return false;
-
-            anyInFront = true;
-            const float invW = 1.0f / cw;
-            const float ndcX = cx * invW;
-            const float ndcY = cy * invW;
-            if (!std::isfinite(ndcX) || !std::isfinite(ndcY))
-                return false;
-
-            ndcMinX = std::min(ndcMinX, ndcX);
-            ndcMinY = std::min(ndcMinY, ndcY);
-            ndcMaxX = std::max(ndcMaxX, ndcX);
-            ndcMaxY = std::max(ndcMaxY, ndcY);
+            ratio = 0;
+            return false;
         }
-
-        if (!anyInFront)
-            return false;
-
-        ndcMinX = std::max(ndcMinX, -1.0f);
-        ndcMinY = std::max(ndcMinY, -1.0f);
-        ndcMaxX = std::min(ndcMaxX, 1.0f);
-        ndcMaxY = std::min(ndcMaxY, 1.0f);
-
-        if (ndcMinX >= ndcMaxX || ndcMinY >= ndcMaxY)
-            return false;
-
-        ratio = static_cast<double>((ndcMaxX - ndcMinX) * (ndcMaxY - ndcMinY)) * 0.25;
+        ratio = projected.screenRatio();
         return true;
     }
 

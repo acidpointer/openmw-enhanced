@@ -21,11 +21,13 @@
 #define OPENMW_COMPONENTS_RESOURCE_OBJECTCACHE
 
 #include "cachestats.hpp"
+#include <components/debug/frametrace.hpp>
 
 #include <osg/Node>
 #include <osg/ref_ptr>
 
 #include <algorithm>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -90,6 +92,8 @@ namespace Resource
     class GenericObjectCache
     {
     public:
+        ~GenericObjectCache() { clear(); }
+
         /*
          * @brief Updates usage timestamps and removes expired items
          *
@@ -106,31 +110,59 @@ namespace Resource
          */
         void update(double referenceTime, double expiryDelay)
         {
+            Debug::Trace::Scope trace("Cache update and destruction");
             std::vector<ValueType> objectsToRemove;
+            const double expiryTime = referenceTime - expiryDelay;
+            auto visit = [&](auto it) {
+                Item& item = it->second;
+                if (useCount(item.mValue) > 1 || item.mLastUsage == 0)
+                    item.mLastUsage = std::max(item.mLastUsage, referenceTime);
+                if (item.mLastUsage > expiryTime)
+                    return std::next(it);
+                ++mExpired;
+                if (item.mValue != nullptr)
+                    objectsToRemove.push_back(std::move(item.mValue));
+                return mItems.erase(it);
+            };
+            if constexpr (std::is_copy_constructible_v<KeyType>)
             {
-                const double expiryTime = referenceTime - expiryDelay;
-                std::lock_guard<std::mutex> lock(mMutex);
-
-                std::erase_if(mItems, [&](auto& v) {
-                    Item& item = v.second;
-
-                    // update last usage timestamp if item is being referenced externally
-                    // or initialize if not set
-                    if (useCount(item.mValue) > 1 || item.mLastUsage == 0)
-                        item.mLastUsage = referenceTime;
-
-                    // skip items that have been accessed since expiryTime
-                    if (item.mLastUsage > expiryTime)
-                        return false;
-
-                    ++mExpired;
-
-                    // just mark for removal here so objects can be removed in bulk outside the lock
-                    if (item.mValue != nullptr)
-                        objectsToRemove.push_back(std::move(item.mValue));
-
-                    return true;
-                });
+                // Bound each lock hold instead of stopping all cache lookups
+                // for an O(N) sweep once per second. Key checkpoints survive
+                // concurrent insertions/removals; new entries can wait until
+                // the next sweep, and cannot extend this sweep indefinitely.
+                std::optional<KeyType> cursor;
+                std::optional<KeyType> finalKey;
+                bool done = false;
+                while (!done)
+                {
+                    std::unique_lock lock(mMutex, std::defer_lock);
+                    {
+                        Debug::Trace::Scope waiting("Wait for cache sweep lock");
+                        lock.lock();
+                    }
+                    Debug::Trace::Scope held("Cache sweep lock held");
+                    if (mItems.empty())
+                        break;
+                    if (!finalKey)
+                        finalKey.emplace(mItems.rbegin()->first);
+                    auto it = cursor ? mItems.upper_bound(*cursor) : mItems.begin();
+                    for (unsigned int i = 0; i < 128 && it != mItems.end() && !mItems.key_comp()(*finalKey, it->first);
+                        ++i)
+                    {
+                        if (i == 127)
+                            cursor.emplace(it->first);
+                        it = visit(it);
+                    }
+                    done = it == mItems.end() || mItems.key_comp()(*finalKey, it->first);
+                }
+            }
+            else
+            {
+                // Keep support for move-only keys without introducing a copy
+                // requirement into the existing cache API.
+                const std::lock_guard lock(mMutex);
+                for (auto it = mItems.begin(); it != mItems.end();)
+                    it = visit(it);
             }
             // remove expired items from cache
             objectsToRemove.clear();
@@ -139,29 +171,41 @@ namespace Resource
         /** Remove all objects in the cache regardless of having external references or expiry times.*/
         void clear()
         {
-            std::lock_guard<std::mutex> lock(mMutex);
-            mItems.clear();
+            decltype(mItems) retired;
+            {
+                const std::lock_guard lock(mMutex);
+                mItems.swap(retired);
+            }
         }
 
         /** Add a key,object,timestamp triple to the Registry::ObjectCache.*/
         template <class K>
         void addEntryToObjectCache(K&& key, ValueType object, double timestamp = 0.0)
         {
-            std::lock_guard<std::mutex> lock(mMutex);
-            const auto it = mItems.find(key);
-            if (it == mItems.end())
-                mItems.emplace_hint(it, std::forward<K>(key), Item{ std::move(object), timestamp });
-            else
-                it->second = Item{ std::move(object), timestamp };
+            std::optional<ValueType> retired;
+            {
+                const std::lock_guard lock(mMutex);
+                const auto it = mItems.find(key);
+                if (it == mItems.end())
+                    mItems.emplace_hint(it, std::forward<K>(key), Item{ std::move(object), timestamp });
+                else
+                {
+                    retired.emplace(std::move(it->second.mValue));
+                    it->second = Item{ std::move(object), timestamp };
+                }
+            }
         }
 
         /** Remove Object from cache.*/
         void removeFromObjectCache(const auto& key)
         {
-            std::lock_guard<std::mutex> lock(mMutex);
-            const auto itr = mItems.find(key);
-            if (itr != mItems.end())
-                mItems.erase(itr);
+            typename decltype(mItems)::node_type retired;
+            {
+                const std::lock_guard lock(mMutex);
+                const auto it = mItems.find(key);
+                if (it != mItems.end())
+                    retired = mItems.extract(it);
+            }
         }
 
         /** Get a value from the object cache; a default-constructed one if absent. */

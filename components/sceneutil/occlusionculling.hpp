@@ -3,10 +3,22 @@
 
 #include <osg/BoundingBox>
 #include <osg/Matrixd>
+#include <osg/Matrixf>
 #include <osg/Referenced>
 #include <osg/Vec3f>
 
+#include <atomic>
 #include <vector>
+
+namespace osgUtil
+{
+    class CullVisitor;
+}
+namespace osg
+{
+    class Camera;
+    class Node;
+}
 
 class MaskedOcclusionCulling;
 
@@ -22,7 +34,9 @@ namespace SceneUtil
 
         /// Call at the start of each frame's cull traversal.
         /// Clears the depth buffer and stores the view-projection matrix.
-        void beginFrame(const osg::Matrixd& viewMatrix, const osg::Matrixd& projectionMatrix);
+        void beginFrame(const osg::Matrixd& viewMatrix, const osg::Matrixd& projectionMatrix, float nearClip = 0.1f);
+        void bindVisitor(osgUtil::CullVisitor& visitor);
+        bool isFrameActiveFor(osgUtil::CullVisitor& visitor) const;
 
         /// Rasterize terrain into the terrain-only snapshot, and optionally the full buffer.
         /// Call this only for terrain, before any building occluders are added.
@@ -31,14 +45,19 @@ namespace SceneUtil
 
         /// Rasterize world-space triangles as occluders into the full buffer only (not the terrain snapshot).
         /// Use for buildings.
-        void rasterizeOccluder(const std::vector<osg::Vec3f>& worldPositions, const std::vector<unsigned int>& indices);
-
-        /// Rasterize a world-space AABB as an occluder (12 triangles for 6 faces).
-        void rasterizeAABBOccluder(const osg::BoundingBox& worldBB);
+        void rasterizeOccluder(const std::vector<osg::Vec3f>& positions, const std::vector<unsigned int>& indices,
+            const osg::Matrixf* modelToWorld = nullptr, bool backfaceCull = true);
 
         /// Test against the terrain-only depth buffer.
         /// Use for cells and buildings — prevents buildings from false-occluding each other.
+        struct ProjectedBounds
+        {
+            float minX, minY, maxX, maxY, minW;
+            double screenRatio() const { return static_cast<double>((maxX - minX) * (maxY - minY)) * 0.25; }
+        };
+        bool projectBounds(const osg::BoundingBox& worldBB, ProjectedBounds& projected) const;
         bool testVisibleAABBTerrainOnly(const osg::BoundingBox& worldBB) const;
+        bool testVisibleAABBTerrainOnly(const ProjectedBounds& projected) const;
 
         /// Test against the full depth buffer (terrain + buildings).
         /// Use for small objects in Pass 2.
@@ -46,8 +65,13 @@ namespace SceneUtil
 
         bool isActive() const { return mMOC != nullptr; }
         bool isFrameActive() const { return mFrameActive; }
-        void endFrame() { mFrameActive = false; }
+        void endFrame()
+        {
+            mVisitor.store(nullptr, std::memory_order_release);
+            mFrameActive = false;
+        }
         const char* getImplementationName() const;
+        const osg::Matrixd& getViewInverse() const { return mViewInverse; }
 
         unsigned int getNumOccluded() const { return mNumOccluded; }
         unsigned int getNumTested() const { return mNumTested; }
@@ -83,7 +107,14 @@ namespace SceneUtil
         void setStaticRasterBudgetMs(double value) { mStaticRasterBudgetMs = value; }
         void resetStaticRasterBudgetBaseline() { mStaticRasterBudgetBaselineMs = mRasterizeMs; }
         double getStaticRasterMs() const;
+        // Includes candidate gathering/preparation as well as rasterization.
+        // One operation may finish over budget; later candidates are skipped.
         bool staticRasterBudgetAvailable() const;
+        bool staticCandidateBudgetAvailable() const
+        {
+            return staticRasterBudgetAvailable()
+                && (mStaticRasterBudgetMs <= 0 || mStaticCandidateMs < mStaticRasterBudgetMs * 0.5);
+        }
         void setMinOccluderScreenRatio(double value) { mMinOccluderScreenRatio = value; }
         double getMinOccluderScreenRatio() const { return mMinOccluderScreenRatio; }
         void setMinOccludeeScreenRatio(double value) { mMinOccludeeScreenRatio = value; }
@@ -131,12 +162,20 @@ namespace SceneUtil
         void getResolution(unsigned int& width, unsigned int& height) const;
 
     private:
-        bool testVisibleAABBImpl(MaskedOcclusionCulling* moc, const osg::BoundingBox& worldBB) const;
+        bool testVisibleAABBImpl(MaskedOcclusionCulling* moc, const ProjectedBounds& projected) const;
 
         MaskedOcclusionCulling* mMOC;
         MaskedOcclusionCulling* mMOCTerrainOnly; // terrain-only snapshot for building visibility tests
         osg::Matrixd mViewProjection;
+        osg::Matrixd mProjection;
+        std::atomic<const osgUtil::CullVisitor*> mVisitor{ nullptr };
+        const osg::Camera* mCamera = nullptr;
+        const osg::Node* mWorldRoot = nullptr;
+        std::size_t mRootDepth = 0;
+        unsigned int mFrameNumber = 0;
         float mVPFloat[16] = {};
+        float mNearClip = 0.1f;
+        osg::Matrixd mViewInverse;
         bool mFrameActive = false;
 
         mutable unsigned int mNumOccluded = 0;
@@ -161,7 +200,7 @@ namespace SceneUtil
         unsigned int mStaticOccludersSkippedBudget = 0;
         unsigned int mStaticOccludersSkippedDistance = 0;
         unsigned int mStaticOccludersSkippedScreen = 0;
-        unsigned int mSmallOccludeesSkippedScreen = 0;
+        mutable unsigned int mSmallOccludeesSkippedScreen = 0;
         unsigned int mTerrainCellTests = 0;
         unsigned int mTerrainCellOccluded = 0;
         unsigned int mTerrainPagedTests = 0;

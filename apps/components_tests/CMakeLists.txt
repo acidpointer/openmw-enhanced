@@ -93,6 +93,13 @@ file(GLOB UNITTEST_SRC_FILES
 
     sceneutil/osgacontroller.cpp
     sceneutil/userdata.cpp
+    sceneutil/occlusionbudget.cpp
+    sceneutil/occlusionquery.cpp
+
+    terrain/terrainoccluder.cpp
+
+    occlusionculling/occlusionstorage.cpp
+    occlusionculling/occludermesh.cpp
 
     bsa/testbsafile.cpp
     bsa/testcompressedbsafile.cpp
@@ -112,7 +119,7 @@ target_link_libraries(components-tests
 )
 
 if (USE_QT)
-    target_sources(components-tests PRIVATE config/testlaunchersettings.cpp)
+    target_sources(components-tests PRIVATE config/testlaunchersettings.cpp config/testgpuselection.cpp)
     target_link_libraries(components-tests components_qt)
 endif()
 

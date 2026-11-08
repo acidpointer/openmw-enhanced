@@ -39,53 +39,42 @@ static MaskedOcclusionCulling::Implementation DetectCPUFeatures(MaskedOcclusionC
 	(void)alignedAlloc; (void)alignedFree;
 	return MaskedOcclusionCulling::SSE41;
 #else
-	struct CpuInfo { int regs[4]; };
-
-	// Get regular CPUID values
-	int regs[4];
-	__cpuidex(regs, 0, 0);
-
-    //  MOCVectorAllocator<CpuInfo> mocalloc( alignedAlloc, alignedFree );
-    //  std::vector<CpuInfo, MOCVectorAllocator<CpuInfo>> cpuId( mocalloc ), cpuIdEx( mocalloc );
-    //  cpuId.resize( regs[0] );
-    size_t cpuIdCount = regs[0];
-    CpuInfo * cpuId = (CpuInfo*)alignedAlloc( 64, sizeof(CpuInfo) * cpuIdCount );
-
-	for (size_t i = 0; i < cpuIdCount; ++i)
-		__cpuidex(cpuId[i].regs, (int)i, 0);
-
-	// Get extended CPUID values
-	__cpuidex(regs, 0x80000000, 0);
-
-    //cpuIdEx.resize(regs[0] - 0x80000000);
-    size_t cpuIdExCount = regs[0] - 0x80000000;
-    CpuInfo * cpuIdEx = (CpuInfo*)alignedAlloc( 64, sizeof( CpuInfo ) * cpuIdExCount );
-
-    for (size_t i = 0; i < cpuIdExCount; ++i)
-		__cpuidex(cpuIdEx[i].regs, 0x80000000 + (int)i, 0);
-
-	#define TEST_BITS(A, B)            (((A) & (B)) == (B))
-	#define TEST_FMA_MOVE_OXSAVE       (cpuIdCount >= 1 && TEST_BITS(cpuId[1].regs[2], (1 << 12) | (1 << 22) | (1 << 27)))
-	#define TEST_LZCNT                 (cpuIdExCount >= 1 && TEST_BITS(cpuIdEx[1].regs[2], 0x20))
-	#define TEST_SSE41                 (cpuIdCount >= 1 && TEST_BITS(cpuId[1].regs[2], (1 << 19)))
-	#define TEST_XMM_YMM               (cpuIdCount >= 1 && TEST_BITS(_xgetbv(0), (1 << 2) | (1 << 1)))
-	#define TEST_OPMASK_ZMM            (cpuIdCount >= 1 && TEST_BITS(_xgetbv(0), (1 << 7) | (1 << 6) | (1 << 5)))
-	#define TEST_BMI1_BMI2_AVX2        (cpuIdCount >= 7 && TEST_BITS(cpuId[7].regs[1], (1 << 3) | (1 << 5) | (1 << 8)))
-	#define TEST_AVX512_F_BW_DQ        (cpuIdCount >= 7 && TEST_BITS(cpuId[7].regs[1], (1 << 16) | (1 << 17) | (1 << 30)))
-
-    MaskedOcclusionCulling::Implementation retVal = MaskedOcclusionCulling::SSE2;
-	if (TEST_FMA_MOVE_OXSAVE && TEST_LZCNT && TEST_SSE41)
-	{
-		if (TEST_XMM_YMM && TEST_OPMASK_ZMM && TEST_BMI1_BMI2_AVX2 && TEST_AVX512_F_BW_DQ)
-			retVal = MaskedOcclusionCulling::AVX512;
-		else if (TEST_XMM_YMM && TEST_BMI1_BMI2_AVX2)
-			retVal = MaskedOcclusionCulling::AVX2;
-	}
-    else if (TEST_SSE41)
-		retVal = MaskedOcclusionCulling::SSE41;
-    alignedFree( cpuId );
-    alignedFree( cpuIdEx );
-    return retVal;
+    // Query only supported leaves. The old allocated tables excluded the
+    // highest supported leaf but then indexed it, and could select SSE2 instead
+    // of SSE4.1 when AVX was unavailable to the OS.
+    int regs[4];
+    __cpuidex(regs, 0, 0);
+    const unsigned int maxLeaf = static_cast<unsigned int>(regs[0]);
+    if (maxLeaf < 1)
+        return MaskedOcclusionCulling::SSE2;
+    __cpuidex(regs, 1, 0);
+    const unsigned int features = static_cast<unsigned int>(regs[2]);
+    const auto has = [](unsigned int bits, unsigned int mask) { return (bits & mask) == mask; };
+    auto result = has(features, 1u << 19) ? MaskedOcclusionCulling::SSE41 : MaskedOcclusionCulling::SSE2;
+    const unsigned int avxRequirements = (1u << 12) | (1u << 19) | (1u << 22)
+        | (1u << 26) | (1u << 27) | (1u << 28);
+    if (maxLeaf < 7 || !has(features, avxRequirements))
+        return result;
+    // XGETBV is legal only after checking XSAVE and OSXSAVE above.
+    const auto xcr0 = _xgetbv(0);
+    if ((xcr0 & 0x6) != 0x6)
+        return result;
+    __cpuidex(regs, 0x80000000, 0);
+    if (static_cast<unsigned int>(regs[0]) < 0x80000001u)
+        return result;
+    __cpuidex(regs, 0x80000001, 0);
+    if (!has(static_cast<unsigned int>(regs[2]), 1u << 5))
+        return result;
+    __cpuidex(regs, 7, 0);
+    const unsigned int extended = static_cast<unsigned int>(regs[1]);
+    if (!has(extended, (1u << 3) | (1u << 5) | (1u << 8)))
+        return result;
+    result = MaskedOcclusionCulling::AVX2;
+    if ((xcr0 & 0xe0) == 0xe0 && has(extended, (1u << 16) | (1u << 17) | (1u << 30)))
+        result = MaskedOcclusionCulling::AVX512;
+    (void)alignedAlloc;
+    (void)alignedFree;
+    return result;
 #endif
 }
 
@@ -254,6 +243,17 @@ FORCE_INLINE void GatherVertices(__m128 *vtxX, __m128 *vtxY, __m128 *vtxW, const
 // SSE4.1 version
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Keep the dispatcher, TransformVertices and SSE2 implementation at the
+// portable baseline. Only this namespace may emit SSE4.1 instructions.
+#if !defined(__aarch64__) && !defined(__ARM_NEON)
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((target("sse4.1"))), apply_to = function)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC target("sse4.1")
+#endif
+#endif
+
 namespace MaskedOcclusionCullingSSE41
 {
 	FORCE_INLINE __m128i _mmw_mullo_epi32(const __m128i &a, const __m128i &b) { return _mm_mullo_epi32(a, b); }
@@ -305,6 +305,14 @@ namespace MaskedOcclusionCullingSSE41
 		return object;
 	}
 };
+
+#if !defined(__aarch64__) && !defined(__ARM_NEON)
+#if defined(__clang__)
+#pragma clang attribute pop
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
+#endif
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // SSE2 version

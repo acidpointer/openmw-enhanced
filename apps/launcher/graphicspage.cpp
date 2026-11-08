@@ -2,6 +2,13 @@
 
 #include "sdlinit.hpp"
 
+#include <QComboBox>
+#include <QFile>
+#include <QFormLayout>
+#include <QGroupBox>
+#include <QLabel>
+#include <components/config/launchersettings.hpp>
+
 #include <components/misc/display.hpp>
 #include <components/settings/values.hpp>
 
@@ -12,11 +19,26 @@
 
 #include <array>
 
-Launcher::GraphicsPage::GraphicsPage(QWidget* parent)
+Launcher::GraphicsPage::GraphicsPage(
+    Config::LauncherSettings& launcherSettings, const QString& logPath, QWidget* parent)
     : QWidget(parent)
+    , mLauncherSettings(launcherSettings)
+    , mLogPath(logPath)
 {
     setObjectName("GraphicsPage");
     setupUi(this);
+
+    auto* gpuBox = new QGroupBox(tr("Rendering GPU"), this);
+    auto* gpuLayout = new QFormLayout(gpuBox);
+    mGpuSelector = new QComboBox(gpuBox);
+    mGpuSelector->setToolTip(tr("Applies the next time you launch the game."));
+    mLastRenderer = new QLabel(gpuBox);
+    mLastRenderer->setTextFormat(Qt::PlainText);
+    mLastRenderer->setWordWrap(true);
+    mLastRenderer->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    gpuLayout->addRow(tr("GPU"), mGpuSelector);
+    gpuLayout->addRow(tr("Last game renderer"), mLastRenderer);
+    verticalLayout->insertWidget(0, gpuBox);
 
     // Set the maximum res we can set in windowed mode
     QRect res = getMaximumResolution();
@@ -69,6 +91,7 @@ bool Launcher::GraphicsPage::setupSDL()
 
 bool Launcher::GraphicsPage::loadSettings()
 {
+    loadGpuSelection();
     if (!setupSDL())
         return false;
 
@@ -124,6 +147,7 @@ bool Launcher::GraphicsPage::loadSettings()
 
 void Launcher::GraphicsPage::saveSettings()
 {
+    mLauncherSettings.setRenderGpu(mGpuSelector->currentData().toString());
     // Visuals
 
     Settings::video().mVsyncMode.set(static_cast<SDLUtil::VSyncMode>(vSyncComboBox->currentIndex()));
@@ -302,4 +326,46 @@ void Launcher::GraphicsPage::slotStandardToggled(bool checked)
 void Launcher::GraphicsPage::slotFramerateLimitToggled(bool checked)
 {
     framerateLimitSpinBox->setEnabled(checked);
+}
+
+void Launcher::GraphicsPage::loadGpuSelection()
+{
+    mGpus = Config::enumerateRenderGpus();
+    mGpuSelector->clear();
+    mGpuSelector->addItem(tr("Automatic (system default)"), QString());
+    for (const auto& gpu : mGpus)
+        if (gpu.mSelectable)
+            mGpuSelector->addItem(QStringLiteral("%1 (%2)").arg(gpu.mName, gpu.mId), gpu.mId);
+    const QString saved = mLauncherSettings.getRenderGpu();
+    int index = mGpuSelector->findData(saved);
+    if (index < 0)
+    {
+        mGpuSelector->addItem(tr("Unavailable GPU (%1) — using Automatic").arg(saved), saved);
+        index = mGpuSelector->count() - 1;
+    }
+    mGpuSelector->setCurrentIndex(index);
+    mLastRenderer->setText(tr("Not recorded yet"));
+    QFile log(mLogPath);
+    if (log.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        // Bound I/O while allowing for startup diagnostics in heavily modded games.
+        const QString header = QString::fromUtf8(log.read(256 * 1024));
+        const QString marker = QStringLiteral("OpenGL Renderer: ");
+        const auto pos = header.indexOf(marker);
+        if (pos >= 0)
+        {
+            const auto start = pos + marker.size();
+            const auto end = header.indexOf('\n', start);
+            mLastRenderer->setText(header.mid(start, end < 0 ? -1 : end - start).trimmed());
+        }
+    }
+}
+
+QProcessEnvironment Launcher::GraphicsPage::gameEnvironment() const
+{
+    const QString selected = mGpuSelector->currentData().toString();
+    for (const auto& gpu : mGpus)
+        if (gpu.mId == selected)
+            return Config::renderGpuEnvironment(gpu, QProcessEnvironment::systemEnvironment());
+    return QProcessEnvironment::systemEnvironment();
 }

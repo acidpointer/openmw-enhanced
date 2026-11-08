@@ -19,6 +19,9 @@
 #include "npcanimation.hpp"
 #include "occlusionculling.hpp"
 #include "vismask.hpp"
+#include <algorithm>
+#include <components/debug/debuglog.hpp>
+#include <components/resource/scenemanager.hpp>
 
 namespace MWRender
 {
@@ -102,6 +105,31 @@ namespace MWRender
 
         mObjects.emplace(
             ptr.mRef, std::make_unique<ObjectAnimation>(ptr, animationMesh, mResourceSystem, animated, allowLight));
+
+        // Templates are immutable and retained by the job. Never send a live,
+        // animated scene instance to the background mesh builder.
+        const float radius = ptr.getRefData().getBaseNode()->getBound().radius();
+        bool skip = false;
+        ptr.getRefData().getBaseNode()->getUserValue("skipOcclusion", skip);
+        const bool isStatic = ptr.getType() == ESM::REC_STAT || ptr.getType() == ESM::REC_STAT4;
+        if (mOcclusionStorage && mEnableStaticOccluders && isStatic && !animated && !skip && !mesh.empty()
+            && radius >= mOccluderMinRadius && radius <= mOccluderMaxRadius)
+        {
+            try
+            {
+                const auto model = ptr.getClass().getCorrectedModel(ptr);
+                const int resolution = std::clamp(
+                    static_cast<int>(mOccluderMeshResolution * (radius / std::max(mOccluderMinRadius, 1.f))),
+                    mOccluderMeshResolution, mOccluderMaxMeshResolution);
+                mOcclusionStorage->prepare(std::string(model.value()),
+                    mResourceSystem->getSceneManager()->getTemplate(model, false), resolution, mOccluderShrinkFactor);
+                ptr.getRefData().getBaseNode()->setUserValue("staticOccluderEligible", true);
+            }
+            catch (const std::exception& error)
+            {
+                Log(Debug::Warning) << "Could not queue occluder: " << error.what();
+            }
+        }
     }
 
     void Objects::insertCreature(const MWWorld::Ptr& ptr, const std::string& mesh, bool weaponsShields)

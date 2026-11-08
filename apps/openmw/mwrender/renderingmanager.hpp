@@ -340,6 +340,7 @@ namespace MWRender
         osg::ref_ptr<osg::Group> mRootNode;
         osg::ref_ptr<SceneUtil::LightManager> mSceneRoot;
         osg::ref_ptr<osg::Group> mOcclusionWorldRoot;
+        osg::ref_ptr<osg::Group> mOcclusionTerrainRoot;
         Resource::ResourceSystem* mResourceSystem;
 
         std::shared_ptr<SceneUtil::WorkQueue> mWorkQueue;

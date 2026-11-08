@@ -286,7 +286,7 @@ namespace SceneUtil::Enhanced
 
     float occlusionOccluderShrinkFactor()
     {
-        return occlusionSettingFloat("occlusion occluder shrink factor", 1.0, 0.1, 2.0);
+        return occlusionSettingFloat("occlusion occluder shrink factor", 1.0, 0.1, 1.0);
     }
 
     int occlusionOccluderMeshResolution()
@@ -296,7 +296,8 @@ namespace SceneUtil::Enhanced
 
     int occlusionOccluderMaxMeshResolution()
     {
-        return occlusionSettingInt("occlusion occluder max mesh resolution", 24, 4, 64);
+        return std::max(occlusionOccluderMeshResolution(),
+            occlusionSettingInt("occlusion occluder max mesh resolution", 24, 4, 64));
     }
 
     float occlusionOccluderInsideThreshold()

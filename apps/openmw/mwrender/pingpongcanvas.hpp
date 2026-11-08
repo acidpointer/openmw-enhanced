@@ -3,10 +3,13 @@
 
 #include <array>
 #include <optional>
+#include <string>
+#include <vector>
 
 #include <osg/FrameBufferObject>
 #include <osg/Geometry>
 #include <osg/State>
+#include <osg/Stats>
 #include <osg/Texture2D>
 #include <osg/buffered_value>
 
@@ -60,6 +63,8 @@ namespace MWRender
 
         void setPostProcessing(bool enabled) { mPostprocessing = enabled; }
 
+        void setGpuTimingStats(osg::Stats* stats) { mGpuTimingStats = stats; }
+
         const osg::ref_ptr<osg::Texture>& getSceneTexture(size_t frameId) const { return mTextureScene; }
 
     private:
@@ -79,6 +84,16 @@ namespace MWRender
         osg::ref_ptr<osg::Texture> mTextureWorldDepth;
         osg::ref_ptr<osg::Texture> mTextureNormals;
         osg::ref_ptr<osg::Texture> mTextureDistortion;
+
+        struct GpuTiming
+        {
+            std::array<GLuint, 2> mQueries;
+            unsigned mFrame;
+            std::string mName;
+            osg::ref_ptr<osg::Stats> mStats;
+        };
+        mutable osg::buffered_object<std::vector<GpuTiming>> mGpuTimings;
+        osg::ref_ptr<osg::Stats> mGpuTimingStats;
 
         mutable bool mDirty = false;
         mutable std::vector<Fx::Types::RenderTarget> mDirtyAttachments;

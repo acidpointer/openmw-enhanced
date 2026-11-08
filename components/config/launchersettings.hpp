@@ -28,6 +28,7 @@ namespace Config
         struct Settings
         {
             QString mLanguage;
+            QString mRenderGpu;
             bool mWatchdog = false;
             UnknownKeys mUnknown;
         };
@@ -103,6 +104,18 @@ namespace Config
         QString getLanguage() const { return mSettings.mLanguage; }
 
         void setLanguage(const QString& value) { mSettings.mLanguage = value; }
+
+        QString getRenderGpu() const
+        {
+            return mSettings.mRenderGpu == QStringLiteral("auto") ? QString() : mSettings.mRenderGpu;
+        }
+
+        void setRenderGpu(const QString& value)
+        {
+            // An explicit value prevents watchdog recovery from restoring an
+            // older GPU choice after the user switches back to Automatic.
+            mSettings.mRenderGpu = value.isEmpty() ? QStringLiteral("auto") : value;
+        }
 
         bool getWatchdog() const { return mSettings.mWatchdog; }
 

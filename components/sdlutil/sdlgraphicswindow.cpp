@@ -1,6 +1,8 @@
 #include "sdlgraphicswindow.hpp"
 
 #include <SDL_video.h>
+#include <components/debug/frametrace.hpp>
+#include <osg/FrameStamp>
 
 #ifdef OPENMW_GL4ES_MANUAL_INIT
 #include "gl4esinit.h"
@@ -244,6 +246,8 @@ namespace SDLUtil
         if (!mRealized)
             return;
 
+        const auto* stamp = getState() ? getState()->getFrameStamp() : nullptr;
+        Debug::Trace::Scope trace("Swap buffers", stamp ? stamp->getFrameNumber() : 0);
         SDL_GL_SwapWindow(mWindow);
     }
 

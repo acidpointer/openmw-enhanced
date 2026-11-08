@@ -1,6 +1,12 @@
 #include "pingpongcanvas.hpp"
 
+#include <components/debug/frametrace.hpp>
+#include <cstdlib>
+#include <string_view>
+
 #include <cassert>
+#include <osg/FrameStamp>
+#include <osg/GLExtensions>
 
 #include <components/shader/shadermanager.hpp>
 #include <components/stereo/multiview.hpp>
@@ -67,6 +73,7 @@ namespace MWRender
     {
         osg::Geometry::resizeGLObjectBuffers(maxSize);
         mEmptyUniformStacks.resize(maxSize);
+        mGpuTimings.resize(maxSize);
     }
 
     static void attachCloneOfTemplate(
@@ -99,7 +106,35 @@ namespace MWRender
         emptyUniformStacks.clear();
         osg::GLExtensions* ext = state.get<osg::GLExtensions>();
 
-        size_t frameId = state.getFrameStamp()->getFrameNumber() % 2;
+        const unsigned frameNumber = state.getFrameStamp()->getFrameNumber();
+        size_t frameId = frameNumber % 2;
+        static const bool collectGpuTimings = [] {
+            const char* value = std::getenv("OPENMW_GPU_TIMINGS");
+            return value && std::string_view(value) == "1";
+        }();
+        const bool gpuTimings = collectGpuTimings && ext->isARBTimerQuerySupported && ext->glQueryCounter
+            && ext->glGetQueryObjectui64v && ext->glGetQueryObjectiv && ext->glGenQueries && ext->glDeleteQueries;
+        auto& pendingTimings = mGpuTimings[state.getContextID()];
+        if (gpuTimings)
+        {
+            for (auto it = pendingTimings.begin(); it != pendingTimings.end();)
+            {
+                GLint available = GL_FALSE;
+                ext->glGetQueryObjectiv(it->mQueries[1], GL_QUERY_RESULT_AVAILABLE, &available);
+                if (!available)
+                {
+                    ++it;
+                    continue; // Never synchronously wait for a GPU result.
+                }
+                GLuint64 begin = 0, end = 0;
+                ext->glGetQueryObjectui64v(it->mQueries[0], GL_QUERY_RESULT, &begin);
+                ext->glGetQueryObjectui64v(it->mQueries[1], GL_QUERY_RESULT, &end);
+                if (end >= begin && it->mStats)
+                    it->mStats->setAttribute(it->mFrame, it->mName, static_cast<double>(end - begin) * 1e-9);
+                ext->glDeleteQueries(2, it->mQueries.data());
+                it = pendingTimings.erase(it);
+            }
+        }
 
         std::vector<size_t> filtered;
 
@@ -338,7 +373,20 @@ namespace MWRender
                 if (!state.getLastAppliedProgramObject())
                     mFallbackProgram->apply(state);
 
-                drawGeometry(renderInfo);
+                std::optional<GpuTiming> timing;
+                if (gpuTimings && pendingTimings.size() < 256)
+                {
+                    timing.emplace();
+                    timing->mFrame = frameNumber;
+                    timing->mName = "GPU postprocess " + node.mHandle->getName() + "/" + pass.mName + " time taken";
+                    timing->mStats = mGpuTimingStats;
+                    ext->glGenQueries(2, timing->mQueries.data());
+                    ext->glQueryCounter(timing->mQueries[0], GL_TIMESTAMP);
+                }
+                {
+                    Debug::Trace::Scope trace("Postprocess draw dispatch", frameNumber);
+                    drawGeometry(renderInfo);
+                }
 
                 if (pass.mRenderTarget && pass.mRenderTexture->getNumMipmapLevels() > 0)
                 {
@@ -349,6 +397,11 @@ namespace MWRender
                     ext->glGenerateMipmap(GL_TEXTURE_2D);
                 }
 
+                if (timing)
+                {
+                    ext->glQueryCounter(timing->mQueries[1], GL_TIMESTAMP);
+                    pendingTimings.push_back(std::move(*timing));
+                }
                 state.popStateSet();
                 state.apply();
             }

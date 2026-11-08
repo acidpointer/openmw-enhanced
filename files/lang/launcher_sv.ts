@@ -440,6 +440,34 @@ de ordinarie fonterna i Morrowind. Bocka denna ruta om du ändå föredrar ordin
         <source>Windowed Fullscreen mode always uses the native display resolution.</source>
         <translation>Helskärm i fönsterläge använder alltid skärmens nativa upplösning.</translation>
     </message>
+    <message>
+        <source>Rendering GPU</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Applies the next time you launch the game.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>GPU</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Last game renderer</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Automatic (system default)</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Unavailable GPU (%1) — using Automatic</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Not recorded yet</source>
+        <translation type="unfinished"></translation>
+    </message>
 </context>
 <context>
     <name>Launcher::ImportPage</name>

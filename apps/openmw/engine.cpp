@@ -15,6 +15,7 @@
 #include <SDL.h>
 
 #include <components/debug/debuglog.hpp>
+#include <components/debug/frametrace.hpp>
 #include <components/debug/gldebug.hpp>
 
 #include <components/misc/framestats.hpp>
@@ -212,6 +213,7 @@ void OMW::Engine::executeLocalScripts()
 
 bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 {
+    Debug::Trace::Scope frameTrace("Engine frame", frameNumber);
     const osg::Timer* const timer = osg::Timer::instance();
     // Viewer stats times are relative to the viewer start tick, so express it on the clock the subsystems use
     const Misc::FrameClock::time_point statsEpoch = Misc::FrameClock::now()
@@ -227,7 +229,10 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         // Stop the background GC started at the previous frame's end.
         // Input handling can run Lua (the menu key does), so the state
         // must not be collected from this point on.
-        mLuaWorker->finishGc();
+        {
+            Debug::Trace::Scope trace("Wait for Lua GC", frameNumber);
+            mLuaWorker->finishGc();
+        }
 
         // update input
         {
@@ -355,6 +360,7 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
     if (reportResource)
     {
+        Debug::Trace::Scope trace("Collect resource statistics", frameNumber);
         stats->setAttribute(frameNumber, "FrameNumber", frameNumber);
 
         mResourceSystem->reportStats(frameNumber, stats);
@@ -371,8 +377,14 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
     mStereoManager->updateSettings(Settings::camera().mNearClip, Settings::camera().mViewingDistance);
 
-    mViewer->eventTraversal();
-    mViewer->updateTraversal();
+    {
+        Debug::Trace::Scope trace("Event traversal", frameNumber);
+        mViewer->eventTraversal();
+    }
+    {
+        Debug::Trace::Scope trace("Update traversal", frameNumber);
+        mViewer->updateTraversal();
+    }
 
     // update focus object for GUI
     {
@@ -383,9 +395,15 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
     // if there is a separate Lua thread, it starts the update now
     mLuaWorker->allowUpdate(statsEpoch, frameNumber, frameStats);
 
-    mViewer->renderingTraversals();
+    {
+        Debug::Trace::Scope trace("Rendering traversal and synchronization", frameNumber);
+        mViewer->renderingTraversals();
+    }
 
-    mLuaWorker->finishUpdate(statsEpoch, frameNumber, frameStats);
+    {
+        Debug::Trace::Scope trace("Wait for Lua update", frameNumber);
+        mLuaWorker->finishUpdate(statsEpoch, frameNumber, frameStats);
+    }
 
     // The Lua state is unused until the next frame starts: the worker collects
     // garbage through the frame tail and the framerate-limiter sleep.
@@ -432,6 +450,11 @@ OMW::Engine::Engine(Files::ConfigurationManager& configurationManager)
 
 OMW::Engine::~Engine()
 {
+    // Cull/draw callbacks retain world resources. Join graphics threads before
+    // destroying the world, occlusion workers, and resource managers below.
+    if (mViewer)
+        mViewer->stopThreading();
+
     if (mScreenCaptureOperation != nullptr)
     {
         mScreenCaptureOperation->stop();
@@ -975,6 +998,8 @@ void OMW::Engine::go()
 {
     assert(!mContentFiles.empty());
 
+    if (const char* selectedGpu = std::getenv("OPENMW_RENDER_GPU"))
+        Log(Debug::Info) << "Launcher requested rendering GPU: " << selectedGpu;
     Log(Debug::Info) << "OSG version: " << osgGetVersion();
     SDL_version sdlVersion;
     SDL_GetVersion(&sdlVersion);
@@ -1002,6 +1027,9 @@ void OMW::Engine::go()
     mEnvironment.setFrameRateLimit(Settings::video().mFramerateLimit);
 
     prepareEngine();
+
+    if (const char* driver = SDL_GetCurrentVideoDriver())
+        Log(Debug::Info) << "SDL video driver: " << driver;
 
 #ifdef _WIN32
     const auto* statsFile = _wgetenv(L"OPENMW_OSG_STATS_FILE");
@@ -1080,6 +1108,7 @@ void OMW::Engine::go()
         mViewer->advance(timeManager.getRenderingSimulationTime());
 
         const unsigned frameNumber = mViewer->getFrameStamp()->getFrameNumber();
+        Debug::Trace::Scope loopTrace("Main loop", frameNumber);
 
         if (!frame(frameNumber, static_cast<float>(dt)))
         {
@@ -1095,9 +1124,11 @@ void OMW::Engine::go()
 
         if (stats)
         {
+            Debug::Trace::Scope trace("Write OSG statistics", frameNumber);
             // The delay is required because rendering happens in parallel to the main thread and stats from there is
             // available with delay.
-            constexpr unsigned statsReportDelay = 3;
+            const char* gpuTimingValue = std::getenv("OPENMW_GPU_TIMINGS");
+            const unsigned statsReportDelay = gpuTimingValue && std::string_view(gpuTimingValue) == "1" ? 16 : 3;
             if (frameNumber >= statsReportDelay)
             {
                 // Viewer frame number can be different from frameNumber because of loading screens which render new
@@ -1108,7 +1139,10 @@ void OMW::Engine::go()
             }
         }
 
-        frameRateLimiter.limit();
+        {
+            Debug::Trace::Scope trace("Frame limiter", frameNumber);
+            frameRateLimiter.limit();
+        }
     }
 
     mLuaWorker->join();

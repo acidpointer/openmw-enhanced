@@ -18,18 +18,13 @@ namespace OcclusionCulling
     struct OccluderMesh
     {
         osg::BoundingBox aabb;
-        std::vector<osg::Vec3f> vertices; // shrunk toward centroid for conservative occlusion
+        std::vector<osg::Vec3f> vertices; // original triangles, optionally inset within each triangle
         std::vector<unsigned int> indices; // triangle indices
     };
 
-    /// Build a simplified occluder mesh from an OSG node's geometry.
-    /// Collects triangles from the node, applies vertex clustering on a coarse 3D grid,
-    /// and shrinks the result toward the centroid for conservative occlusion.
-    /// Alpha-tested geometry (e.g. foliage billboards) is excluded.
-    /// @param node        Source node to collect geometry from
-    /// @param gridRes     Grid resolution for vertex clustering (higher = more detail)
-    /// @param shrinkFactor How much to shrink toward centroid (0..1, 1 = no shrink)
-    /// @return Simplified mesh with AABB, or empty mesh if no geometry found
+    /// Select at most 2 * gridRes^2 original opaque triangles by area.
+    /// Dynamic/transparent geometry is excluded. Original winding and openings
+    /// are preserved; shrinkFactor only insets triangles within their own plane.
     OccluderMesh buildSimplifiedMesh(osg::Node* node, int gridRes, float shrinkFactor);
 
     /// Build a reusable local-space mesh without applying the root node's

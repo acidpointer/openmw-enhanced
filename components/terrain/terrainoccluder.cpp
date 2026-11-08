@@ -2,6 +2,7 @@
 #include "storage.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include <osg/Array>
@@ -14,30 +15,50 @@ namespace Terrain
     {
     }
 
+    void TerrainOccluder::setWorldspace(ESM::RefId worldspace)
+    {
+        if (mWorldspace == worldspace)
+            return;
+        mWorldspace = worldspace;
+        if (!worldspace.empty())
+            mCellWorldSize = mStorage->getCellWorldSize(worldspace);
+        invalidate();
+    }
+
     bool TerrainOccluder::hasTerrainData() const
     {
         // Only exterior worldspaces have terrain
-        return !mWorldspace.empty();
+        return !mWorldspace.empty() && std::isfinite(mCellWorldSize) && mCellWorldSize > 0;
     }
 
-    void TerrainOccluder::build(const osg::Vec3f& eyePoint, int radiusCells, std::vector<osg::Vec3f>& outPositions,
-        std::vector<unsigned int>& outIndices)
+    void TerrainOccluder::update(const osg::Vec3f& eyePoint, int radiusCells)
     {
         if (!hasTerrainData())
+        {
+            invalidate();
             return;
+        }
+        radiusCells = std::clamp(radiusCells, 0, 32);
+        auto& outPositions = mCachedPositions;
+        auto& outIndices = mCachedIndices;
 
-        // Determine camera cell
-        int cellX = static_cast<int>(std::floor(eyePoint.x() / mCellWorldSize));
-        int cellY = static_cast<int>(std::floor(eyePoint.y() / mCellWorldSize));
+        // Invalid camera positions must not become integer conversion overflow.
+        const double x = std::floor(static_cast<double>(eyePoint.x()) / mCellWorldSize);
+        const double y = std::floor(static_cast<double>(eyePoint.y()) / mCellWorldSize);
+        if (!std::isfinite(x) || !std::isfinite(y) || x < std::numeric_limits<int>::min() + radiusCells
+            || x > std::numeric_limits<int>::max() - radiusCells || y < std::numeric_limits<int>::min() + radiusCells
+            || y > std::numeric_limits<int>::max() - radiusCells)
+        {
+            invalidate();
+            return;
+        }
+        const int cellX = static_cast<int>(x);
+        const int cellY = static_cast<int>(y);
         osg::Vec2i cellPos(cellX, cellY);
 
         // Use cache if camera hasn't moved to a different cell
-        if (cellPos == mCachedCellPos && radiusCells == mCachedRadius && !mCachedPositions.empty())
-        {
-            outPositions = mCachedPositions;
-            outIndices = mCachedIndices;
+        if (mCacheValid && cellPos == mCachedCellPos && radiusCells == mCachedRadius)
             return;
-        }
 
         outPositions.clear();
         outIndices.clear();
@@ -52,6 +73,18 @@ namespace Terrain
         {
             for (int cx = cellX - radiusCells; cx <= cellX + radiusCells; ++cx)
             {
+                const auto [entry, inserted] = mCells.try_emplace(std::pair(cx, cy));
+                auto& cellMesh = entry->second;
+                if (!inserted)
+                {
+                    const auto base = static_cast<unsigned int>(outPositions.size());
+                    outPositions.insert(outPositions.end(), cellMesh.positions.begin(), cellMesh.positions.end());
+                    for (const auto index : cellMesh.indices)
+                        outIndices.push_back(base + index);
+                    continue;
+                }
+                const auto firstPosition = outPositions.size();
+                const auto firstIndex = outIndices.size();
                 osg::Vec2f center(cx + 0.5f, cy + 0.5f);
 
                 // Get full-resolution heights
@@ -66,7 +99,7 @@ namespace Terrain
                     continue;
 
                 int fullPerSide = static_cast<int>(std::sqrt(static_cast<float>(fullRes->size())));
-                if (fullPerSide < 2)
+                if (fullPerSide < 2 || static_cast<std::size_t>(fullPerSide) * fullPerSide != fullRes->size())
                     continue;
 
                 int coarsePerSide = (fullPerSide - 1) / step + 1;
@@ -140,13 +173,20 @@ namespace Terrain
                         outIndices.push_back(br);
                     }
                 }
+                cellMesh.positions.assign(outPositions.begin() + firstPosition, outPositions.end());
+                cellMesh.indices.reserve(outIndices.size() - firstIndex);
+                for (auto i = firstIndex; i < outIndices.size(); ++i)
+                    cellMesh.indices.push_back(outIndices[i] - static_cast<unsigned int>(firstPosition));
             }
         }
 
         // Update cache
         mCachedCellPos = cellPos;
         mCachedRadius = radiusCells;
-        mCachedPositions = outPositions;
-        mCachedIndices = outIndices;
+        mCacheValid = true;
+        std::erase_if(mCells, [&](const auto& cell) {
+            return std::abs(cell.first.first - cellX) > radiusCells
+                || std::abs(cell.first.second - cellY) > radiusCells;
+        });
     }
 }

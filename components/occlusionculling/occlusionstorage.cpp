@@ -1,9 +1,16 @@
 #include "occlusionstorage.hpp"
 
 #include <components/debug/debuglog.hpp>
+#include <components/debug/frametrace.hpp>
+#include <components/files/hash.hpp>
+#include <components/sceneutil/workqueue.hpp>
+#include <components/vfs/manager.hpp>
+#include <functional>
+#include <sstream>
 
 #include <sqlite3.h>
 
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -11,6 +18,19 @@ namespace OcclusionCulling
 {
     namespace
     {
+        class PrepareMesh final : public SceneUtil::WorkItem
+        {
+        public:
+            explicit PrepareMesh(std::function<void()> work)
+                : mWork(std::move(work))
+            {
+            }
+            void doWork() override { mWork(); }
+
+        private:
+            std::function<void()> mWork;
+        };
+
         template <class T>
         bool readPod(const std::byte*& cursor, std::size_t& remaining, T& out)
         {
@@ -23,12 +43,14 @@ namespace OcclusionCulling
         }
     }
 
-    OcclusionStorage::OcclusionStorage(const std::string& databasePath)
+    OcclusionStorage::OcclusionStorage(const std::string& databasePath, const VFS::Manager* vfs)
+        : mVfs(vfs)
+        , mBuildQueue(std::make_unique<SceneUtil::WorkQueue>(1))
     {
         if (databasePath.empty())
             return;
 
-        const int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE;
+        const int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
         if (sqlite3_open_v2(databasePath.c_str(), &mDb, flags, nullptr) != SQLITE_OK)
         {
             Log(Debug::Warning) << "Failed to open occlusion cache database \"" << databasePath << "\": "
@@ -74,8 +96,125 @@ namespace OcclusionCulling
 
     OcclusionStorage::~OcclusionStorage()
     {
+        // Stop job chaining before cancelling/joining the worker queue.
+        {
+            const std::lock_guard lock(mReadyMutex);
+            mStopping = true;
+            mDeferred.clear();
+            mDeferredKeys.clear();
+        }
+        mBuildQueue.reset();
         if (mDb)
             sqlite3_close(mDb);
+    }
+
+    std::string OcclusionStorage::persistentModelKey(std::string_view modelPath) const
+    {
+        {
+            const std::lock_guard lock(mMutex);
+            if (const auto it = mContentKeys.find(std::string(modelPath)); it != mContentKeys.end())
+                return it->second;
+        }
+        // VFS resolves the winning mod/archive entry. Hash its bytes rather than
+        // just its name, so changed assets never reuse the old occluder geometry.
+        std::ostringstream key;
+        key << "mesh-v3:" << modelPath;
+        if (mVfs)
+        {
+            try
+            {
+                auto stream = mVfs->get(VFS::Path::Normalized(modelPath));
+                const auto hash = Files::getHash(modelPath, *stream);
+                key << ':' << std::hex << hash[0] << ':' << hash[1];
+            }
+            catch (const std::exception&)
+            {
+                return {}; // An optional cache must not break model loading.
+            }
+        }
+        const std::lock_guard lock(mMutex);
+        return mContentKeys.emplace(std::string(modelPath), key.str()).first->second;
+    }
+
+    void OcclusionStorage::prepare(
+        std::string modelPath, osg::ref_ptr<const osg::Node> source, int meshRes, float shrinkFactor)
+    {
+        if (!source || modelPath.empty())
+            return;
+        const int shrinkKey = makeShrinkKey(shrinkFactor);
+        const std::string key = makeKey(modelPath, meshRes, shrinkKey);
+        const std::unique_lock submissionLock(mReadyMutex);
+        if (mStopping || mReady.contains(key) || mPending.contains(key) || mDeferredKeys.contains(key))
+            return;
+        if (mPending.size() >= 128)
+        {
+            // Keep only a weak reference in the overflow backlog. Loading a
+            // dense cell must not permanently lose most preparation requests.
+            if (mDeferred.size() < 4096)
+            {
+                mDeferred.push_back({ key, std::move(modelPath), source.get(), meshRes, shrinkFactor });
+                mDeferredKeys.insert(key);
+                ++mDeferredCount;
+            }
+            else
+                ++mRejected;
+            return;
+        }
+        mPending.insert(key);
+        ++mQueued;
+        // Submission stays under the ready mutex so shutdown cannot reset the
+        // queue between checking mStopping and adding a chained job.
+        mBuildQueue->addWorkItem(
+            std::make_shared<PrepareMesh>([this, key, modelPath = std::move(modelPath), source = std::move(source),
+                                              meshRes, shrinkFactor, shrinkKey] {
+                Debug::Trace::Scope trace("Prepare immutable occluder mesh");
+                std::shared_ptr<const OccluderMesh> ready;
+                try
+                {
+                    auto mesh = std::make_shared<OccluderMesh>();
+                    if (!get(modelPath, meshRes, shrinkKey, *mesh))
+                    {
+                        recordMiss();
+                        *mesh = buildSimplifiedMesh(const_cast<osg::Node*>(source.get()), meshRes, shrinkFactor);
+                        put(modelPath, meshRes, shrinkKey, *mesh);
+                    }
+                    ready = std::move(mesh);
+                }
+                catch (const std::exception& error)
+                {
+                    Log(Debug::Warning) << "Could not prepare occluder " << modelPath << ": " << error.what();
+                }
+                DeferredRequest next;
+                osg::ref_ptr<const osg::Node> nextSource;
+                {
+                    const std::lock_guard lock(mReadyMutex);
+                    mPending.erase(key);
+                    mReady.emplace(key, std::move(ready));
+                    while (!mStopping && !mDeferred.empty())
+                    {
+                        next = std::move(mDeferred.front());
+                        mDeferred.pop_front();
+                        mDeferredKeys.erase(next.key);
+                        if (next.source.lock(nextSource))
+                            break;
+                    }
+                }
+                if (nextSource)
+                    prepare(std::move(next.model), std::move(nextSource), next.resolution, next.shrink);
+            }));
+    }
+
+    std::shared_ptr<const OccluderMesh> OcclusionStorage::getReady(
+        std::string_view modelPath, int meshRes, int shrinkKey) const
+    {
+        const std::unique_lock lock(mReadyMutex, std::try_to_lock);
+        if (!lock.owns_lock())
+            return {};
+        const auto it = mReady.find(makeKey(modelPath, meshRes, shrinkKey));
+        if (it == mReady.end())
+            return {};
+        mReadyHits.fetch_add(1, std::memory_order_relaxed);
+        return it->second;
     }
 
     bool OcclusionStorage::isOpen() const
@@ -109,15 +248,17 @@ namespace OcclusionCulling
             || !readPod(cursor, remaining, indexCount))
             return false;
 
+        // Validate counts before allocating, including on truncated/corrupt rows.
+        if (vertexCount > remaining / sizeof(osg::Vec3f))
+            return false;
+        const std::size_t vertexBytes = sizeof(osg::Vec3f) * vertexCount;
+        if (indexCount > (remaining - vertexBytes) / sizeof(unsigned int) || indexCount % 3 != 0)
+            return false;
+        const std::size_t indexBytes = sizeof(unsigned int) * indexCount;
         out = {};
         out.aabb.set(mins[0], mins[1], mins[2], maxs[0], maxs[1], maxs[2]);
         out.vertices.resize(vertexCount);
         out.indices.resize(indexCount);
-
-        const std::size_t vertexBytes = sizeof(osg::Vec3f) * out.vertices.size();
-        const std::size_t indexBytes = sizeof(unsigned int) * out.indices.size();
-        if (remaining < vertexBytes + indexBytes)
-            return false;
 
         if (vertexBytes)
         {
@@ -127,7 +268,18 @@ namespace OcclusionCulling
         }
         if (indexBytes)
             std::memcpy(out.indices.data(), cursor, indexBytes);
-
+        if (!out.vertices.empty() && !out.aabb.valid())
+            return false;
+        for (int axis = 0; axis < 3; ++axis)
+            if (!std::isfinite(mins[axis]) || !std::isfinite(maxs[axis]))
+                return false;
+        for (const auto& vertex : out.vertices)
+            for (int axis = 0; axis < 3; ++axis)
+                if (!std::isfinite(vertex[axis]))
+                    return false;
+        for (const auto index : out.indices)
+            if (index >= vertexCount)
+                return false;
         return true;
     }
 
@@ -136,7 +288,10 @@ namespace OcclusionCulling
         if (!mDb)
             return false;
 
-        const std::string key = makeKey(modelPath, meshRes, shrinkKey);
+        const std::string persistentPath = persistentModelKey(modelPath);
+        if (persistentPath.empty())
+            return false;
+        const std::string key = makeKey(persistentPath, meshRes, shrinkKey);
         {
             const std::lock_guard lock(mMutex);
             const auto it = mCache.find(key);
@@ -148,12 +303,14 @@ namespace OcclusionCulling
             }
         }
 
+        Debug::Trace::Scope trace("Occluder database read");
+        const std::lock_guard dbLock(mDbMutex);
         sqlite3_stmt* stmt = nullptr;
         constexpr const char* sql = "SELECT mesh_blob FROM occlusion_meshes WHERE model_path = ?1 AND mesh_res = ?2 AND shrink_key = ?3";
         if (sqlite3_prepare_v2(mDb, sql, -1, &stmt, nullptr) != SQLITE_OK)
             return false;
 
-        sqlite3_bind_text(stmt, 1, modelPath.data(), static_cast<int>(modelPath.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 1, persistentPath.data(), static_cast<int>(persistentPath.size()), SQLITE_TRANSIENT);
         sqlite3_bind_int(stmt, 2, meshRes);
         sqlite3_bind_int(stmt, 3, shrinkKey);
 
@@ -180,6 +337,10 @@ namespace OcclusionCulling
     OcclusionStorage::Stats OcclusionStorage::getAndResetStats()
     {
         Stats s;
+        s.queued = mQueued.exchange(0);
+        s.deferred = mDeferredCount.exchange(0);
+        s.rejected = mRejected.exchange(0);
+        s.readyHits = mReadyHits.exchange(0);
         s.memHits = mMemHits.exchange(0);
         s.dbHits  = mDbHits.exchange(0);
         s.misses  = mMisses.exchange(0);
@@ -224,6 +385,12 @@ namespace OcclusionCulling
         if (!mDb)
             return;
 
+        const std::string persistentPath = persistentModelKey(modelPath);
+        if (persistentPath.empty())
+            return;
+        const std::string key = makeKey(persistentPath, meshRes, shrinkKey);
+        Debug::Trace::Scope trace("Occluder database write");
+        const std::lock_guard dbLock(mDbMutex);
         const std::vector<std::byte> blob = serialize(mesh);
         if (blob.empty())
             return;
@@ -237,7 +404,7 @@ namespace OcclusionCulling
         if (sqlite3_prepare_v2(mDb, sql, -1, &stmt, nullptr) != SQLITE_OK)
             return;
 
-        sqlite3_bind_text(stmt, 1, modelPath.data(), static_cast<int>(modelPath.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 1, persistentPath.data(), static_cast<int>(persistentPath.size()), SQLITE_TRANSIENT);
         sqlite3_bind_int(stmt, 2, meshRes);
         sqlite3_bind_int(stmt, 3, shrinkKey);
         sqlite3_bind_blob(stmt, 4, blob.data(), static_cast<int>(blob.size()), SQLITE_TRANSIENT);
@@ -246,7 +413,6 @@ namespace OcclusionCulling
         sqlite3_finalize(stmt);
         ++mWrites;
 
-        const std::string key = makeKey(modelPath, meshRes, shrinkKey);
         const auto cached = std::make_shared<OccluderMesh>(mesh);
         const std::lock_guard lock(mMutex);
         mCache.emplace(key, cached);

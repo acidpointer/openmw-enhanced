@@ -311,6 +311,7 @@ add_component_dir (stereo
     )
 
 add_component_dir (debug
+    frametrace
     debugging debuglog gldebug debugdraw writeflags
     )
 add_component_dir (files
@@ -539,7 +540,7 @@ if (USE_QT)
 
     add_component_qt_dir (config
         gamesettings
-        launchersettings
+        launchersettings gpuselection
         )
 
     add_component_qt_dir (l10n

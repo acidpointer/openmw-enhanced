@@ -143,7 +143,10 @@ namespace MWRender
         std::shared_ptr<LuminanceCalculator> luminanceCalculator = std::make_shared<LuminanceCalculator>(shaderManager);
 
         for (auto& canvas : mCanvases)
+        {
             canvas = new PingPongCanvas(shaderManager, luminanceCalculator);
+            canvas->setGpuTimingStats(mViewer->getViewerStats());
+        }
 
         mHUDCamera->setReferenceFrame(osg::Camera::ABSOLUTE_RF);
         mHUDCamera->setRenderOrder(osg::Camera::POST_RENDER);

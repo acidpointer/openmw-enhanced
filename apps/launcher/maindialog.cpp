@@ -49,6 +49,17 @@ Launcher::MainDialog::MainDialog(const Files::ConfigurationManager& configuratio
     mGameInvoker = new ProcessInvoker();
     mWizardInvoker = new ProcessInvoker();
 
+    if (qEnvironmentVariableIsSet("OPENMW_ENHANCED_APPIMAGE"))
+    {
+        // Exiting the AppImage entry process releases its mount (or extraction
+        // directory). Keep it alive until the engine finishes loading and using
+        // resources and dynamically loaded OSG plugins.
+        mGameInvoker->getProcess()->setProcessChannelMode(QProcess::ForwardedChannels);
+        connect(mGameInvoker->getProcess(), &QProcess::started, this, &MainDialog::hide);
+        connect(mGameInvoker->getProcess(), qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [](int, QProcess::ExitStatus) { qApp->quit(); });
+    }
+
     connect(mWizardInvoker->getProcess(), &QProcess::started, this, &MainDialog::wizardStarted);
 
     connect(mWizardInvoker->getProcess(), qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
@@ -119,7 +130,8 @@ void Launcher::MainDialog::createPages()
         return;
 
     mDataFilesPage = new DataFilesPage(mCfgMgr, mGameSettings, mLauncherSettings, this);
-    mGraphicsPage = new GraphicsPage(this);
+    mGraphicsPage
+        = new GraphicsPage(mLauncherSettings, Files::pathToQString(mCfgMgr.getLogPath() / "openmw.log"), this);
     mImportPage = new ImportPage(mCfgMgr, mGameSettings, mLauncherSettings, this);
     mSettingsPage = new SettingsPage(mCfgMgr, mGameSettings, this);
 
@@ -645,13 +657,15 @@ void Launcher::MainDialog::play()
         return;
     }
 
-    // Launch the game detached
+    // An AppImage's entry process owns the lifetime of its bundled files.
+    const bool keepAppImageAlive = qEnvironmentVariableIsSet("OPENMW_ENHANCED_APPIMAGE");
 
     QStringList arguments;
     for (const std::filesystem::path& path : mCfgMgr.getActiveConfigPaths())
         arguments << QLatin1String("--config") << Files::pathToQString(path);
 
-    if (mGameInvoker->startProcess(QLatin1String("openmw"), arguments, true))
+    mGameInvoker->getProcess()->setProcessEnvironment(mGraphicsPage->gameEnvironment());
+    if (mGameInvoker->startProcess(QLatin1String("openmw"), arguments, !keepAppImageAlive) && !keepAppImageAlive)
         return qApp->quit();
 }
 

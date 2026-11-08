@@ -1019,6 +1019,11 @@ namespace MWRender
 
         group->getBound();
         group->setNodeMask(Mask_Static);
+        // Cull terrain-hidden chunks before preparing their light lists, even
+        // when they contain no eligible static occluder geometry.
+        if (mOcclusionCuller)
+            group->addCullCallback(new PagedOccluderCallback(
+                mOcclusionCuller, SceneUtil::Enhanced::occlusionOccluderMaxDistance(), mMaxTriangles));
         if (activeGrid)
         {
             std::sort(refnums.begin(), refnums.end());
@@ -1032,11 +1037,6 @@ namespace MWRender
         {
             pagedOccluderData->buildSpatialBins();
             group->getOrCreateUserDataContainer()->addUserObject(pagedOccluderData);
-            if (mOcclusionCuller)
-            {
-                float maxDist = SceneUtil::Enhanced::occlusionOccluderMaxDistance();
-                group->addCullCallback(new PagedOccluderCallback(mOcclusionCuller, maxDist, mMaxTriangles));
-            }
         }
 
         return group;

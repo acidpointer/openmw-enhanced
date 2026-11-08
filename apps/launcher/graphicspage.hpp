@@ -3,12 +3,21 @@
 
 #include "ui_graphicspage.h"
 
+#include <components/config/gpuselection.hpp>
 #include <components/settings/windowmode.hpp>
 
 namespace Files
 {
     struct ConfigurationManager;
 }
+
+namespace Config
+{
+    class LauncherSettings;
+}
+
+class QComboBox;
+class QLabel;
 
 namespace Launcher
 {
@@ -19,7 +28,9 @@ namespace Launcher
         Q_OBJECT
 
     public:
-        explicit GraphicsPage(QWidget* parent = nullptr);
+        GraphicsPage(Config::LauncherSettings& launcherSettings, const QString& logPath, QWidget* parent = nullptr);
+
+        QProcessEnvironment gameEnvironment() const;
 
         void saveSettings();
         bool loadSettings();
@@ -33,7 +44,14 @@ namespace Launcher
         void slotFramerateLimitToggled(bool checked);
 
     private:
+        Config::LauncherSettings& mLauncherSettings;
+        QVector<Config::RenderGpu> mGpus;
+        QComboBox* mGpuSelector;
+        QLabel* mLastRenderer;
+        QString mLogPath;
         QVector<QStringList> mResolutionsPerScreen;
+
+        void loadGpuSelection();
 
         static QStringList getAvailableResolutions(int screen);
         static QRect getMaximumResolution();

@@ -15,7 +15,6 @@ fi
 mkdir -p \
     "${APPDIR}/usr/share/applications" \
     "${APPDIR}/usr/share/icons/hicolor/256x256/apps" \
-    "${APPDIR}/usr/lib/osgPlugins" \
     "${DIST_DIR}"
 
 cp "${ROOT}/enhanced/appimage/openmw-enhanced.desktop" \
@@ -49,13 +48,30 @@ for settings_file in defaults.bin defaults-cs.bin; do
     fi
 done
 
-OSG_PLUGIN_DIR="$(find /usr/lib -type d -name 'osgPlugins-*' 2>/dev/null | head -n 1 || true)"
-if [[ -n "${OSG_PLUGIN_DIR}" ]]; then
-    for plugin in bmp dae dds freetype jpeg osg png serializers_osg tga; do
-        find "${OSG_PLUGIN_DIR}" -maxdepth 1 -type f -name "osgdb_${plugin}.so" \
-            -exec cp {} "${APPDIR}/usr/lib/osgPlugins/" \;
-    done
+# Match the plugins to the OSG libraries used by this build. OSG first searches
+# for osgPlugins-VERSION/osgdb_NAME.so and only then tries a bare filename. A
+# flattened plugin directory lets host plugins win that first search, even with
+# OSG_LIBRARY_PATH set, mixing incompatible OSG ABIs in the same process.
+OSG_VERSION="$(sed -n 's/^OPENSCENEGRAPH_VERSION:INTERNAL=//p' "${BUILD_DIR}/CMakeCache.txt")"
+OSG_DB_LIBRARY="$(sed -n 's/^OSGDB_LIBRARY_RELEASE:FILEPATH=//p' "${BUILD_DIR}/CMakeCache.txt")"
+if [[ -z "${OSG_VERSION}" || ! -f "${OSG_DB_LIBRARY}" ]]; then
+    echo "Cannot determine the build's shared OSG library/version from CMakeCache.txt." >&2
+    exit 1
 fi
+OSG_PLUGIN_DIR="$(dirname -- "${OSG_DB_LIBRARY}")/osgPlugins-${OSG_VERSION}"
+OSG_PLUGIN_DEST="${APPDIR}/usr/lib/osgPlugins-${OSG_VERSION}"
+mkdir -p "${OSG_PLUGIN_DEST}"
+
+osg_library_args=()
+for plugin in bmp dae dds freetype jpeg osg png serializers_osg tga; do
+    plugin_file="${OSG_PLUGIN_DIR}/osgdb_${plugin}.so"
+    if [[ ! -f "${plugin_file}" ]]; then
+        echo "Missing required OSG plugin: ${plugin_file}" >&2
+        exit 1
+    fi
+    cp -L "${plugin_file}" "${OSG_PLUGIN_DEST}/"
+    osg_library_args+=(--library "${OSG_PLUGIN_DEST}/osgdb_${plugin}.so")
+done
 
 export APPIMAGE_EXTRACT_AND_RUN=1
 export OUTPUT="${DIST_DIR}/OpenMW-Enhanced-x86_64.AppImage"
@@ -66,6 +82,7 @@ export OUTPUT="${DIST_DIR}/OpenMW-Enhanced-x86_64.AppImage"
     --icon-file "${APPDIR}/usr/share/icons/hicolor/256x256/apps/openmw-enhanced.png" \
     --executable "${APPDIR}/usr/bin/openmw-launcher" \
     --executable "${APPDIR}/usr/bin/openmw" \
+    "${osg_library_args[@]}" \
     --plugin qt \
     --output appimage
 

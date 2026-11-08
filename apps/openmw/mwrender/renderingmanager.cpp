@@ -262,6 +262,10 @@ namespace MWRender
             mOcclusionWorldRoot->setName("Occlusion World Root");
             mOcclusionWorldRoot->setNodeMask(Mask_Scene);
             mOcclusionWorldRoot->setCullingActive(false);
+            mOcclusionTerrainRoot = new osg::Group;
+            mOcclusionTerrainRoot->setName("Occlusion Terrain Root");
+            mOcclusionTerrainRoot->setCullingActive(false);
+            mOcclusionWorldRoot->addChild(mOcclusionTerrainRoot);
             sceneContentRoot = mOcclusionWorldRoot;
         }
 
@@ -344,7 +348,7 @@ namespace MWRender
         {
             // Path is set later via setOcclusionCachePath() called from World::init().
             // Create a no-op placeholder so get() safely returns false until then.
-            mOcclusionStorage = std::make_unique<OcclusionStorage>("");
+            mOcclusionStorage = std::make_unique<OcclusionStorage>("", mResourceSystem->getVFS());
 
             const int bufW = SceneUtil::Enhanced::occlusionBufferWidth();
             const int bufH = SceneUtil::Enhanced::occlusionBufferHeight();
@@ -365,20 +369,9 @@ namespace MWRender
             mSceneOcclusionCallback = new SceneOcclusionCallback(
                 mOcclusionCuller, mTerrainOccluder.get(), radius, enableTerrain, debugOverlay, debugMessages,
                 enableInteriors, mOcclusionStorage.get());
-            osg::ref_ptr<osg::Group> occlusionBeginMarker = new osg::Group;
-            occlusionBeginMarker->setName("Occlusion Begin Marker");
-            occlusionBeginMarker->setNodeMask(Mask_Scene);
-            occlusionBeginMarker->setCullingActive(false);
-            occlusionBeginMarker->addCullCallback(mSceneOcclusionCallback);
-            osg::ref_ptr<osg::Group> occlusionEndMarker = new osg::Group;
-            occlusionEndMarker->setName("Occlusion End Marker");
-            occlusionEndMarker->setNodeMask(Mask_Scene);
-            occlusionEndMarker->setCullingActive(false);
-            occlusionEndMarker->addCullCallback(mSceneOcclusionCallback->createEndCallback());
-            sceneRoot->insertChild(0, occlusionBeginMarker);
-            if (mOcclusionWorldRoot && !mOcclusionWorldRoot->getNumParents())
-                sceneRoot->insertChild(1, mOcclusionWorldRoot);
-            sceneRoot->insertChild(2, occlusionEndMarker);
+            mOcclusionWorldRoot->addCullCallback(mSceneOcclusionCallback);
+            if (!mOcclusionWorldRoot->getNumParents())
+                sceneRoot->insertChild(0, mOcclusionWorldRoot);
 
             const float occluderMinRadius = SceneUtil::Enhanced::occlusionOccluderMinRadius();
             const float occluderMaxRadius = SceneUtil::Enhanced::occlusionOccluderMaxRadius();
@@ -728,6 +721,8 @@ namespace MWRender
 
     void RenderingManager::enableTerrain(bool enable, ESM::RefId worldspace)
     {
+        if (mTerrainOccluder)
+            mTerrainOccluder->setWorldspace(enable ? worldspace : ESM::RefId());
         if (!enable)
             mWater->setCullCallback(nullptr);
         else
@@ -1420,7 +1415,7 @@ namespace MWRender
         const bool groundcover = Settings::groundcover().mEnabled && worldspace == ESM::Cell::sDefaultWorldspaceId;
         const bool distantTerrain = Settings::terrain().mDistantTerrain;
         const double expiryDelay = Settings::cells().mCacheExpiryDelay;
-        osg::Group* terrainParent = mOcclusionWorldRoot ? mOcclusionWorldRoot.get() : mSceneRoot.get();
+        osg::Group* terrainParent = mOcclusionTerrainRoot ? mOcclusionTerrainRoot.get() : mSceneRoot.get();
         if (distantTerrain || groundcover)
         {
             const int compMapResolution = Settings::terrain().mCompositeMapResolution;
@@ -1436,6 +1431,10 @@ namespace MWRender
             {
                 newChunkMgr.mObjectPaging
                     = std::make_unique<ObjectPaging>(mResourceSystem->getSceneManager(), worldspace);
+                if (mOcclusionCuller)
+                    newChunkMgr.mObjectPaging->setOcclusionCuller(mOcclusionCuller,
+                        static_cast<unsigned int>(SceneUtil::Enhanced::occlusionMaxTriangles()),
+                        mOcclusionStorage.get());
                 quadTreeWorld->addChunkManager(newChunkMgr.mObjectPaging.get());
                 mResourceSystem->addResourceManager(newChunkMgr.mObjectPaging.get());
             }
@@ -1835,7 +1834,7 @@ namespace MWRender
     {
         if (!mOcclusionCuller)
             return;
-        mOcclusionStorage = std::make_unique<OcclusionStorage>(path);
+        mOcclusionStorage = std::make_unique<OcclusionStorage>(path, mResourceSystem->getVFS());
         const float occluderMinRadius = SceneUtil::Enhanced::occlusionOccluderMinRadius();
         const float occluderMaxRadius = SceneUtil::Enhanced::occlusionOccluderMaxRadius();
         const float occluderShrinkFactor = SceneUtil::Enhanced::occlusionOccluderShrinkFactor();
@@ -1850,8 +1849,9 @@ namespace MWRender
             maxTriangles, mOcclusionStorage.get());
         if (mSceneOcclusionCallback)
             mSceneOcclusionCallback->setStorage(mOcclusionStorage.get());
-        if (mObjectPaging)
-            mObjectPaging->setOcclusionCuller(mOcclusionCuller, maxTriangles, mOcclusionStorage.get());
+        for (auto& [worldspace, chunks] : mWorldspaceChunks)
+            if (chunks.mObjectPaging)
+                chunks.mObjectPaging->setOcclusionCuller(mOcclusionCuller, maxTriangles, mOcclusionStorage.get());
     }
 
 }

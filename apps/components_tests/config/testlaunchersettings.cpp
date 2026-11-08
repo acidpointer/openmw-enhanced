@@ -108,6 +108,17 @@ thing=5
         EXPECT_EQ(write(settings).count("Default/future=yes\n"), 1);
     }
 
+    TEST(LauncherSettingsTest, shouldPersistAndClearRenderingGpu)
+    {
+        Config::LauncherSettings settings = parse("[Settings]\nrendering-gpu=0000:03:00.0\n");
+        EXPECT_EQ(settings.getRenderGpu(), QStringLiteral("0000:03:00.0"));
+        EXPECT_EQ(parse(write(settings)).getRenderGpu(), settings.getRenderGpu());
+        settings.setRenderGpu({});
+        EXPECT_TRUE(write(settings).contains("rendering-gpu=auto\n"));
+        EXPECT_TRUE(parse(write(settings)).getRenderGpu().isEmpty());
+        EXPECT_TRUE(restore(write(settings), "[Settings]\nrendering-gpu=0000:03:00.0\n").getRenderGpu().isEmpty());
+    }
+
     TEST(LauncherSettingsTest, shouldNotKeepKnownKeyWithInvalidValue)
     {
         const QString written = write(parse("[General]\nfirstrun=maybe\n"));

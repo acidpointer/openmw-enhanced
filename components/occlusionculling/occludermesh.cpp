@@ -3,15 +3,22 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
-#include <unordered_map>
-#include <unordered_set>
 
 #include <osg/AlphaFunc>
+#include <osg/AutoTransform>
+#include <osg/Billboard>
 #include <osg/BoundingBox>
 #include <osg/ComputeBoundsVisitor>
+#include <osg/CullFace>
+#include <osg/FrontFace>
 #include <osg/Geometry>
+#include <osg/LOD>
 #include <osg/NodeVisitor>
+#include <osg/PolygonMode>
+#include <osg/Sequence>
+#include <osg/Switch>
 #include <osg/Transform>
+#include <osg/UserDataContainer>
 
 namespace
 {
@@ -44,7 +51,7 @@ namespace
 
             // Skip alpha-tested drawables (e.g. tree leaf billboards) —
             // their transparent regions would cause false occlusion.
-            if (hasAlphaTest(drawable))
+            if (hasUnsafeState())
                 return;
 
             const auto* verts = dynamic_cast<const osg::Vec3Array*>(geom->getVertexArray());
@@ -60,22 +67,64 @@ namespace
                 mVertices.push_back(v * matrix);
 
             for (unsigned int p = 0; p < geom->getNumPrimitiveSets(); ++p)
-                collectTriangles(geom->getPrimitiveSet(p), baseVertex);
+            {
+                const auto* primitive = geom->getPrimitiveSet(p);
+                bool valid = true;
+                for (unsigned int i = 0; i < primitive->getNumIndices(); ++i)
+                    if (primitive->index(i) >= verts->size())
+                        valid = false;
+                if (valid)
+                    collectTriangles(primitive, baseVertex);
+            }
         }
 
         std::vector<osg::Vec3f> mVertices;
         std::vector<unsigned int> mIndices;
 
     private:
-        static bool hasAlphaTest(const osg::Node& node)
+        static bool unsafeStateSet(const osg::StateSet* state)
         {
-            if (const auto* ss = node.getStateSet())
-                if (ss->getAttribute(osg::StateAttribute::ALPHAFUNC))
+            if (!state)
+                return false;
+            if (state->getUpdateCallback() || state->getAttribute(osg::StateAttribute::ALPHAFUNC)
+                || (state->getMode(GL_BLEND) & osg::StateAttribute::ON)
+                || state->getRenderingHint() == osg::StateSet::TRANSPARENT_BIN)
+                return true;
+            if (const auto* mode
+                = dynamic_cast<const osg::PolygonMode*>(state->getAttribute(osg::StateAttribute::POLYGONMODE)))
+                if (mode->getMode(osg::PolygonMode::FRONT) != osg::PolygonMode::FILL
+                    || mode->getMode(osg::PolygonMode::BACK) != osg::PolygonMode::FILL)
                     return true;
-            for (const auto* parent : node.getParents())
-                if (const auto* ss = parent->getStateSet())
-                    if (ss->getAttribute(osg::StateAttribute::ALPHAFUNC))
+            if (const auto* face
+                = dynamic_cast<const osg::CullFace*>(state->getAttribute(osg::StateAttribute::CULLFACE)))
+                if (face->getMode() != osg::CullFace::BACK)
+                    return true;
+            if (const auto* front
+                = dynamic_cast<const osg::FrontFace*>(state->getAttribute(osg::StateAttribute::FRONTFACE)))
+                if (front->getMode() != osg::FrontFace::COUNTER_CLOCKWISE)
+                    return true;
+            return false;
+        }
+
+        bool hasUnsafeState() const
+        {
+            // Only the visited path is stable while templates share drawables
+            // with instances. Do not walk a drawable's mutable parent list.
+            for (const auto* node : getNodePath())
+            {
+                if (node->getUpdateCallback() || dynamic_cast<const osg::Switch*>(node)
+                    || dynamic_cast<const osg::LOD*>(node) || dynamic_cast<const osg::Sequence*>(node)
+                    || dynamic_cast<const osg::Billboard*>(node) || dynamic_cast<const osg::AutoTransform*>(node))
+                    return true;
+                const auto* state = node->getStateSet();
+                if (unsafeStateSet(state))
+                    return true;
+                // Shader conversion moves fixed-function alpha tests here.
+                if (state && state->getUserDataContainer())
+                    if (unsafeStateSet(dynamic_cast<const osg::StateSet*>(
+                            state->getUserDataContainer()->getUserObject("removedState"))))
                         return true;
+            }
             return false;
         }
 
@@ -135,103 +184,58 @@ namespace OcclusionCulling
         osg::Node* node, int gridRes, float shrinkFactor, osg::Transform* skippedRootTransform)
     {
         OccluderMesh mesh;
-
-        CollectMeshVisitor cmv(skippedRootTransform);
-        node->accept(cmv);
-
-        if (cmv.mIndices.empty() || cmv.mVertices.size() < 3)
-        {
-            osg::ComputeBoundsVisitor cbv;
-            node->accept(cbv);
-            mesh.aabb = cbv.getBoundingBox();
+        if (!node || !std::isfinite(shrinkFactor))
             return mesh;
-        }
-
-        for (const auto& v : cmv.mVertices)
-            mesh.aabb.expandBy(v);
-        const unsigned int res = static_cast<unsigned int>(gridRes);
-        float dx = mesh.aabb.xMax() - mesh.aabb.xMin();
-        float dy = mesh.aabb.yMax() - mesh.aabb.yMin();
-        float dz = mesh.aabb.zMax() - mesh.aabb.zMin();
-        float maxDim = std::max({ dx, dy, dz });
-        float cellSize = maxDim / res;
-
-        if (cellSize > 0)
+        CollectMeshVisitor collector(skippedRootTransform);
+        node->accept(collector);
+        struct Triangle
         {
-            unsigned int resX = std::max(1u, static_cast<unsigned int>(std::ceil(dx / cellSize)));
-            unsigned int resY = std::max(1u, static_cast<unsigned int>(std::ceil(dy / cellSize)));
-
-            struct CellData
-            {
-                osg::Vec3f sum;
-                unsigned int count = 0;
-                unsigned int newIndex = 0;
-            };
-            std::unordered_map<unsigned int, CellData> cells;
-            std::vector<unsigned int> vertexRemap(cmv.mVertices.size());
-
-            for (size_t i = 0; i < cmv.mVertices.size(); ++i)
-            {
-                const osg::Vec3f& v = cmv.mVertices[i];
-                float fx = (v.x() - mesh.aabb.xMin()) / cellSize;
-                float fy = (v.y() - mesh.aabb.yMin()) / cellSize;
-                float fz = (v.z() - mesh.aabb.zMin()) / cellSize;
-                unsigned int gx = std::min(static_cast<unsigned int>(std::max(fx, 0.0f)), resX - 1);
-                unsigned int gy = std::min(static_cast<unsigned int>(std::max(fy, 0.0f)), resY - 1);
-                unsigned int gz = std::min(static_cast<unsigned int>(std::max(fz, 0.0f)), res - 1);
-                unsigned int cellId = gx + gy * resX + gz * resX * resY;
-
-                auto& cell = cells[cellId];
-                cell.sum += v;
-                cell.count++;
-                vertexRemap[i] = cellId;
-            }
-
-            unsigned int nextIdx = 0;
-            for (auto& [id, cell] : cells)
-            {
-                cell.newIndex = nextIdx++;
-                mesh.vertices.push_back(cell.sum / static_cast<float>(cell.count));
-            }
-
-            std::unordered_set<uint64_t> seen;
-            for (size_t i = 0; i + 2 < cmv.mIndices.size(); i += 3)
-            {
-                unsigned int a = cells[vertexRemap[cmv.mIndices[i]]].newIndex;
-                unsigned int b = cells[vertexRemap[cmv.mIndices[i + 1]]].newIndex;
-                unsigned int c = cells[vertexRemap[cmv.mIndices[i + 2]]].newIndex;
-
-                if (a == b || b == c || a == c)
-                    continue;
-
-                unsigned int tri[3] = { a, b, c };
-                if (tri[1] < tri[0] && tri[1] < tri[2])
-                    std::rotate(tri, tri + 1, tri + 3);
-                else if (tri[2] < tri[0] && tri[2] < tri[1])
-                    std::rotate(tri, tri + 2, tri + 3);
-                if (tri[1] > tri[2])
-                    std::swap(tri[1], tri[2]);
-
-                uint64_t key = (uint64_t(tri[0]) << 42) | (uint64_t(tri[1]) << 21) | uint64_t(tri[2]);
-                if (seen.insert(key).second)
-                {
-                    mesh.indices.push_back(a);
-                    mesh.indices.push_back(b);
-                    mesh.indices.push_back(c);
-                }
-            }
-        }
-
-        if (!mesh.vertices.empty())
+            std::size_t offset;
+            double area;
+        };
+        std::vector<Triangle> triangles;
+        triangles.reserve(collector.mIndices.size() / 3);
+        for (std::size_t i = 0; i + 2 < collector.mIndices.size(); i += 3)
         {
-            osg::Vec3f center(0, 0, 0);
-            for (const auto& v : mesh.vertices)
-                center += v;
-            center /= static_cast<float>(mesh.vertices.size());
-            for (auto& v : mesh.vertices)
-                v = center + (v - center) * shrinkFactor;
+            const osg::Vec3d a(collector.mVertices[collector.mIndices[i]]);
+            const osg::Vec3d b(collector.mVertices[collector.mIndices[i + 1]]);
+            const osg::Vec3d c(collector.mVertices[collector.mIndices[i + 2]]);
+            const double area = ((b - a) ^ (c - a)).length2();
+            if (std::isfinite(area) && area > 0)
+                triangles.push_back({ i, area });
         }
-
+        // A subset of original opaque triangles cannot bridge windows or move
+        // concave surfaces into empty space, unlike vertex clustering or
+        // shrinking the entire model towards a single centroid.
+        const std::size_t resolution = std::clamp(gridRes, 1, 256);
+        const std::size_t limit = 2 * resolution * resolution;
+        if (triangles.size() > limit)
+        {
+            std::nth_element(triangles.begin(), triangles.begin() + limit, triangles.end(),
+                [](const Triangle& a, const Triangle& b) {
+                    return a.area != b.area ? a.area > b.area : a.offset < b.offset;
+                });
+            triangles.resize(limit);
+        }
+        std::sort(triangles.begin(), triangles.end(),
+            [](const Triangle& a, const Triangle& b) { return a.offset < b.offset; });
+        const double shrink = std::clamp(static_cast<double>(shrinkFactor), 0.0, 1.0);
+        mesh.vertices.reserve(triangles.size() * 3);
+        mesh.indices.reserve(triangles.size() * 3);
+        for (const auto& triangle : triangles)
+        {
+            osg::Vec3d vertices[3];
+            for (int i = 0; i < 3; ++i)
+                vertices[i] = osg::Vec3d(collector.mVertices[collector.mIndices[triangle.offset + i]]);
+            const osg::Vec3d center = (vertices[0] + vertices[1] + vertices[2]) / 3.0;
+            for (const auto& vertex : vertices)
+            {
+                const osg::Vec3f position(shrink == 1 ? vertex : center + (vertex - center) * shrink);
+                mesh.indices.push_back(static_cast<unsigned int>(mesh.vertices.size()));
+                mesh.vertices.push_back(position);
+                mesh.aabb.expandBy(position);
+            }
+        }
         return mesh;
     }
     }
