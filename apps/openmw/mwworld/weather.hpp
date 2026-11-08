@@ -3,13 +3,15 @@
 
 #include <cstdint>
 #include <map>
-#include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include <osg/Vec4f>
 
 #include <components/esm/refid.hpp>
 #include <components/fallback/fallback.hpp>
+#include <components/vfs/pathutil.hpp>
 
 #include "../mwbase/soundmanager.hpp"
 
@@ -41,6 +43,14 @@ namespace Fallback
 namespace MWWorld
 {
     class TimeStamp;
+
+    struct Moon
+    {
+        std::string_view mName;
+        MWRender::MoonState::Phase mPhase;
+        unsigned int mPhaseValue;
+        float mAlpha;
+    };
 
     enum NightDayMode
     {
@@ -100,6 +110,14 @@ namespace MWWorld
     class TimeOfDayInterpolator
     {
     public:
+        explicit TimeOfDayInterpolator()
+            : mSunriseValue()
+            , mDayValue()
+            , mSunsetValue()
+            , mNightValue()
+        {
+        }
+
         TimeOfDayInterpolator(const T& sunrise, const T& day, const T& sunset, const T& night)
             : mSunriseValue(sunrise)
             , mDayValue(day)
@@ -120,6 +138,14 @@ namespace MWWorld
         void setSunsetValue(const T& sunsetValue) { mSunsetValue = sunsetValue; }
         void setNightValue(const T& nightValue) { mNightValue = nightValue; }
 
+        void blank()
+        {
+            mSunriseValue = {};
+            mDayValue = {};
+            mSunsetValue = {};
+            mNightValue = {};
+        }
+
     private:
         T mSunriseValue, mDayValue, mSunsetValue, mNightValue;
     };
@@ -128,15 +154,23 @@ namespace MWWorld
     class Weather
     {
     public:
+        static std::string_view getRecordType() { return "Weather"; }
+
         static osg::Vec3f defaultDirection();
 
-        Weather(const ESM::RefId id, const int scriptId, const std::string& name, float stormWindSpeed, float rainSpeed,
-            float dlFactor, float dlOffset, const std::string& particleEffect);
-
         ESM::RefId mId;
-        int mScriptId;
         std::string mName;
-        std::string mCloudTexture;
+        VFS::Path::Normalized mCloudTexture;
+        VFS::Path::Normalized mParticleEffect;
+        VFS::Path::Normalized mRainEffect;
+
+        // Sound effects
+        // This is used for Blight, Ashstorm and Blizzard (Bloodmoon)
+        ESM::RefId mAmbientLoopSoundID;
+        // This is used for Rain and Thunderstorm
+        ESM::RefId mRainLoopSoundID;
+
+        std::array<ESM::RefId, 4> mThunderSoundID;
 
         // Sky (atmosphere) color
         TimeOfDayInterpolator<osg::Vec4f> mSkyColor;
@@ -152,6 +186,10 @@ namespace MWWorld
 
         // Color modulation for the sun itself during sunset
         osg::Vec4f mSunDiscSunsetColor;
+
+        osg::Vec3f mStormDirection;
+        osg::Vec3f mStormParticleRotation;
+        int mScriptId;
 
         // Used by scripts to animate signs, etc based on the wind (GetWindSpeed)
         float mWindSpeed;
@@ -169,21 +207,6 @@ namespace MWWorld
             float FogFactor;
             float FogOffset;
         } mDL;
-
-        // Sound effects
-        // This is used for Blight, Ashstorm and Blizzard (Bloodmoon)
-        ESM::RefId mAmbientLoopSoundID;
-        // This is used for Rain and Thunderstorm
-        ESM::RefId mRainLoopSoundID;
-
-        std::array<ESM::RefId, 4> mThunderSoundID;
-
-        // Is this an ash storm / blight storm? If so, the following will happen:
-        // - The particles and clouds will be oriented so they appear to come from the Red Mountain.
-        // - Characters will animate their hand to protect eyes from the storm when looking in its direction (idlestorm
-        // animation)
-        // - Slower movement when walking against the storm (fStromWalkMult)
-        bool mIsStorm;
 
         // How fast does rain travel down?
         // In Morrowind.ini this is set globally, but we may want to change it per weather later.
@@ -205,23 +228,7 @@ namespace MWWorld
         float mRainMinHeight;
         float mRainMaxHeight;
 
-        std::string mParticleEffect;
-
-        std::string mRainEffect;
-
-        osg::Vec3f mStormDirection;
-
         float mCloudsMaximumPercent;
-
-        // Note: For Weather Blight, there is a "Disease Chance" (=0.1) setting. But according to MWSFD this feature
-        // is broken in the vanilla game and was disabled.
-
-        float transitionDelta() const;
-        float cloudBlendFactor(const float transitionRatio) const;
-
-        float calculateThunder(const float transitionRatio, const float elapsedSeconds, const bool isPaused);
-
-    private:
         float mTransitionDelta;
 
         // Note: In MW, only thunderstorms support these attributes, but in the interest of making weather more
@@ -231,12 +238,36 @@ namespace MWWorld
         float mThunderThreshold;
         float mFlashDecrement;
 
+        // Note: For Weather Blight, there is a "Disease Chance" (=0.1) setting. But according to MWSFD this feature
+        // is broken in the vanilla game and was disabled.
+
+        float transitionDelta() const;
+        float cloudBlendFactor(const float transitionRatio) const;
+
+        float calculateThunder(const float transitionRatio, const float elapsedSeconds, const bool isPaused);
+
+        void blank();
+
+    private:
         float mFlashBrightness;
 
         void flashDecrement(const float elapsedSeconds);
         float thunderChance(const float transitionRatio, const float elapsedSeconds) const;
         void lightningAndThunder(void);
+
+    public:
+        // Is this an ash storm / blight storm? If so, the following will happen:
+        // - The particles and clouds will be oriented so they appear to come from the Red Mountain.
+        // - Characters will animate their hand to protect eyes from the storm when looking in its direction (idlestorm
+        // animation)
+        // - Slower movement when walking against the storm (fStromWalkMult)
+        bool mIsStorm;
+        bool mRipplesEnabled;
+        bool mUseTorches;
+        bool mOcclusionEnabled;
     };
+
+    class WeatherStore;
 
     /// A class for storing a region's weather.
     class RegionWeather
@@ -247,18 +278,19 @@ namespace MWWorld
 
         operator ESM::RegionWeatherState() const;
 
-        void setChances(std::span<const uint8_t> chances);
-        std::span<const uint8_t> getChances() const;
+        void setChances(const std::map<ESM::RefId, uint8_t>& chances, const WeatherStore& store);
+        const std::map<ESM::RefId, uint8_t>& getChances() const { return mChances; }
+        uint8_t getChance(ESM::RefId weather) const;
 
-        void setWeather(int weatherID);
+        void setWeather(ESM::RefId weatherID);
 
-        int getWeather();
+        ESM::RefId getWeather(const WeatherStore& store);
 
     private:
-        int mWeather;
-        std::vector<uint8_t> mChances;
+        ESM::RefId mWeather;
+        std::map<ESM::RefId, uint8_t> mChances;
 
-        void chooseNewWeather();
+        void chooseNewWeather(const WeatherStore& store);
     };
 
     /// A class that acts as a model for the moons.
@@ -267,32 +299,91 @@ namespace MWWorld
     public:
         MoonModel(const std::string& name);
         MoonModel(float fadeInStart, float fadeInFinish, float fadeOutStart, float fadeOutFinish, float axisOffset,
-            float speed, float dailyIncrement, float fadeStartAngle, float fadeEndAngle,
-            float moonShadowEarlyFadeAngle);
+            float speed, float dailyIncrement, float fadeStartAngle, float fadeEndAngle, float moonShadowEarlyFadeAngle,
+            float sunriseHour, float sunsetHour);
 
         MWRender::MoonState calculateState(const TimeStamp& gameTime) const;
 
     private:
+        struct CycleDay
+        {
+            float mRiseHour{};
+            float mHandoverHour{};
+        };
+
+        // Time constant for Morrowind parity.
+        static constexpr float sOneMinute = 0.0167f;
+
+        static constexpr float sRiseHourEpsilon = 1e-4f;
+
+        // The moon repeats itself over this cycle.
+        static constexpr int sDaysPerPhase = 3;
+        static constexpr int sPhasesPerCycle = 8;
+        static constexpr int sDaysPerCycle = sDaysPerPhase * sPhasesPerCycle;
+
+        // This arises from the start date of 16 Last Seed, 427 (with 17 increments).
+        // TODO: Find an alternate formula that doesn't rely on this day being fixed.
+        static constexpr int sStartIncrements = 17;
+
         float mFadeInStart;
         float mFadeInFinish;
         float mFadeOutStart;
         float mFadeOutFinish;
         float mAxisOffset;
         float mSpeed;
+        float mDegreesPerHour;
         float mDailyIncrement;
         float mFadeStartAngle;
         float mFadeEndAngle;
         float mMoonShadowEarlyFadeAngle;
+        float mSunriseHour;
+        float mSunsetHour;
 
-        float angle(int gameDay, float gameHour) const;
-        float moonPhaseHour(int gameDay) const;
-        float moonRiseHour(int gameDay) const;
+        CycleDay mCycle[sDaysPerCycle];
+
+        static float hourOfDay(float hours);
+        static int dayOfCycle(int gameDay);
+        static MWRender::MoonState::Phase phase(int gameDay, bool postHandover);
+
+        void calculateSettings();
+        void buildCycle();
+
+        float hoursUntilVisible() const;
+        float hoursUntilInvisible() const;
+        float riseHour(int gameDay) const;
+        float handoverHour(float prevRiseHour, float nextRiseHour) const;
         float rotation(float hours) const;
-        MWRender::MoonState::Phase phase(const TimeStamp& gameTime) const;
-        bool isVisible(int gameDay, float gameHour) const;
+        float angle(float gameHour, float riseHour) const;
         float shadowBlend(float angle) const;
         float hourlyAlpha(float gameHour) const;
         float earlyMoonShadowAlpha(float angle) const;
+    };
+
+    class WeatherStore
+    {
+        std::vector<Weather> mInitial;
+        std::unordered_map<ESM::RefId, Weather> mStatic;
+        std::vector<Weather*> mShared;
+
+    public:
+        WeatherStore() = default;
+        WeatherStore(const WeatherStore&) = delete;
+        WeatherStore& operator=(const WeatherStore&) = delete;
+
+        void reset();
+
+        size_t getSize() const { return mShared.size(); }
+        const Weather* at(size_t index) const { return mShared.at(index); }
+
+        const Weather* search(ESM::RefId id) const;
+        const Weather* find(ESM::RefId id) const;
+        Weather* search(ESM::RefId id);
+
+        Weather* insertStatic(const Weather& item);
+        void eraseStatic(ESM::RefId id);
+
+        auto begin() const { return mShared.begin(); }
+        auto end() const { return mShared.end(); }
     };
 
     /// Interface for weather settings
@@ -300,7 +391,8 @@ namespace MWWorld
     {
     public:
         // Have to pass fallback and Store, can't use singleton since World isn't fully constructed yet at the time
-        WeatherManager(MWRender::RenderingManager& rendering, MWWorld::ESMStore& store);
+        WeatherManager(
+            MWRender::RenderingManager& rendering, MWWorld::ESMStore& store, MWWorld::WeatherStore& weatherStore);
         ~WeatherManager();
 
         /**
@@ -308,10 +400,9 @@ namespace MWWorld
          * @param region that should be changed
          * @param ID of the weather setting to shift to
          */
-        void changeWeather(const ESM::RefId& regionID, const unsigned int weatherID);
-        void changeWeather(const ESM::RefId& regionID, const ESM::RefId& weatherID);
-        void modRegion(const ESM::RefId& regionID, std::span<const uint8_t> chances);
-        std::span<const uint8_t> getRegionChances(const ESM::RefId& regionID) const;
+        void changeWeather(ESM::RefId regionID, ESM::RefId weatherID);
+        void modRegion(ESM::RefId regionID, const std::map<ESM::RefId, uint8_t>& chances);
+        const std::map<ESM::RefId, uint8_t>& getRegionChances(ESM::RefId regionID) const;
         void playerTeleported(const ESM::RefId& playerRegion, bool isExterior);
 
         /**
@@ -329,28 +420,11 @@ namespace MWWorld
         /// Are we in an ash or blight storm?
         bool isInStorm() const;
 
-        osg::Vec3f getStormDirection() const;
-
         void advanceTime(double hours, bool incremental);
 
-        const std::vector<Weather>& getAllWeather() { return mWeatherSettings; }
+        const Weather* getWeather() { return mWeatherStore->search(mCurrentWeather); }
 
-        const Weather& getWeather() { return mWeatherSettings[mCurrentWeather]; }
-
-        const Weather* getWeather(size_t index) const;
-
-        const Weather* getWeather(const ESM::RefId& id) const;
-
-        int getWeatherID() const { return mCurrentWeather; }
-
-        const Weather* getNextWeather()
-        {
-            if (mNextWeather > -1)
-                return &mWeatherSettings[mNextWeather];
-            return nullptr;
-        }
-
-        int getNextWeatherID() const { return mNextWeather; }
+        const Weather* getNextWeather() { return mWeatherStore->search(mNextWeather); }
 
         float getTransitionFactor() const { return mTransitionFactor; }
 
@@ -360,7 +434,9 @@ namespace MWWorld
 
         float getSunVisibility() const;
 
-        void write(ESM::ESMWriter& writer, Loading::Listener& progress);
+        std::vector<Moon> getCurrentMoons(const TimeStamp& time) const;
+
+        void write(ESM::ESMWriter& writer, Loading::Listener& progress) const;
 
         bool readRecord(ESM::ESMReader& reader, uint32_t type);
 
@@ -381,12 +457,11 @@ namespace MWWorld
         TimeOfDayInterpolator<float> mNightFade;
 
         float mHoursBetweenWeatherChanges;
-        float mRainSpeed;
 
         // underwater fog not really related to weather, but we handle it here because it's convenient
         TimeOfDayInterpolator<float> mUnderwaterFog;
 
-        std::vector<Weather> mWeatherSettings;
+        WeatherStore* mWeatherStore;
         MoonModel mMasser;
         MoonModel mSecunda;
 
@@ -394,8 +469,7 @@ namespace MWWorld
         float mCurrentWindSpeed;
         float mNextWindSpeed;
         bool mIsStorm;
-        bool mPrecipitation;
-        osg::Vec3f mStormDirection;
+        bool mUseTorches;
 
         ESM::RefId mCurrentRegion;
         float mTimePassed;
@@ -403,19 +477,15 @@ namespace MWWorld
         float mWeatherUpdateTime;
         float mTransitionFactor;
         NightDayMode mNightDayMode;
-        int mCurrentWeather;
-        int mNextWeather;
-        int mQueuedWeather;
+        ESM::RefId mCurrentWeather;
+        ESM::RefId mNextWeather;
+        ESM::RefId mQueuedWeather;
         std::map<ESM::RefId, RegionWeather> mRegions;
-        MWRender::WeatherResult mResult;
 
         MWBase::Sound* mAmbientSound{ nullptr };
         ESM::RefId mPlayingAmbientSoundID;
         MWBase::Sound* mRainSound{ nullptr };
         ESM::RefId mPlayingRainSoundID;
-
-        void addWeather(
-            const std::string& name, float dlFactor, float dlOffset, const std::string& particleEffect = "");
 
         void importRegions();
 
@@ -423,15 +493,17 @@ namespace MWWorld
         bool updateWeatherTime();
         bool updateWeatherRegion(const ESM::RefId& playerRegion);
         void updateWeatherTransitions(const float elapsedRealSeconds);
-        void forceWeather(const int weatherID);
+        void forceWeather(ESM::RefId weatherID);
 
         bool inTransition() const;
-        void addWeatherTransition(const int weatherID);
+        void addWeatherTransition(ESM::RefId weatherID);
 
-        void calculateWeatherResult(const float gameHour, const float elapsedSeconds, const bool isPaused);
-        void calculateResult(const int weatherID, const float gameHour);
-        void calculateTransitionResult(const float factor, const float gameHour);
-        float calculateWindSpeed(int weatherId, float currentSpeed);
+        MWRender::WeatherResult calculateWeatherResult(
+            const float gameHour, const float elapsedSeconds, const bool isPaused) const;
+        MWRender::WeatherResult calculateResult(const Weather& weather, const float gameHour) const;
+        MWRender::WeatherResult calculateTransitionResult(
+            const Weather& currentWeather, const Weather& nextWeather, const float factor, const float gameHour) const;
+        float calculateWindSpeed(const Weather& weather, float currentSpeed) const;
     };
 }
 

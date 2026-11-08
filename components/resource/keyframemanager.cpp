@@ -207,21 +207,19 @@ namespace Resource
     {
     }
 
-    osg::ref_ptr<const SceneUtil::KeyframeHolder> KeyframeManager::get(VFS::Path::NormalizedView name)
+    std::shared_ptr<const SceneUtil::KeyframeHolder> KeyframeManager::get(VFS::Path::NormalizedView name)
     {
-        osg::ref_ptr<osg::Object> obj = mCache->getRefFromObjectCache(name);
+        if (std::shared_ptr<const SceneUtil::KeyframeHolder> cached = mCache->getRefFromObjectCache(name))
+            return cached;
 
-        if (obj != nullptr)
-            return osg::ref_ptr<const SceneUtil::KeyframeHolder>(static_cast<SceneUtil::KeyframeHolder*>(obj.get()));
-
-        osg::ref_ptr<SceneUtil::KeyframeHolder> loaded(new SceneUtil::KeyframeHolder);
+        auto loaded = std::make_shared<SceneUtil::KeyframeHolder>();
         constexpr VFS::Path::ExtensionView kf("kf");
         if (name.extension() == kf)
         {
             auto file = std::make_shared<Nif::NIFFile>(name);
             Nif::Reader reader(*file, mEncoder);
             reader.parse(mVFS->get(name));
-            NifOsg::Loader::loadKf(*file, *loaded.get());
+            NifOsg::Loader::loadKf(*file, *loaded);
         }
         else
         {
@@ -230,7 +228,7 @@ namespace Resource
                 = dynamic_cast<osgAnimation::BasicAnimationManager*>(scene->getUpdateCallback());
             if (bam)
             {
-                Resource::RetrieveAnimationsVisitor rav(*loaded.get(), std::move(bam), name, *mVFS);
+                Resource::RetrieveAnimationsVisitor rav(*loaded, std::move(bam), name, *mVFS);
                 scene->accept(rav);
             }
         }

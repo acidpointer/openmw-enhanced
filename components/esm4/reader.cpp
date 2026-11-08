@@ -208,6 +208,16 @@ namespace ESM4
             mHeader.load(*this);
             mCtx.fileRead += mCtx.recordHeader.record.dataSize;
 
+            // check for the presence of a header form version
+            if (hasFormVersion())
+                mHeaderFormVersion = static_cast<std::uint16_t>(formVersion());
+
+            // assign the file a probable game format
+            mGameFormat = ESM::getGameFormat(esmVersion(), mHeaderFormVersion, mHeader.mMaster);
+            if (mGameFormat == ESM::GameFormat::Unknown)
+                Log(Debug::Error) << "Unrecognized format in " << filename << ": ESM version " << esmVersionF()
+                                  << ", form version "
+                                  << (mHeaderFormVersion ? std::to_string(*mHeaderFormVersion) : "none");
             buildLStringIndex(); // for localised strings in Skyrim
         }
         else
@@ -529,16 +539,25 @@ namespace ESM4
 
         if ((mCtx.recordHeader.record.flags & Rec_Compressed) != 0)
         {
+            if (mCtx.recordHeader.record.dataSize < sizeof(std::uint32_t))
+                throw std::runtime_error("Compressed record is too small");
+
             mStream->read(reinterpret_cast<char*>(&uncompressedSize), sizeof(std::uint32_t));
 
             const std::streamoff position = mStream->tellg();
 
             const std::uint32_t recordSize = mCtx.recordHeader.record.dataSize - sizeof(std::uint32_t);
+            if (position < 0 || recordSize > mFileSize - static_cast<std::size_t>(position))
+                throw std::runtime_error("Compressed record is larger than the remaining file");
+            // zlib format theoretical maximum expansion
+            if (uncompressedSize > std::uint64_t(recordSize) * 1032)
+                throw std::runtime_error("Compressed record has an invalid uncompressed size");
+
             std::vector<char> compressed(recordSize);
             mStream->read(compressed.data(), recordSize);
             mSavedStream = std::move(mStream);
 
-            mCtx.recordHeader.record.dataSize = uncompressedSize - sizeof(uncompressedSize);
+            mCtx.recordHeader.record.dataSize = uncompressedSize;
 
             auto memoryStreamPtr = decompress(position, compressed, uncompressedSize);
 

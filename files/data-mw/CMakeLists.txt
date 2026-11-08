@@ -26,14 +26,19 @@ set(BUILTIN_DATA_MW_FILES
 
     scripts/omw/cellhandlers.lua
     scripts/omw/esmfallbacks.lua
+    scripts/omw/weather.lua
     scripts/omw/combat/common.lua
     scripts/omw/combat/global.lua
     scripts/omw/combat/local.lua
-    scripts/omw/combat/menu.lua
+    scripts/omw/combat/settingspage.lua
     scripts/omw/music/helpers.lua
     scripts/omw/music/music.lua
     scripts/omw/music/settings.lua
     scripts/omw/playerskillhandlers.lua
+    scripts/omw/spellcasting/common.lua
+    scripts/omw/spellcasting/global.lua
+    scripts/omw/spellcasting/local.lua
+    scripts/omw/spellcasting/lockable.lua
 )
 
 foreach (f ${BUILTIN_DATA_MW_FILES})

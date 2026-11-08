@@ -24,8 +24,8 @@ uniform float alphaRef;
 
 #include "lib/core/fragment.h.glsl"
 #include "lib/material/alpha.glsl"
+#include "lib/material/vertexcolors.glsl"
 
-#include "compatibility/vertexcolors.glsl"
 #include "compatibility/fog.glsl"
 #include "compatibility/shadows_fragment.glsl"
 
@@ -37,8 +37,12 @@ uniform bool particleFade;
 uniform float softFalloffDepth;
 #endif
 
+centroid varying vec4 passColor;
+
 void main()
 {
+    Material material = getMaterial();
+
 #if @diffuseMap
     gl_FragData[0] = texture2D(diffuseMap, diffuseMapUV);
     gl_FragData[0].a *= coveragePreservingAlphaScale(diffuseMap, diffuseMapUV);
@@ -46,14 +50,14 @@ void main()
     gl_FragData[0] = vec4(1.0);
 #endif
 
-    gl_FragData[0] *= getDiffuseColor();
+    gl_FragData[0] *= getDiffuseColor(material, passColor);
 
     if (useFalloff)
         gl_FragData[0].a *= passFalloff;
 
     gl_FragData[0].a = alphaTest(gl_FragData[0].a, alphaRef);
 
-    gl_FragData[0] = applyFogAtDist(gl_FragData[0], euclideanDepth, linearDepth, far);
+    gl_FragData[0] = applyFogAtDist(gl_FragData[0], passViewPos, euclideanDepth, linearDepth, near, far);
 
 #if !defined(FORCE_OPAQUE) && @softParticles
     vec2 screenCoords = gl_FragCoord.xy / screenRes;
@@ -69,7 +73,11 @@ void main()
         sampleOpaqueDepthTex(screenCoords).x,
         particleSize,
         particleFade,
-        softFalloffDepth
+        softFalloffDepth,
+        waterEnabled,
+        isReflection,
+        waterHeight,
+        osg_ViewMatrixInverse
     );
 #endif
 

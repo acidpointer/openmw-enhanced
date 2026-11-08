@@ -37,11 +37,16 @@ set(SHADER_FILES
     lib/sky/passes.glsl
     lib/material/parallax.glsl
     lib/material/alpha.glsl
+    lib/material/struct.glsl
+    lib/material/vertexcolors.glsl
+    lib/material/colormodes.glsl
     compatibility/ripples_blobber.frag
     compatibility/ripples_simulate.frag
     compatibility/fog.glsl
     compatibility/groundcover.vert
     compatibility/groundcover.frag
+    compatibility/globalmap.vert
+    compatibility/globalmap.frag
     compatibility/water.vert
     compatibility/water.frag
     compatibility/objects.vert
@@ -54,7 +59,6 @@ set(SHADER_FILES
     compatibility/shadows_fragment.glsl
     compatibility/shadowcasting.vert
     compatibility/shadowcasting.frag
-    compatibility/vertexcolors.glsl
     compatibility/normals.glsl
     compatibility/multiview_resolve.vert
     compatibility/multiview_resolve.frag

@@ -10,16 +10,6 @@
 #include "mode.hpp"
 #include "statswatcher.hpp"
 
-namespace osg
-{
-    class Group;
-}
-
-namespace Resource
-{
-    class ResourceSystem;
-}
-
 namespace MWGui
 {
     class WindowBase;
@@ -39,7 +29,7 @@ namespace MWGui
     class CharacterCreation : public StatsListener
     {
     public:
-        CharacterCreation(osg::Group* parent, Resource::ResourceSystem* resourceSystem);
+        CharacterCreation();
         virtual ~CharacterCreation();
 
         // Show a dialog
@@ -48,14 +38,11 @@ namespace MWGui
         void setAttribute(ESM::RefId id, const MWMechanics::AttributeValue& value) override;
         void setValue(std::string_view id, const MWMechanics::DynamicStat<float>& value) override;
         void setValue(ESM::RefId id, const MWMechanics::SkillValue& value) override;
-        void configureSkills(const std::vector<ESM::RefId>& major, const std::vector<ESM::RefId>& minor) override;
+        void configureSkills(std::span<const ESM::RefId> major, std::span<const ESM::RefId> minor) override;
 
         void onFrame(float duration);
 
     private:
-        osg::Group* mParent;
-        Resource::ResourceSystem* mResourceSystem;
-
         std::vector<ESM::RefId> mPlayerMajorSkills, mPlayerMinorSkills;
         std::map<ESM::RefId, MWMechanics::AttributeValue> mPlayerAttributes;
         std::map<ESM::RefId, MWMechanics::SkillValue> mPlayerSkillValues;

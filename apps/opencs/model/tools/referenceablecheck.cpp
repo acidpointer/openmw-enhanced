@@ -462,11 +462,10 @@ void CSMTools::ReferenceableCheckStage::creatureCheck(
     if (creature.mData.mLevel <= 0)
         messages.add(id, "Level is non-positive", "", CSMDoc::Message::Severity_Warning);
 
-    for (size_t i = 0; i < creature.mData.mAttributes.size(); ++i)
+    for (const auto& [attribute, value] : creature.mData.mAttributes)
     {
-        if (creature.mData.mAttributes[i] < 0)
-            messages.add(id, ESM::Attribute::indexToRefId(static_cast<int>(i)).toDebugString() + " is negative", {},
-                CSMDoc::Message::Severity_Warning);
+        if (value < 0)
+            messages.add(id, attribute.toDebugString() + " is negative", {}, CSMDoc::Message::Severity_Warning);
     }
 
     if (creature.mData.mCombat < 0)
@@ -789,9 +788,10 @@ void CSMTools::ReferenceableCheckStage::weaponCheck(
     {
         inventoryItemCheck<ESM::Weapon>(weapon, messages, id.toString(), true);
 
-        if (!(weapon.mData.mType == ESM::Weapon::MarksmanBow || weapon.mData.mType == ESM::Weapon::MarksmanCrossbow
-                || weapon.mData.mType == ESM::Weapon::MarksmanThrown || weapon.mData.mType == ESM::Weapon::Arrow
-                || weapon.mData.mType == ESM::Weapon::Bolt))
+        const ESM::RefId weaponType = weapon.mData.mType;
+        if (!(weaponType == ESM::WeaponType::MarksmanBow || weaponType == ESM::WeaponType::MarksmanCrossbow
+                || weaponType == ESM::WeaponType::MarksmanThrown || weaponType == ESM::WeaponType::Arrow
+                || weaponType == ESM::WeaponType::Bolt))
         {
             if (weapon.mData.mSlash[0] > weapon.mData.mSlash[1])
                 messages.add(id, "Minimum slash damage higher than maximum", "", CSMDoc::Message::Severity_Warning);
@@ -803,8 +803,8 @@ void CSMTools::ReferenceableCheckStage::weaponCheck(
         if (weapon.mData.mChop[0] > weapon.mData.mChop[1])
             messages.add(id, "Minimum chop damage higher than maximum", "", CSMDoc::Message::Severity_Warning);
 
-        if (!(weapon.mData.mType == ESM::Weapon::Arrow || weapon.mData.mType == ESM::Weapon::Bolt
-                || weapon.mData.mType == ESM::Weapon::MarksmanThrown))
+        if (!(weaponType == ESM::WeaponType::Arrow || weaponType == ESM::WeaponType::Bolt
+                || weaponType == ESM::WeaponType::MarksmanThrown))
         {
             // checking of health
             if (weapon.mData.mHealth == 0)

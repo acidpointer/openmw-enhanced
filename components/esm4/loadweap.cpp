@@ -31,12 +31,13 @@
 #include "reader.hpp"
 //#include "writer.hpp"
 
+#include <components/debug/debuglog.hpp>
+
 void ESM4::Weapon::load(ESM4::Reader& reader)
 {
     mId = reader.getFormIdFromHeader();
     mFlags = reader.hdr().record.flags;
-    std::uint32_t esmVer = reader.esmVersion();
-    bool isFONV = esmVer == ESM::VER_132 || esmVer == ESM::VER_133 || esmVer == ESM::VER_134;
+    mGameFormat = reader.gameFormat();
 
     while (reader.getSubRecordHeader())
     {
@@ -51,22 +52,7 @@ void ESM4::Weapon::load(ESM4::Reader& reader)
                 break;
             case ESM::fourCC("DATA"):
             {
-                // if (reader.esmVersion() == ESM::VER_094 || reader.esmVersion() == ESM::VER_170)
-                if (subHdr.dataSize == 10) // FO3 has 15 bytes even though VER_094
-                {
-                    reader.get(mData.value);
-                    reader.get(mData.weight);
-                    reader.get(mData.damage);
-                }
-                else if (isFONV || subHdr.dataSize == 15)
-                {
-                    reader.get(mData.value);
-                    reader.get(mData.health);
-                    reader.get(mData.weight);
-                    reader.get(mData.damage);
-                    reader.get(mData.clipSize);
-                }
-                else
+                if (mGameFormat == ESM::GameFormat::TES4 && subHdr.dataSize == 30)
                 {
                     reader.get(mData.type);
                     reader.get(mData.speed);
@@ -76,6 +62,27 @@ void ESM4::Weapon::load(ESM4::Reader& reader)
                     reader.get(mData.health);
                     reader.get(mData.weight);
                     reader.get(mData.damage);
+                }
+                else if ((mGameFormat == ESM::GameFormat::FO3 || mGameFormat == ESM::GameFormat::FNV)
+                    && subHdr.dataSize == 15)
+                {
+                    reader.get(mData.value);
+                    reader.get(mData.health);
+                    reader.get(mData.weight);
+                    reader.get(mData.damage);
+                    reader.get(mData.clipSize);
+                }
+                else if (mGameFormat == ESM::GameFormat::TES5 && subHdr.dataSize == 10)
+                {
+                    reader.get(mData.value);
+                    reader.get(mData.weight);
+                    reader.get(mData.damage);
+                }
+                else
+                {
+                    Log(Debug::Warning) << "ESM4::WEAP::load - Invalid DATA, game format: " << mGameFormat
+                                        << ", size: " << subHdr.dataSize;
+                    reader.skipSubRecordData();
                 }
                 break;
             }
@@ -162,28 +169,28 @@ void ESM4::Weapon::load(ESM4::Reader& reader)
             case ESM::fourCC("DSTA"):
             case ESM::fourCC("DSTD"):
             case ESM::fourCC("DSTF"): // Destructible end
-            case ESM::fourCC("VATS"): // FONV
-            case ESM::fourCC("VANM"): // FONV
-            case ESM::fourCC("MWD1"): // FONV
-            case ESM::fourCC("MWD2"): // FONV
-            case ESM::fourCC("MWD3"): // FONV
-            case ESM::fourCC("MWD4"): // FONV
-            case ESM::fourCC("MWD5"): // FONV
-            case ESM::fourCC("MWD6"): // FONV
-            case ESM::fourCC("MWD7"): // FONV
-            case ESM::fourCC("WMI1"): // FONV
-            case ESM::fourCC("WMI2"): // FONV
-            case ESM::fourCC("WMI3"): // FONV
-            case ESM::fourCC("WMS1"): // FONV
-            case ESM::fourCC("WMS2"): // FONV
-            case ESM::fourCC("WNM1"): // FONV
-            case ESM::fourCC("WNM2"): // FONV
-            case ESM::fourCC("WNM3"): // FONV
-            case ESM::fourCC("WNM4"): // FONV
-            case ESM::fourCC("WNM5"): // FONV
-            case ESM::fourCC("WNM6"): // FONV
-            case ESM::fourCC("WNM7"): // FONV
-            case ESM::fourCC("EFSD"): // FONV DeadMoney
+            case ESM::fourCC("VATS"): // FNV
+            case ESM::fourCC("VANM"): // FNV
+            case ESM::fourCC("MWD1"): // FNV
+            case ESM::fourCC("MWD2"): // FNV
+            case ESM::fourCC("MWD3"): // FNV
+            case ESM::fourCC("MWD4"): // FNV
+            case ESM::fourCC("MWD5"): // FNV
+            case ESM::fourCC("MWD6"): // FNV
+            case ESM::fourCC("MWD7"): // FNV
+            case ESM::fourCC("WMI1"): // FNV
+            case ESM::fourCC("WMI2"): // FNV
+            case ESM::fourCC("WMI3"): // FNV
+            case ESM::fourCC("WMS1"): // FNV
+            case ESM::fourCC("WMS2"): // FNV
+            case ESM::fourCC("WNM1"): // FNV
+            case ESM::fourCC("WNM2"): // FNV
+            case ESM::fourCC("WNM3"): // FNV
+            case ESM::fourCC("WNM4"): // FNV
+            case ESM::fourCC("WNM5"): // FNV
+            case ESM::fourCC("WNM6"): // FNV
+            case ESM::fourCC("WNM7"): // FNV
+            case ESM::fourCC("EFSD"): // FNV DeadMoney
             case ESM::fourCC("APPR"): // FO4
             case ESM::fourCC("DAMA"): // FO4
             case ESM::fourCC("FLTR"): // FO4

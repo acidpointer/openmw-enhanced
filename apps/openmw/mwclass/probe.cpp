@@ -39,7 +39,7 @@ namespace MWClass
         }
     }
 
-    std::string_view Probe::getModel(const MWWorld::ConstPtr& ptr) const
+    VFS::Path::NormalizedView Probe::getModel(const MWWorld::ConstPtr& ptr) const
     {
         return getClassModel<ESM::Probe>(ptr);
     }
@@ -88,11 +88,11 @@ namespace MWClass
         return sound;
     }
 
-    const std::string& Probe::getInventoryIcon(const MWWorld::ConstPtr& ptr) const
+    VFS::Path::NormalizedView Probe::getInventoryIcon(const MWWorld::ConstPtr& ptr) const
     {
         const MWWorld::LiveCellRef<ESM::Probe>* ref = ptr.get<ESM::Probe>();
 
-        return ref->mBase->mIcon.getOriginal();
+        return ref->mBase->mIcon.getNormalized();
     }
 
     MWGui::ToolTipInfo Probe::getToolTipInfo(const MWWorld::ConstPtr& ptr, int count) const

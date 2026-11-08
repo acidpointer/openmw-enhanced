@@ -5,12 +5,11 @@
 #include <limits>
 #include <span>
 
-#include <osg/Stats>
-
 #include <components/debug/debuglog.hpp>
 #include <components/esm3/loadcell.hpp>
 #include <components/loadinglistener/reporter.hpp>
 #include <components/misc/constants.hpp>
+#include <components/misc/framestats.hpp>
 #include <components/misc/pathhelpers.hpp>
 #include <components/misc/resourcehelpers.hpp>
 #include <components/misc/strings/algorithm.hpp>
@@ -59,7 +58,7 @@ namespace MWWorld
             return true;
         }
 
-        std::vector<std::string_view>& mOut;
+        std::vector<VFS::Path::NormalizedView>& mOut;
     };
 
     /// Worker thread item: preload models in a cell.
@@ -97,7 +96,7 @@ namespace MWWorld
                 try
                 {
                     mTerrain->cacheCell(mTerrainView.get(), mCellLocation.mX, mCellLocation.mY);
-                    mPreloadedObjects.insert(mLandManager->getLand(mCellLocation));
+                    mPreloadedOwnedObjects.insert(mLandManager->getLand(mCellLocation));
                 }
                 catch (const std::exception& e)
                 {
@@ -108,7 +107,7 @@ namespace MWWorld
 
             VFS::Path::Normalized mesh;
             VFS::Path::Normalized kfname;
-            for (std::string_view path : mMeshes)
+            for (VFS::Path::NormalizedView path : mMeshes)
             {
                 if (mAbort)
                     break;
@@ -116,7 +115,7 @@ namespace MWWorld
                 try
                 {
                     const VFS::Manager& vfs = *mSceneManager->getVFS();
-                    mesh = Misc::ResourceHelpers::correctMeshPath(VFS::Path::Normalized(path));
+                    mesh = Misc::ResourceHelpers::correctMeshPath(path);
                     mesh = Misc::ResourceHelpers::correctActorModelPath(mesh, &vfs);
 
                     if (!vfs.exists(mesh))
@@ -129,14 +128,14 @@ namespace MWWorld
                         constexpr VFS::Path::ExtensionView kf("kf");
                         kfname.changeExtension(kf);
                         if (vfs.exists(kfname))
-                            mPreloadedObjects.insert(mKeyframeManager->get(kfname));
+                            mPreloadedOwnedObjects.insert(mKeyframeManager->get(kfname));
                     }
 
                     mPreloadedObjects.insert(mSceneManager->getTemplate(mesh));
                     if (mPreloadInstances)
-                        mPreloadedObjects.insert(mBulletShapeManager->cacheInstance(mesh));
+                        mPreloadedOwnedObjects.insert(mBulletShapeManager->cacheInstance(mesh));
                     else
-                        mPreloadedObjects.insert(mBulletShapeManager->getShape(mesh));
+                        mPreloadedOwnedObjects.insert(mBulletShapeManager->getShape(mesh));
                 }
                 catch (const std::exception& e)
                 {
@@ -150,7 +149,7 @@ namespace MWWorld
         bool mIsExterior;
         ESM::ExteriorCellLocation mCellLocation;
         ESM::RefId mCellId;
-        std::vector<std::string_view> mMeshes;
+        std::vector<VFS::Path::NormalizedView> mMeshes;
         Resource::SceneManager* mSceneManager;
         Resource::BulletShapeManager* mBulletShapeManager;
         Resource::KeyframeManager* mKeyframeManager;
@@ -160,16 +159,19 @@ namespace MWWorld
 
         std::atomic<bool> mAbort;
 
-        osg::ref_ptr<Terrain::View> mTerrainView;
+        std::unique_ptr<Terrain::View> mTerrainView;
 
-        // keep a ref to the loaded objects to make sure it stays loaded as long as this cell is in the preloaded state
+        // Keep the loaded objects alive for as long as this cell is preloaded. Two sets
+        // because the render-owned ones are still osg::Object; they merge once those move
+        // behind the render backend.
         std::set<osg::ref_ptr<const osg::Object>> mPreloadedObjects;
+        std::set<std::shared_ptr<const void>> mPreloadedOwnedObjects;
     };
 
     class TerrainPreloadItem : public SceneUtil::WorkItem
     {
     public:
-        explicit TerrainPreloadItem(const std::vector<osg::ref_ptr<Terrain::View>>& views, Terrain::World* world,
+        explicit TerrainPreloadItem(const std::vector<std::shared_ptr<Terrain::View>>& views, Terrain::World* world,
             std::span<const PositionCellGrid> preloadPositions)
             : mAbort(false)
             , mTerrainViews(views)
@@ -183,8 +185,8 @@ namespace MWWorld
             for (unsigned int i = 0; i < mTerrainViews.size() && i < mPreloadPositions.size() && !mAbort; ++i)
             {
                 mTerrainViews[i]->reset();
-                mWorld->preload(mTerrainViews[i], mPreloadPositions[i].mPosition, mPreloadPositions[i].mCellBounds,
-                    mAbort, mLoadingReporter);
+                mWorld->preload(mTerrainViews[i].get(), mPreloadPositions[i].mPosition,
+                    mPreloadPositions[i].mCellBounds, mAbort, mLoadingReporter);
             }
             mLoadingReporter.complete();
         }
@@ -195,7 +197,7 @@ namespace MWWorld
 
     private:
         std::atomic<bool> mAbort;
-        std::vector<osg::ref_ptr<Terrain::View>> mTerrainViews;
+        std::vector<std::shared_ptr<Terrain::View>> mTerrainViews;
         Terrain::World* mWorld;
         std::vector<PositionCellGrid> mPreloadPositions;
         Loading::Reporter mLoadingReporter;
@@ -282,8 +284,8 @@ namespace MWWorld
                 return;
         }
 
-        osg::ref_ptr<PreloadItem> item(new PreloadItem(&cell, mResourceSystem->getSceneManager(), mBulletShapeManager,
-            mResourceSystem->getKeyframeManager(), mTerrain, mLandManager, mPreloadInstances));
+        auto item = std::make_shared<PreloadItem>(&cell, mResourceSystem->getSceneManager(), mBulletShapeManager,
+            mResourceSystem->getKeyframeManager(), mTerrain, mLandManager, mPreloadInstances);
         mWorkQueue->addWorkItem(item);
 
         mPreloadCells.emplace(&cell, PreloadEntry(timestamp, item));
@@ -342,7 +344,7 @@ namespace MWWorld
         {
             // the resource cache is cleared from the worker thread so that we're not holding up the main thread with
             // delete operations
-            mUpdateCacheItem = new UpdateCacheItem(mResourceSystem, timestamp);
+            mUpdateCacheItem = std::make_shared<UpdateCacheItem>(mResourceSystem, timestamp);
             mWorkQueue->addWorkItem(mUpdateCacheItem, true);
             mLastResourceCacheUpdate = timestamp;
         }
@@ -364,9 +366,9 @@ namespace MWWorld
         mPreloadInstances = preload;
     }
 
-    void CellPreloader::setWorkQueue(osg::ref_ptr<SceneUtil::WorkQueue> workQueue)
+    void CellPreloader::setWorkQueue(std::shared_ptr<SceneUtil::WorkQueue> workQueue)
     {
-        mWorkQueue = workQueue;
+        mWorkQueue = std::move(workQueue);
     }
 
     void CellPreloader::syncTerrainLoad(Loading::Listener& listener)
@@ -394,10 +396,20 @@ namespace MWWorld
             mTerrainPreloadPositions.clear();
             mLoadedTerrainPositions.clear();
         }
-        else if (contains(mTerrainPreloadPositions, positions, 128.f))
+        else if (contains(mTerrainPreloadPositions, positions, terrainPreloadMergeDistance))
             return;
         if (mTerrainPreloadItem && !mTerrainPreloadItem->isDone())
+        {
+            const bool sameGrids = std::ranges::equal(mTerrainPreloadPositions, positions,
+                [](const PositionCellGrid& l, const PositionCellGrid& r) { return l.mCellBounds == r.mCellBounds; });
+            if (!sameGrids)
+            {
+                mTerrainPreloadItem->abort();
+                // Do not record the aborted target as loaded in updateCache.
+                mTerrainPreloadPositions.clear();
+            }
             return;
+        }
         else
         {
             if (mTerrainViews.size() > positions.size())
@@ -411,7 +423,7 @@ namespace MWWorld
             mTerrainPreloadPositions.assign(positions.begin(), positions.end());
             if (!positions.empty())
             {
-                mTerrainPreloadItem = new TerrainPreloadItem(mTerrainViews, mTerrain, positions);
+                mTerrainPreloadItem = std::make_shared<TerrainPreloadItem>(mTerrainViews, mTerrain, positions);
                 mWorkQueue->addWorkItem(mTerrainPreloadItem);
             }
         }
@@ -456,7 +468,7 @@ namespace MWWorld
         mPreloadCells.clear();
     }
 
-    void CellPreloader::reportStats(unsigned int frameNumber, osg::Stats& stats) const
+    void CellPreloader::reportStats(unsigned int frameNumber, Misc::FrameStats& stats) const
     {
         stats.setAttribute(frameNumber, "CellPreloader Count", static_cast<double>(mPreloadCells.size()));
         stats.setAttribute(frameNumber, "CellPreloader Added", static_cast<double>(mAdded));

@@ -6,6 +6,8 @@ KEEP=""
 USE_WERROR=""
 DEPENDENCIES_ROOT_PATH="/tmp/openmw-deps"
 
+source ./CI/macos/deps_versions.sh
+
 while getopts VCkEd: ARG
 do
     case $ARG in
@@ -55,20 +57,11 @@ fi
 mkdir -p build
 cd build
 
-if [[ "${MACOS_AMD64}" ]]; then
-    QT_PATH=$(arch -x86_64 /bin/bash -c "qmake -v | sed -rn -e 's/Using Qt version [.0-9]+ in //p'")
-else
-    QT_PATH=$(qmake -v | sed -rn -e "s/Using Qt version [.0-9]+ in //p")
-fi
-
-if [[ -n $VERBOSE ]]; then
-    echo "Using Qt path: ${QT_PATH}"
-fi
-
 declare -a CMAKE_CONF_OPTS=(
 -D CMAKE_C_COMPILER="clang"
 -D CMAKE_CXX_COMPILER="clang++"
 -DOPENMW_USE_SYSTEM_YAML_CPP=OFF
+-D CMAKE_OSX_DEPLOYMENT_TARGET="14.8"
 )
 
 declare -a BUILD_OPTS=(
@@ -87,16 +80,13 @@ if [[ "${MACOS_AMD64}" ]]; then
     VCPKG_TARGET_TRIPLET="x64-osx-dynamic"
     CMAKE_CONF_OPTS+=(
         -D CMAKE_OSX_ARCHITECTURES="x86_64"
-        -D CMAKE_OSX_DEPLOYMENT_TARGET="13.7"
     )
 else
     VCPKG_TARGET_TRIPLET="arm64-osx-dynamic"
-    CMAKE_CONF_OPTS+=(
-        -D CMAKE_OSX_DEPLOYMENT_TARGET="14.8"
-    )
 fi
 
 DEPENDENCIES_INSTALLED_PATH="$DEPENDENCIES_ROOT_PATH/installed/$VCPKG_TARGET_TRIPLET"
+QT_PATH=/tmp/Qt/$QT_VER/macos
 
 CMAKE_CONF_OPTS+=(
     -D CMAKE_PREFIX_PATH="$DEPENDENCIES_INSTALLED_PATH;$QT_PATH"

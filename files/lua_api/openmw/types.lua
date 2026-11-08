@@ -157,6 +157,32 @@
 -- @param #number stance
 
 ---
+-- Sets whether the actor is knocked down.
+-- Available in global and local scripts. Can only be used on self in local scripts.
+-- @function [parent=#Actor] setKnockedDown
+-- @param openmw.core#GameObject actor
+-- @param #boolean value
+
+---
+-- Is the actor knocked down.
+-- @function [parent=#Actor] getKnockedDown
+-- @param openmw.core#GameObject actor
+-- @return #boolean
+
+---
+-- Sets whether the actor is in hit recovery.
+-- Available in global and local scripts. Can only be used on self in local scripts.
+-- @function [parent=#Actor] setHitRecovery
+-- @param openmw.core#GameObject actor
+-- @param #boolean value
+
+---
+-- Is the actor in hit recovery.
+-- @function [parent=#Actor] getHitRecovery
+-- @param openmw.core#GameObject actor
+-- @return #boolean
+
+---
 -- Returns `true` if the item is equipped on the actor.
 -- @function [parent=#Actor] hasEquipped
 -- @param openmw.core#GameObject actor
@@ -330,6 +356,13 @@
 -- @return true if spell is active, false otherwise
 
 ---
+-- Get the active spell by active spell ID (see @{openmw_core#ActiveSpell.activeSpellId})
+-- @function [parent=#ActorActiveSpells] getByActiveSpellId
+-- @param self
+-- @param #string id Active spell ID
+-- @return @{openmw_core#ActiveSpell} or nil if the spell is no longer active.
+
+---
 -- Remove an active spell based on active spell ID (see @{openmw_core#ActiveSpell.activeSpellId}). Can only be used in global scripts or on self. Can only be used to remove spells with the temporary flag set (see @{openmw_core#ActiveSpell.temporary}).
 -- @function [parent=#ActorActiveSpells] remove
 -- @param self
@@ -344,7 +377,7 @@
 -- @param #table options A table of parameters. Must contain the following required parameters:
 --
 --   * `id` - A string record ID. Valid records are @{openmw.core#Spell}, enchanted @{#Item}, @{#IngredientRecord}, or @{#PotionRecord}.
---   * `effects` - A list of indexes of the effects to be applied. These indexes must be in range of the record's list of @{openmw.core#MagicEffectWithParams}. Note that for Ingredients, normal ingredient consumption rules will be applied to effects.
+--   * `effects` - A list of effects to apply. Each entry is either an effect index (the `index` field of @{openmw.core#MagicEffectWithParams}) or a table with a required `index` and optional `magnitudeMin`, `magnitudeMax`, and `duration` fields overriding the record's values. Omitted fields use the record's values. For ingredients, each entry must be a table and omitted fields default to 0. `duration` is clamped to at least 0. Ingredient effects are applied without a success roll.
 --
 -- And may contain the following optional parameters:
 --
@@ -355,7 +388,6 @@
 --   * `caster` - A game object that identifies the caster. Default: nil
 --   * `item` - A game object that identifies the specific enchanted item instance used to cast the spell. Default: nil
 --   * `stackable` - If true, the spell will be able to stack. If false, existing instances of spells with the same id from the same source (where source is caster + item)
---   * `quiet` - If true, no messages will be printed if the spell is an Ingredient and it had no effect. Always true if the target is not the player.
 -- @usage
 -- -- Adds the effect of the chameleon spell to the character
 -- Actor.activeSpells(self):add({id = 'chameleon', effects = { 0 }})
@@ -367,10 +399,13 @@
 -- -- Adds the negative effect of Greef twice over, and renames it to Good Greef.
 -- Actor.activeSpells(self):add({id = 'potion_comberry_brandy_01', effects = { 1, 1 }, stackable = true, name = 'Good Greef'})
 -- @usage
--- -- Has the same effect as if the actor ate a chokeweed. With the same variable effect based on skill / random chance.
--- Actor.activeSpells(self):add({id = 'ingred_chokeweed_01', effects = { 0 }, stackable = true, name = 'Chokeweed'})
--- -- Same as above, but uses a different index. Note that if multiple indexes are used, the randomicity is applied separately for each effect.
--- Actor.activeSpells(self):add({id = 'ingred_chokeweed_01', effects = { 1 }, stackable = true, name = 'Chokeweed'})
+-- -- Adds the effect of the chameleon spell with a magnitude of 50 for 30 seconds.
+-- Actor.activeSpells(self):add({id = 'chameleon', effects = { { index = 0, magnitudeMin = 50, magnitudeMax = 50, duration = 30 } }})
+-- @usage
+-- -- Adds the first effect of chokeweed with a magnitude between 2 and 8 for 10 seconds.
+-- Actor.activeSpells(self):add({id = 'ingred_chokeweed_01', effects = { { index = 0, magnitudeMin = 2, magnitudeMax = 8, duration = 10 } }, stackable = true})
+-- -- Adds the same effect with a fixed magnitude of 5.
+-- Actor.activeSpells(self):add({id = 'ingred_chokeweed_01', effects = { { index = 0, magnitudeMin = 5, magnitudeMax = 5, duration = 10 } }, stackable = true})
 
 ---
 -- Return the spells (@{#ActorSpells}) of the given actor.
@@ -815,6 +850,50 @@
 -- @field #number enchantmentCharge The item's current enchantment charge. Unenchanted items will always return a value of `nil`. Setting this to `nil` will reset the charge of the item.
 -- @field #string soul The recordId of the item's current soul. Items without soul will always return a value of `nil`. Setting this to `nil` will remove the soul from the item.
 
+
+--------------------------------------------------------------------------------
+-- @{#ItemLevelledList} functions
+-- @field [parent=#Item] #ItemLevelledList levelledItems
+
+---
+-- @type ItemLevelledList
+
+---
+-- Creates an @{#ItemLevelledListRecord} without adding it to the world database.
+-- Use @{openmw_world#(world).createRecord} to add the record to the world.
+-- @function [parent=#ItemLevelledList] createRecordDraft
+-- @param #ItemLevelledListRecord list A Lua table with the fields of an ItemLevelledListRecord, with an optional field `template` that accepts an @{#ItemLevelledListRecord} as a base.
+-- @return #ItemLevelledListRecord A strongly typed LevelledItem record.
+
+---
+-- A read-only list of all @{#ItemLevelledListRecord}s in the world database.
+-- Implements [iterables#List](iterables.html#List) of #ItemLevelledListRecord.
+-- @field [parent=#ItemLevelledList] #list<#ItemLevelledListRecord> records
+-- @usage local record = types.Item.levelledItems.records['example_recordid']
+-- @usage local record = types.Item.levelledItems.records[1]
+
+---
+-- Returns the read-only @{#ItemLevelledListRecord} of a levelled item
+-- @function [parent=#ItemLevelledList] record
+-- @param #any objectOrRecordId
+-- @return #ItemLevelledListRecord
+
+---
+-- @type ItemLevelledListRecord
+-- @field #string id Record id
+-- @field #number chanceNone Chance this list won't spawn anything [0-1]
+-- @field #boolean calculateFromAllLevels Calculate from all levels <= player level, not just the closest below player
+-- @field #boolean calculateForEach Select a random item for each instance in a stack instead of creating a stack of one single item
+-- @field #list<#LevelledListItem> items
+
+---
+-- Picks a random id from the levelled list.
+-- @function [parent=#ItemLevelledListRecord] getRandomId
+-- @param #ItemLevelledListRecord listRecord The list
+-- @param #number MaxLvl The maximum level to select entries for
+-- @return #string An id (can be nil if the chanceNone roll succeeds, or if no entry is at or below the given level)
+
+
 --------------------------------------------------------------------------------
 -- @{#Creature} functions
 -- @field [parent=#types] #Creature Creature
@@ -891,9 +970,6 @@
 -- @field #boolean canWalk whether the creature can walk
 -- @field #boolean canUseWeapons whether the creature can use weapons and shields
 -- @field #boolean isBiped whether the creature is a biped
--- @field #boolean isAutocalc If true, the actor's stats will be automatically calculated based on level and class.
--- @field #string primaryFaction Faction ID of the NPCs default faction. Nil if no faction
--- @field #number primaryFactionRank Faction rank of the NPCs default faction. Nil if no faction
 -- @field #boolean isEssential whether the creature is essential
 -- @field #boolean isPersistent If true, the creature will not despawn after death.
 -- @field #boolean isRespawning whether the creature respawns after death
@@ -1183,6 +1259,8 @@
 -- @field #string mwscript MWScript on this NPC (can be nil)
 -- @field #string hair ID of the hair body part
 -- @field #string head ID of the head body part
+-- @field #string primaryFaction ID of the NPC's primary faction (can be nil)
+-- @field #number primaryFactionRank Rank index (from 1) in the primary faction, 0 if the NPC has no faction
 -- @field #number baseGold The base barter gold of the NPC
 -- @field #number baseDisposition NPC's starting disposition
 -- @field #boolean isMale The gender setting of the NPC
@@ -1565,39 +1643,6 @@
 -- @function [parent=#Book] objectIsInstance
 -- @param openmw.core#GameObject object
 -- @return #boolean
-
---- Book.SKILL
--- @type BookSKILL
--- @field #string acrobatics "acrobatics"
--- @field #string alchemy "alchemy"
--- @field #string alteration "alteration"
--- @field #string armorer "armorer"
--- @field #string athletics "athletics"
--- @field #string axe "axe"
--- @field #string block "block"
--- @field #string bluntWeapon "bluntweapon"
--- @field #string conjuration "conjuration"
--- @field #string destruction "destruction"
--- @field #string enchant "enchant"
--- @field #string handToHand "handtohand"
--- @field #string heavyArmor "heavyarmor"
--- @field #string illusion "illusion"
--- @field #string lightArmor "lightarmor"
--- @field #string longBlade "longblade"
--- @field #string marksman "marksman"
--- @field #string mediumArmor "mediumarmor"
--- @field #string mercantile "mercantile"
--- @field #string mysticism "mysticism"
--- @field #string restoration "restoration"
--- @field #string security "security"
--- @field #string shortBlade "shortblade"
--- @field #string sneak "sneak"
--- @field #string spear "spear"
--- @field #string speechcraft "speechcraft"
--- @field #string unarmored "unarmored"
-
---- DEPRECATED, use @{openmw.core#Skill}
--- @field [parent=#Book] #BookSKILL SKILL
 
 ---
 -- Returns the read-only @{#BookRecord} of a book
@@ -2488,6 +2533,13 @@
 -- @type CreatureLevelledList
 
 ---
+-- Creates a @{#CreatureLevelledListRecord} without adding it to the world database.
+-- Use @{openmw_world#(world).createRecord} to add the record to the world.
+-- @function [parent=#CreatureLevelledList] createRecordDraft
+-- @param #CreatureLevelledListRecord list A Lua table with the fields of a CreatureLevelledListRecord, with an optional field `template` that accepts a @{#CreatureLevelledListRecord} as a base.
+-- @return #CreatureLevelledListRecord A strongly typed LevelledCreature record.
+
+---
 -- A read-only list of all @{#CreatureLevelledListRecord}s in the world database.
 -- Implements [iterables#List](iterables.html#List) of #CreatureLevelledListRecord.
 -- @field [parent=#CreatureLevelledList] #list<#CreatureLevelledListRecord> records
@@ -2516,9 +2568,9 @@
 ---
 -- Picks a random id from the levelled list.
 -- @function [parent=#CreatureLevelledListRecord] getRandomId
--- @param openmw.core#CreatureLevelledListRecord listRecord The list
+-- @param #CreatureLevelledListRecord listRecord The list
 -- @param #number MaxLvl The maximum level to select entries for
--- @return #string An id
+-- @return #string An id (can be nil if the chanceNone roll succeeds, or if no entry is at or below the given level)
 
 ---
 -- @type LevelledListItem

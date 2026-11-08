@@ -1,30 +1,142 @@
+0.53.0
+------
+
+
 0.52.0
 ------
 
+    Bug #2633: Problems with water and transparent objects
+    Bug #2708: Launcher: the position of disabled content files is not saved
+    Bug #4749: Refraction in the water shader causes artifacts
+    Bug #4954: Dwarven spectres are too transparent
+    Bug #5061: Chameleon affects transparency of casting VFX
+    Bug #6117: Combat AI target selection should prefer closer targets
+    Bug #6153: Underwater blended objects incorrectly rendered with refraction
+    Bug #6359: Refraction and non-refraction shader water look extremely different
+    Bug #6748: [Lua] UI layout does not respond to window resize
+    Bug #6904: Ancestor Ghost death does not play correctly
+    Bug #6912: Default terrain rendering is broken
+    Bug #7029: Debug overlay does not work for underwater areas when water refraction is enabled
+    Bug #7176: Post-processing normals are too imprecise for reflection effects
+    Bug #7853: Water refraction depth loses precision at far distances
+    Bug #8134: Convert NiLODNode ranges so they don't overlap
+    Bug #8257: Centurion Spider cannot self-heal with a spell
+    Bug #8323: Vvardenfell Animated Main Menu is skipping
+    Bug #8464: Red-tinted NPCs and water on Apple Silicon
+    Bug #8813: Water walking actors don't drown when getting knocked out
+    Bug #8822: Default interaction raycasts need to ignore terrain
+    Bug #8853: Sun glare is cut off at the horizon
+    Bug #8856: mwscript variable index binding is inconsistent
+    Bug #9023: Telvanni Guard is aggressive towards exhibition piece in Dwemer Museum
     Bug #9052: Clamped per-vertex sunlight is slightly brighter than it should be
     Bug #9083: GetCastPenalty returns positive values
     Bug #9094: Editor: Script verifier jumps to wrong line when word wrapping affects the script
     Bug #9099: Canceling werewolf claw mode shouldn't play a sound
     Bug #9101: Can still animate the player character via the sneak button when paralyzed
+    Bug #9121: Lua allows engaging combat with a non-actor
     Bug #9128: New game intro video is unskippable after clicking
+    Bug #9130: openmw.content issues with ingredient templates
+    Bug #9134: Trackpad scrolling not working properly on macOS in interfaces/menus
     Bug #9137: ToggleAI state should not be reset when a save is loaded
     Bug #9138: Flickering on non-shader water ripples
     Bug #9142: Minimap should be zoomed out
     Bug #9146: ActorActiveSpells:add shows enemy health bar when adding healing effect on self
     Bug #9147: ActorActiveSpells:add does not update spell icons if game is paused
     Bug #9149: Sensible mouse scrolling steps should be used for settings menu sliders
+    Bug #9154: Knockdown check uses damage after armor reduction
     Bug #9157: Show owned doesn't work in Menu Mode
+    Bug #9161: Map Zooming isn't centered on the cursor for MacOS (trackpads at least)
+    Bug #9170: NiPlanarCollider sometimes deflects particles that move away from it
+    Bug #9173: Console keybind prevents typing Shift-modified characters for the bound key
+    Bug #9179: OAAB - Articulating Animunculi Head spins in conversation, talks too often
+    Bug #9180: Actor.spells(actor):canUsePower errors if called on other actor from local script
+    Bug #9183: The number settings renderer resets input if entered value is outside of the specified min-max range
+    Bug #9187: Odd map zooming world local map transition and centering behavior
+    Bug #9223: Sun reflection in interiors
+    Bug #9230: Crash in element:update() after replacing element.layout
+    Bug #9236: Empty input.getKeyName result in inputBinding makes it unclickable
+    Bug #9247: Position incorrectly uses minutes
+    Bug #9249: Player can still pickup/move items through menu mode even though their character is a werewolf
+    Bug #9252: Poor LOD range selection during active grid object paging
+    Bug #9257: Levitation doesn't bypass lava damage
+    Bug #9258: Trying to ready your character for spellcasting or attacking before getting knocked down may break spellcasting/attacking
+    Bug #9273: Additional instances of autocalculated NPCs do not get autocalculated spells
+    Bug #9296: Summons fail to appear when Bloodmoon is disabled
+    Bug #9321: A part of crossbow shoot animation is skipped
+    Bug #9324: Lua storage file loading is still not foolproof
+    Bug #9328: Follower of another actor will continue fighting the player after calm effect expires
+    Bug #9338: Fatal Crash when loading a save with pending Lua Object:teleport() actions
+    Bug #9342: Consuming from a container decrements inventory items first
+    Bug #9343: Launcher discards launcher.cfg settings it does not recognise
+    Bug #9344: KeyboardNavigation's per-frame focus restore fights intended MyGUI key focus resets
+    Bug #9345: Revise moving target aiming for magic projectiles
+    Bug #9346: Negative skillIncreasesForAttribute value causes "GameSetting 'iLevelUp-2Mult' not found" every frame
+    Bug #9357: Night sky rotation is inconsistent and differs greatly from Morrowind.exe
+    Bug #9361: Elemental shields don't hurt actors who use marksman weapons
+    Bug #9384: Experience stored while sneaking outside of any creature's range is not added when you enter their range
+    Bug #9398: Moon texture is softer than Morrowind.exe
+    Bug #9409: Falling speed should be capped
+    Bug #9422: More moon movement inconsistencies
+    Bug #9423: Pitch transition is skipped when a ranged attack is released early
+    Bug #9424: Invalid teleport door destinations break the game
+    Bug #9428: Terrain normals exposed to post-processing should be blended
+    Bug #9429: Split distant terrain chunk UVs are generated incorrectly
+    Bug #9431: Melee combat AI should approach the target when entering the attack range
+    Bug #9433: Combat AI should turn every frame
+    Bug #9444: Integer setting sliders skip numbers
+    Bug #9447: ESM4 reader incorrectly subtracts 4 bytes from decompressed data size
+    Bug #9448: ESM4 reader skips last record in content files
+    Feature #3602: Implement NiBillboardNode flags
     Feature #5712: Editor: Ensure content file order matches launcher order
+    Feature #5887: Ability to deselect a search field
     Feature #6900: Clustered forward rendering
+    Feature #6938: Support NiLookAtController
+    Feature #7586: Lua levelled item manipulation
+    Feature #7110: Lua bindings for starting and stopping global MWScripts
+    Feature #7359: Custom skills and attributes
+    Feature #7743: Lua UI - Add padding property
+    Feature #8241: Allow adding data directories to the launcher via dragging-and-dropping
+    Feature #8546: Windows: Support reading files larger than 4GB
+    Feature #8948: Expose "corpses persist" flag to Lua
     Feature #9033: Controller joystick mouse emulation mode indicator circle
     Feature #9053: Make the light radius multiplier affect the fadeout radius
+    Feature #9065: Support more custom records
+    Feature #9082: Restore Sound SFX when loading a save
     Feature #9090: Add a setting for 3rd person camera max distance
+    Feature #9104: Wind-up strength hit parameter (as opposed to attack strength)
+    Feature #9109: Expand openmw.content
     Feature #9122: Viewport resize engine handler
     Feature #9123: Flex Widget Gap and Wrap Properties
     Feature #9129: Lua-attached VFX transformations
+    Feature #9144: Lua: GetMasserPhase and GetSecundaPhase equivalent
+    Feature #9148: Handlers for applying magic effects
     Feature #9151: Implement RCN extra data flag
+    Feature #9201: MWSE ESS import fails with an SCPT size mismatch with >255 mods
+    Feature #9205: [Lua] Combat interface should accept records and record IDs
+    Feature #9206: Lua UI - Method to get all elements on a layer
+    Feature #9207: Lua TextureResource does not expose properties
+    Feature #9214: Add MouseWheel event to Lua UI
+    Feature #9216: Exposed Lua engine handlers for dropping and placing objects
+    Feature #9229: Method to unlock mouse cursor from Lua
+    Feature #9253: Allow Lua to mark objects as unmodified
+    Feature #9254: Add a way to find all instances of an object
+    Feature #9265: Magic projectile onhit handler
+    Feature #9274: Implement ignorePointerEvents prop for Lua UI widgets
+    Feature #9301: In-game shadow settings
+    Feature #9302: Spell projectiles should cause water ripples
+    Feature #9354: Use UI scaling for the cursor
+    Feature #9367: Make ori list NPC parts with their meshes and textures
+    Feature #9374: WeatherRecord.stormDirection should be mutable like other weather parameters
+    Feature #9382: Spell effects applied during pause show magnitude 0
+    Feature #9425: Expose the focus ray to Lua
+    Feature #9426: Allow taking screenshots through Lua
+    Feature #9427: Cell loaded binding
+    Feature #9430: Turn the anisotropy slider into a combo box
+    Task #9043: Parallelize Lua GC
     Task #9084: cell:getAll() adds cell data to the save file
     Task #9116: element.content["name"] causes an error if it doesn't exist
+    Task #9222: Delay rendering settings Lua UI until the user actually views that settings page
+    Task #9404: Use debuginfod server(s) in Linux crash catcher
 
 0.51.0
 ------

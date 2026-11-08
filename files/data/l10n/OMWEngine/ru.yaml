@@ -67,7 +67,6 @@ TimePlayed: "Время в игре"
 ActorsProcessingRange: "Дальность обработки персонажей"
 ActorsProcessingRangeValue: "Дальность обработки персонажей ({value, number, :: group-off})"
 Anisotropy: "Анизотропная фильтрация"
-AnisotropyValue: "Анизотропная фильтрация ({value})"
 Audio: "Звук"
 AudioEffects: "Эффекты"
 AudioFootsteps: "Шаги"
@@ -232,6 +231,30 @@ WindowModeWindowed: "Оконный"
 WindowModeWindowedFullscreen: "Оконный без полей"
 WobblyShores: "Колеблющиеся берега"
 
+# Shadow settings
+
+Shadows: "Тени"
+ActorShadows: "Включить тени от персонажей"
+ActorShadowsTooltip: "Включить тени от NPC и существ, кроме персонажа игрока. Может незначительно снизить производительность."
+PlayerShadows: "Включить тени от персонажа игрока"
+PlayerShadowsTooltip: "Включить тени от персонажа игрока. Может очень незначительно снизить производительность."
+TerrainShadows: "Включить тени от ландшафта"
+TerrainShadowsTooltip: "Включить тени от ландшафта (включая удаленный ландшафт). Может значительно снизить производительность и качество теней."
+ObjectShadows: "Включить тени от объектов"
+ObjectShadowsTooltip: "Включить тени от объектов. Может значительно снизить производительность."
+IndoorShadows: "Включить тени в интерьерах"
+IndoorShadowsTooltip: "Из-за ограничений в файлах Morrowind, только персонажи могут отбрасывать тени в интерьерах, что может раздражать. Не имеет эффекта, если тени от персонажей отключены."
+ShadowPlanesComputationMethod: "Метод определения границ для теней"
+ShadowPlanesComputationMethodTooltip: |-
+    Определяет используемый тип вычисления границ сцены. Вычисление по границам объектов (по умолчанию) дает хороший баланс между производительностью и качеством теней, вычисление по примитивам улучшает качество теней, а еще можно полностью отключить вычисление.
+ShadowPlanesComputationMethodBounds: "По границам объектов"
+ShadowPlanesComputationMethodPrimitives: "По примитивам"
+ShadowPlanesComputationMethodNone: "Отключено"
+ShadowPlanesComputationMethodWarning: "Использование метода вычисления по примитивам серьезно повлияет на производительность и не рекомендуется для обычного игрового процесса."
+ShadowMapResolution: "Разрешение теневой карты"
+ShadowMapResolutionTooltip: "Разрешение отдельных теневых карт. Увеличение значения улучшает качество теней, но может незначительно снизить производительность."
+ShadowsMaxDistanceValue: "Максимальная дистанция теней ({value, number, :: group-off})"
+ShadowsMaxDistanceTooltip: "Расстояние от камеры, при достижении которого тени полностью исчезают. Установите на 0, чтобы отключить."
 
 # Controller button names
 

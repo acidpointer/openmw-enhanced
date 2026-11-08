@@ -9,7 +9,6 @@
 #include <osg/ColorMaski>
 #include <osg/GLExtensions>
 #include <osg/Geometry>
-#include <osg/Material>
 #include <osg/Multisample>
 #include <osg/Texture>
 #include <osg/ValueObject>
@@ -23,6 +22,7 @@
 #include <components/misc/strings/algorithm.hpp>
 #include <components/resource/imagemanager.hpp>
 #include <components/sceneutil/glextensions.hpp>
+#include <components/sceneutil/material.hpp>
 #include <components/sceneutil/morphgeometry.hpp>
 #include <components/sceneutil/riggeometry.hpp>
 #include <components/sceneutil/riggeometryosgaextension.hpp>
@@ -54,7 +54,6 @@ namespace Shader
             , mUniforms(rhs.mUniforms)
             , mModes(rhs.mModes)
             , mAttributes(rhs.mAttributes)
-            , mTextureModes(rhs.mTextureModes)
         {
         }
 
@@ -81,7 +80,6 @@ namespace Shader
             setAttributeAndModes(attribute.get());
         }
 
-        void setTextureMode(unsigned int unit, osg::StateAttribute::GLMode mode) { mTextureModes[unit].emplace(mode); }
         void setTextureAttribute(int unit, osg::StateAttribute::TypeMemberPair typeMemberPair)
         {
             mTextureAttributes[unit].emplace(typeMemberPair);
@@ -97,18 +95,6 @@ namespace Shader
             setTextureAttribute(unit, attribute.get());
         }
 
-        void setTextureAttributeAndModes(unsigned int unit, const osg::StateAttribute* attribute)
-        {
-            setTextureAttribute(unit, attribute);
-            InterrogateModesHelper helper(this, unit);
-            attribute->getModeUsage(helper);
-        }
-        template <typename T>
-        void setTextureAttributeAndModes(unsigned int unit, osg::ref_ptr<T> attribute)
-        {
-            setTextureAttributeAndModes(unit, attribute.get());
-        }
-
         bool hasUniform(const std::string& name) { return mUniforms.count(name); }
         bool hasMode(osg::StateAttribute::GLMode mode) { return mModes.count(mode); }
         bool hasAttribute(const osg::StateAttribute::TypeMemberPair& typeMemberPair)
@@ -119,14 +105,6 @@ namespace Shader
         {
             return hasAttribute(osg::StateAttribute::TypeMemberPair(type, member));
         }
-        bool hasTextureMode(int unit, osg::StateAttribute::GLMode mode)
-        {
-            auto it = mTextureModes.find(unit);
-            if (it == mTextureModes.cend())
-                return false;
-
-            return it->second.count(mode);
-        }
 
         const std::set<osg::StateAttribute::TypeMemberPair>& getAttributes() { return mAttributes; }
         const std::unordered_map<unsigned int, std::set<osg::StateAttribute::TypeMemberPair>>& getTextureAttributes()
@@ -136,8 +114,7 @@ namespace Shader
 
         bool empty()
         {
-            return mUniforms.empty() && mModes.empty() && mAttributes.empty() && mTextureModes.empty()
-                && mTextureAttributes.empty();
+            return mUniforms.empty() && mModes.empty() && mAttributes.empty() && mTextureAttributes.empty();
         }
 
         META_Object(Shader, AddedState)
@@ -146,20 +123,15 @@ namespace Shader
         class InterrogateModesHelper : public osg::StateAttribute::ModeUsage
         {
         public:
-            InterrogateModesHelper(AddedState* tracker, unsigned int textureUnit = 0)
+            InterrogateModesHelper(AddedState* tracker)
                 : mTracker(tracker)
-                , mTextureUnit(textureUnit)
             {
             }
             void usesMode(osg::StateAttribute::GLMode mode) override { mTracker->setMode(mode); }
-            void usesTextureMode(osg::StateAttribute::GLMode mode) override
-            {
-                mTracker->setTextureMode(mTextureUnit, mode);
-            }
+            void usesTextureMode(osg::StateAttribute::GLMode mode) override {}
 
         private:
             AddedState* mTracker;
-            unsigned int mTextureUnit;
         };
 
         using ModeSet = std::unordered_set<osg::StateAttribute::GLMode>;
@@ -168,14 +140,11 @@ namespace Shader
         std::unordered_set<std::string> mUniforms;
         ModeSet mModes;
         AttributeSet mAttributes;
-        std::unordered_map<unsigned int, ModeSet> mTextureModes;
         std::unordered_map<unsigned int, AttributeSet> mTextureAttributes;
     };
 
     ShaderVisitor::ShaderRequirements::ShaderRequirements()
-        : mColorMode(0)
-        , mMaterialOverridden(false)
-        , mAlphaTestOverridden(false)
+        : mAlphaTestOverridden(false)
         , mAlphaBlendOverridden(false)
         , mAlphaFunc(GL_ALWAYS)
         , mAlphaRef(1.0)
@@ -316,11 +285,6 @@ namespace Shader
                 const osg::StateAttribute* attr = stateset->getTextureAttribute(unit, osg::StateAttribute::TEXTURE);
                 if (attr)
                 {
-                    // If textures ever get removed in createProgram, expand this to check we're operating on main
-                    // texture attribute list rather than the removed list
-                    if (addedState && addedState->hasTextureMode(unit, GL_TEXTURE_2D))
-                        continue;
-
                     const osg::Texture* texture = attr->asTexture();
                     if (texture)
                     {
@@ -408,8 +372,8 @@ namespace Shader
                     int unit = static_cast<int>(texAttributes.size());
                     if (!writableStateSet)
                         writableStateSet = getWritableStateSet(node);
-                    writableStateSet->setTextureAttributeAndModes(unit, normalMapTex, osg::StateAttribute::ON);
-                    writableStateSet->setTextureAttributeAndModes(unit,
+                    writableStateSet->setTextureAttribute(unit, normalMapTex, osg::StateAttribute::ON);
+                    writableStateSet->setTextureAttribute(unit,
                         new SceneUtil::TextureType(normalHeight ? "normalHeightMap" : "normalMap"),
                         osg::StateAttribute::ON);
                     mRequirements.back().mTextures[unit] = "normalMap";
@@ -453,8 +417,8 @@ namespace Shader
                     int unit = static_cast<int>(texAttributes.size());
                     if (!writableStateSet)
                         writableStateSet = getWritableStateSet(node);
-                    writableStateSet->setTextureAttributeAndModes(unit, specularMapTex, osg::StateAttribute::ON);
-                    writableStateSet->setTextureAttributeAndModes(
+                    writableStateSet->setTextureAttribute(unit, specularMapTex, osg::StateAttribute::ON);
+                    writableStateSet->setTextureAttribute(
                         unit, new SceneUtil::TextureType("specularMap"), osg::StateAttribute::ON);
                     mRequirements.back().mTextures[unit] = "specularMap";
                 }
@@ -476,41 +440,10 @@ namespace Shader
                     continue;
                 if (it->first.first == osg::StateAttribute::MATERIAL)
                 {
-                    // This should probably be moved out of ShaderRequirements and be applied directly now it's a
-                    // uniform instead of a define
-                    if (!mRequirements.back().mMaterialOverridden || it->second.second & osg::StateAttribute::PROTECTED)
-                    {
-                        if (it->second.second & osg::StateAttribute::OVERRIDE)
-                            mRequirements.back().mMaterialOverridden = true;
-
-                        const osg::Material* mat = static_cast<const osg::Material*>(it->second.first.get());
-
-                        int colorMode;
-                        switch (mat->getColorMode())
-                        {
-                            case osg::Material::OFF:
-                                colorMode = 0;
-                                break;
-                            case osg::Material::EMISSION:
-                                colorMode = 1;
-                                break;
-                            default:
-                            case osg::Material::AMBIENT_AND_DIFFUSE:
-                                colorMode = 2;
-                                break;
-                            case osg::Material::AMBIENT:
-                                colorMode = 3;
-                                break;
-                            case osg::Material::DIFFUSE:
-                                colorMode = 4;
-                                break;
-                            case osg::Material::SPECULAR:
-                                colorMode = 5;
-                                break;
-                        }
-
-                        mRequirements.back().mColorMode = colorMode;
-                    }
+                    if (!writableStateSet)
+                        writableStateSet = getWritableStateSet(node);
+                    static_cast<const SceneUtil::Material*>(it->second.first.get())
+                        ->setStateSet(writableStateSet, it->second.second);
                 }
                 else if (it->first.first == osg::StateAttribute::ALPHAFUNC)
                 {
@@ -617,12 +550,7 @@ namespace Shader
         defineMap["diffuseParallax"] = reqs.mDiffuseHeight ? "1" : "0";
         defineMap["parallax"] = reqs.mNormalHeight ? "1" : "0";
         defineMap["reconstructNormalZ"] = reqs.mReconstructNormalZ ? "1" : "0";
-
-        writableStateSet->addUniform(new osg::Uniform("colorMode", reqs.mColorMode));
-        addedState->addUniform("colorMode");
-
         defineMap["alphaFunc"] = std::to_string(reqs.mAlphaFunc);
-
         defineMap["additiveBlending"] = reqs.mAdditiveBlending ? "1" : "0";
 
         osg::ref_ptr<osg::StateSet> removedState;
@@ -646,7 +574,7 @@ namespace Shader
             }
             // This prevents redundant glAlphaFunc calls while letting the shadows bin still see the test
             writableStateSet->setAttribute(RemovedAlphaFunc::getInstance(reqs.mAlphaFunc),
-                osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+                osg::StateAttribute::ON | osg::StateAttribute::PROTECTED);
             addedState->setAttribute(RemovedAlphaFunc::getInstance(reqs.mAlphaFunc));
 
             // Blending won't work with A2C as we use the alpha channel for coverage. gl_SampleCoverage from
@@ -730,15 +658,13 @@ namespace Shader
         if (!node.getUserValue("shaderPrefix", shaderPrefix))
             shaderPrefix = mDefaultShaderPrefix;
 
-        auto program = mShaderManager.getProgram(shaderPrefix, defineMap, mProgramTemplate);
+        ShaderManager::SamplerBindingMap samplers;
+        for (const auto& [unit, name] : reqs.mTextures)
+            samplers[name] = unit;
+
+        auto program = mShaderManager.getProgram(shaderPrefix, defineMap, mProgramTemplate, samplers);
         writableStateSet->setAttributeAndModes(program, osg::StateAttribute::ON);
         addedState->setAttributeAndModes(std::move(program));
-
-        for (const auto& [unit, name] : reqs.mTextures)
-        {
-            writableStateSet->addUniform(new osg::Uniform(name.c_str(), unit), osg::StateAttribute::ON);
-            addedState->addUniform(name);
-        }
 
         if (!addedState->empty())
         {
@@ -947,12 +873,6 @@ namespace Shader
 
                 for (const auto& attribute : removedState->getAttributeList())
                     writableStateSet->setAttribute(attribute.second.first, attribute.second.second);
-
-                for (unsigned int unit = 0; unit < removedState->getTextureModeList().size(); ++unit)
-                {
-                    for (const auto& [mode, value] : removedState->getTextureModeList()[unit])
-                        writableStateSet->setTextureMode(unit, mode, value);
-                }
             }
         }
 

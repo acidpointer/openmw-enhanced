@@ -33,6 +33,7 @@
 
 #include <components/esm/defs.hpp>
 #include <components/esm/formid.hpp>
+#include <components/esm/path.hpp>
 
 #include "actor.hpp"
 #include "inventory.hpp"
@@ -111,7 +112,7 @@ namespace ESM4
 
         std::string mEditorId;
         std::string mFullName;
-        std::string mModel;
+        ESM::Path mModel;
 
         ESM::FormId mDeathItem;
         std::vector<ESM::FormId> mSpell;
@@ -138,8 +139,8 @@ namespace ESM4
 
         std::vector<InventoryItem> mInventory;
 
-        ESM::FormId mBaseTemplate; // FO3/FONV
-        std::vector<ESM::FormId> mBodyParts; // FO3/FONV
+        ESM::FormId mBaseTemplate; // FO3/FNV
+        std::vector<ESM::FormId> mBodyParts; // FO3/FNV
 
         void load(ESM4::Reader& reader);
         // void save(ESM4::Writer& writer) const;

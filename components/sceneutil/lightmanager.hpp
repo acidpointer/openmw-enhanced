@@ -10,7 +10,6 @@
 #include <osg/BufferTemplate>
 #include <osg/DispatchCompute>
 #include <osg/Group>
-#include <osg/Light>
 #include <osg/NodeVisitor>
 #include <osg/observer_ptr>
 
@@ -23,6 +22,35 @@ namespace SceneUtil
 {
     template <class T>
     using DoubleBuffer = std::array<T, 2>;
+
+    class Light
+    {
+    public:
+        const osg::Vec4f& getSpecular() const { return mSpecular; }
+        const osg::Vec4f& getDiffuse() const { return mDiffuse; }
+        const osg::Vec4f& getAmbient() const { return mAmbient; }
+        const osg::Vec4f& getPosition() const { return mPosition; }
+        float getLinearAttenuation() const { return mLinearAttenuation; }
+        float getConstantAttenuation() const { return mConstantAttenuation; }
+        float getQuadraticAttenuation() const { return mQuadraticAttenuation; }
+
+        void setSpecular(const osg::Vec4f& specular) { mSpecular = specular; }
+        void setDiffuse(const osg::Vec4f& diffuse) { mDiffuse = diffuse; }
+        void setAmbient(const osg::Vec4f& ambient) { mAmbient = ambient; }
+        void setPosition(const osg::Vec4f& position) { mPosition = position; }
+        void setLinearAttenuation(float att) { mLinearAttenuation = att; }
+        void setConstantAttenuation(float att) { mConstantAttenuation = att; }
+        void setQuadraticAttenuation(float att) { mQuadraticAttenuation = att; }
+
+    private:
+        osg::Vec4f mSpecular;
+        osg::Vec4f mDiffuse;
+        osg::Vec4f mAmbient;
+        osg::Vec4f mPosition;
+        float mConstantAttenuation = 1.f;
+        float mLinearAttenuation = 0.f;
+        float mQuadraticAttenuation = 0.f;
+    };
 
     class PPLightBuffer
     {
@@ -56,7 +84,7 @@ namespace SceneUtil
 
         void clear(size_t frame) { mIndex[frame % 2] = 0; }
 
-        void setLight(size_t frame, const osg::Light* light, float radius)
+        void setLight(size_t frame, const Light* light, float radius)
         {
             size_t frameId = frame % 2;
             int i = mIndex[frameId];
@@ -96,12 +124,12 @@ namespace SceneUtil
     ///     be one LightManager as the root of the scene graph.
     /// @note One needs to attach LightListCallback's to the scene to have objects receive lighting from LightSources.
     ///     See the documentation of LightListCallback for more information.
-    /// @note The position of the contained osg::Light is automatically updated based on the LightSource's world
+    /// @note The position of the contained Light is automatically updated based on the LightSource's world
     /// position.
     class LightSource : public osg::Node
     {
-        // double buffered osg::Light's, since one of them may be in use by the draw thread at any given time
-        DoubleBuffer<osg::ref_ptr<osg::Light>> mLight;
+        // double buffered, since one of them may be in use by the draw thread at any given time
+        DoubleBuffer<Light> mLight;
 
         // LightSource will affect objects within this radius
         float mRadius;
@@ -134,20 +162,14 @@ namespace SceneUtil
 
         bool getEmpty() const { return mEmpty; }
 
-        /// Get the osg::Light safe for modification in the given frame.
+        /// Get the Light safe for modification in the given frame.
         /// @par May be used externally to animate the light's color/attenuation properties,
         /// and is used internally to synchronize the light's position with the position of the LightSource.
-        osg::Light* getLight(size_t frame) { return mLight[frame % 2]; }
+        Light* getLight(size_t frame) { return &mLight[frame % 2]; }
 
-        /// @warning It is recommended not to replace an existing osg::Light, because there might still be
-        /// references to it in the light StateSet cache that are associated with this LightSource's ID.
-        /// These references will stay valid due to ref_ptr but will point to the old object.
-        /// @warning Do not modify the \a light after you've called this function.
-        void setLight(osg::Light* light)
-        {
-            mLight[0] = light;
-            mLight[1] = new osg::Light(*light);
-        }
+        /// @warning It is recommended not to replace an existing Light, because the light StateSet cache may still
+        /// hold state built from the old one under this LightSource's ID.
+        void setLight(const Light& light) { mLight.fill(light); }
 
         /// Get the unique ID for this light source.
         int getId() const { return mId; }
@@ -217,8 +239,8 @@ namespace SceneUtil
         osg::ref_ptr<osg::StateSet> getLightListStateSet(
             const LightList& lightList, size_t frameNum, const osg::RefMatrix* viewMatrix);
 
-        void setSunlight(osg::ref_ptr<osg::Light> sun);
-        osg::ref_ptr<osg::Light> getSunlight();
+        void setSunlight(std::shared_ptr<Light> sun);
+        const std::shared_ptr<Light>& getSunlight() const;
 
         bool getClusteredLighting() const;
 
@@ -263,9 +285,11 @@ namespace SceneUtil
         using LightSourceViewBoundCollection = std::vector<LightSourceViewBound>;
         std::map<osg::observer_ptr<osg::Camera>, LightSourceViewBoundCollection> mLightsInViewSpace;
 
+        std::map<std::pair<const osg::RefMatrix*, std::vector<int>>, osg::ref_ptr<osg::StateSet>> mLightListStateSets;
+
         size_t mLightingMask;
 
-        osg::ref_ptr<osg::Light> mSun;
+        std::shared_ptr<Light> mSun;
 
         bool mClusteredLighting;
 
@@ -305,7 +329,7 @@ namespace SceneUtil
             DoubleBuffer<osg::ref_ptr<osg::DispatchCompute>> mCullComputeNode;
             osg::ref_ptr<osg::ShaderStorageBufferBinding> mClusterSSBB;
 
-            float clusterFar = 1.f;
+            float mClusterFar = 1.f;
             size_t mLastFrameNumber = 0;
         };
 
@@ -361,7 +385,7 @@ namespace SceneUtil
         std::set<SceneUtil::LightSource*> mIgnoredLightSources;
     };
 
-    void configureStateSetSunOverride(const osg::Light* light, osg::StateSet* stateset,
+    void configureStateSetSunOverride(const Light* light, osg::StateSet* stateset,
         int mode = osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
 
     void configureSunAmbientOverride(const osg::Vec4f& ambient, osg::StateSet* stateset);

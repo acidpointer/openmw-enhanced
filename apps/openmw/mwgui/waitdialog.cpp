@@ -7,7 +7,6 @@
 #include <components/misc/rng.hpp>
 
 #include <components/esm3/loadregn.hpp>
-#include <components/misc/strings/format.hpp>
 #include <components/settings/values.hpp>
 #include <components/widgets/box.hpp>
 
@@ -25,6 +24,8 @@
 #include "../mwmechanics/actorutil.hpp"
 #include "../mwmechanics/creaturestats.hpp"
 #include "../mwmechanics/npcstats.hpp"
+
+#include <format>
 
 namespace MWGui
 {
@@ -45,7 +46,7 @@ namespace MWGui
     {
         mProgressBar->setProgressRange(total);
         mProgressBar->setProgressPosition(cur);
-        mProgressText->setCaption(MyGUI::utility::toString(cur) + "/" + MyGUI::utility::toString(total));
+        mProgressText->setCaption(std::format("{}/{}", cur, total));
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -159,18 +160,10 @@ namespace MWGui
 
         const MWWorld::DateTimeManager& timeManager = *MWBase::Environment::get().getWorld()->getTimeManager();
         std::string_view month = timeManager.getMonthName();
-        int hour = static_cast<int>(timeManager.getTimeStamp().getHour());
-        bool pm = hour >= 12;
-        if (hour >= 13)
-            hour -= 12;
-        if (hour == 0)
-            hour = 12;
-
         ESM::EpochTimeStamp currentDate = timeManager.getEpochTimeStamp();
-        std::string daysPassed = Misc::StringUtils::format("(#{Calendar:day} %i)", timeManager.getTimeStamp().getDay());
-        std::string_view formattedHour(pm ? "#{Calendar:pm}" : "#{Calendar:am}");
-        std::string dateTimeText
-            = Misc::StringUtils::format("%i %s %s %i %s", currentDate.mDay, month, daysPassed, hour, formattedHour);
+        std::string timeOfDay = timeManager.formatTimeOfDay(timeManager.getTimeStamp().getHour());
+        std::string dateTimeText = std::format(
+            "{} {} (#{{Calendar:day}} {}) {}", currentDate.mDay, month, timeManager.getTimeStamp().getDay(), timeOfDay);
         mDateTimeText->setCaptionWithReplacing(dateTimeText);
     }
 
@@ -238,7 +231,7 @@ namespace MWGui
 
     void WaitDialog::onHourSliderChangedPosition(MyGUI::ScrollBar* sender, size_t position)
     {
-        mHourText->setCaptionWithReplacing(MyGUI::utility::toString(position + 1) + " #{sRestMenu2}");
+        mHourText->setCaptionWithReplacing(std::format("{} #{{sRestMenu2}}", position + 1));
         mManualHours = static_cast<int>(position + 1);
         MWBase::Environment::get().getWindowManager()->setKeyFocusWidget(mWaitButton);
     }

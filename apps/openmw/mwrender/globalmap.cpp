@@ -8,12 +8,16 @@
 #include <osgDB/WriteFile>
 
 #include <components/files/memorystream.hpp>
+#include <components/myguiplatform/myguitexture.hpp>
 #include <components/settings/values.hpp>
 
 #include <components/debug/debuglog.hpp>
 
 #include <components/resource/imagemanager.hpp>
 #include <components/resource/resourcesystem.hpp>
+#include <components/resource/scenemanager.hpp>
+
+#include <components/shader/shadermanager.hpp>
 
 #include <components/sceneutil/depth.hpp>
 #include <components/sceneutil/nodecallback.hpp>
@@ -28,6 +32,7 @@
 
 #include "../mwworld/esmstore.hpp"
 
+#include "localmap.hpp"
 #include "vismask.hpp"
 
 namespace
@@ -240,8 +245,8 @@ namespace MWRender
         void doWork() override { mImageData = writePng(*mOverlayImage); }
     };
 
-    GlobalMap::GlobalMap(osg::Group* root, SceneUtil::WorkQueue* workQueue)
-        : mRoot(root)
+    GlobalMap::GlobalMap(osg::Group* root, const std::shared_ptr<SceneUtil::WorkQueue>& workQueue)
+        : mRoot(new osg::Group)
         , mWorkQueue(workQueue)
         , mWidth(0)
         , mHeight(0)
@@ -250,6 +255,22 @@ namespace MWRender
         , mMinY(0)
         , mMaxY(0)
     {
+        root->addChild(mRoot);
+
+        // Bind a dummy alpha texture at top of map subgraph
+        osg::ref_ptr<osg::Image> fallbackImage = new osg::Image;
+        fallbackImage->allocateImage(1, 1, 1, GL_ALPHA, GL_UNSIGNED_BYTE);
+        *fallbackImage->data(0, 0) = 0xFF;
+
+        osg::ref_ptr<osg::Texture2D> dummyTex = new osg::Texture2D(fallbackImage);
+        dummyTex->setWrap(osg::Texture2D::WRAP_S, osg::Texture2D::REPEAT);
+        dummyTex->setWrap(osg::Texture2D::WRAP_T, osg::Texture2D::REPEAT);
+        dummyTex->setFilter(osg::Texture2D::MIN_FILTER, osg::Texture2D::NEAREST);
+        dummyTex->setFilter(osg::Texture2D::MAG_FILTER, osg::Texture2D::NEAREST);
+        dummyTex->setInternalFormat(GL_ALPHA);
+
+        mRoot->getOrCreateStateSet()->addUniform(new osg::Uniform("alphaMap", 1));
+        mRoot->getOrCreateStateSet()->setTextureAttribute(1, dummyTex);
     }
 
     GlobalMap::~GlobalMap()
@@ -298,7 +319,7 @@ namespace MWRender
                 + std::to_string(colorLut ? colorLut->s() : 0) + "x" + std::to_string(colorLut ? colorLut->t() : 0));
         }
 
-        mWorkItem = new CreateMapWorkItem(
+        mWorkItem = std::make_shared<CreateMapWorkItem>(
             mWidth, mHeight, mMinX, mMinY, mMaxX, mMaxY, cellSize, esmStore.get<ESM::Land>(), colorLut);
         mWorkQueue->addWorkItem(mWorkItem);
     }
@@ -363,7 +384,8 @@ namespace MWRender
             depth->setWriteMask(false);
             osg::StateSet* stateset = geom->getOrCreateStateSet();
             stateset->setAttribute(depth);
-            stateset->setTextureAttributeAndModes(0, texture, osg::StateAttribute::ON);
+            stateset->setTextureAttribute(0, texture, osg::StateAttribute::ON);
+            stateset->addUniform(new osg::Uniform("diffuseMap", 0));
             stateset->setMode(GL_DEPTH_TEST, osg::StateAttribute::OFF);
 
             if (mAlphaTexture)
@@ -380,8 +402,12 @@ namespace MWRender
                 texcoords->push_back(osg::Vec2f(x2, y1));
                 geom->setTexCoordArray(1, texcoords, osg::Array::BIND_PER_VERTEX);
 
-                stateset->setTextureAttributeAndModes(1, mAlphaTexture, osg::StateAttribute::ON);
+                stateset->setTextureAttribute(1, mAlphaTexture, osg::StateAttribute::ON);
             }
+
+            auto& shaderManager = MWBase::Environment::get().getResourceSystem()->getSceneManager()->getShaderManager();
+
+            geom->getOrCreateStateSet()->setAttributeAndModes(shaderManager.getProgram("globalmap"));
 
             camera->addChild(geom);
         }
@@ -391,10 +417,11 @@ namespace MWRender
         mActiveCameras.push_back(camera);
     }
 
-    void GlobalMap::exploreCell(int cellX, int cellY, osg::ref_ptr<osg::Texture2D> localMapTexture)
+    void GlobalMap::exploreCell(int cellX, int cellY, LocalMap& localMap)
     {
         ensureLoaded();
 
+        osg::ref_ptr<osg::Texture2D> localMapTexture = localMap.getMapTexture(cellX, cellY);
         if (!localMapTexture)
             return;
 
@@ -553,16 +580,16 @@ namespace MWRender
         }
     }
 
-    osg::ref_ptr<osg::Texture2D> GlobalMap::getBaseTexture()
+    std::unique_ptr<MyGUI::ITexture> GlobalMap::makeBaseGuiTexture()
     {
         ensureLoaded();
-        return mBaseTexture;
+        return std::make_unique<MyGUIPlatform::OSGTexture>(mBaseTexture);
     }
 
-    osg::ref_ptr<osg::Texture2D> GlobalMap::getOverlayTexture()
+    std::unique_ptr<MyGUI::ITexture> GlobalMap::makeOverlayGuiTexture()
     {
         ensureLoaded();
-        return mOverlayTexture;
+        return std::make_unique<MyGUIPlatform::OSGTexture>(mOverlayTexture);
     }
 
     void GlobalMap::ensureLoaded()
@@ -636,7 +663,7 @@ namespace MWRender
         if (mOverlayImage == nullptr)
             return;
         // Use deep copy to avoid any sychronization
-        mWritePng = new WritePng(new osg::Image(*mOverlayImage, osg::CopyOp::DEEP_COPY_ALL));
+        mWritePng = std::make_shared<WritePng>(new osg::Image(*mOverlayImage, osg::CopyOp::DEEP_COPY_ALL));
         mWorkQueue->addWorkItem(mWritePng, /*front=*/true);
     }
 }

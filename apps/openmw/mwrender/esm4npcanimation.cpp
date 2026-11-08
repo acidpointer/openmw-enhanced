@@ -33,18 +33,19 @@ namespace MWRender
         const ESM4::Npc* traits = MWClass::ESM4Npc::getTraitsRecord(mPtr);
         if (traits == nullptr)
             return;
-        if (traits->mIsTES4)
-            updatePartsTES4(*traits);
-        else if (traits->mIsFONV)
+        switch (traits->mGameFormat)
         {
-            // Not implemented yet
-        }
-        else
-        {
-            // There is no easy way to distinguish TES5 and FO3.
-            // In case of FO3 the function shouldn't crash the game and will
-            // only lead to the NPC not being rendered.
-            updatePartsTES5(*traits);
+            case ESM::GameFormat::TES4:
+            case ESM::GameFormat::FO3:
+            case ESM::GameFormat::FNV:
+                updatePartsTES4(*traits);
+                break;
+            case ESM::GameFormat::TES5:
+            case ESM::GameFormat::FO4:
+                updatePartsTES5(*traits);
+                break;
+            default:
+                break; // Skip
         }
     }
 
@@ -60,11 +61,11 @@ namespace MWRender
     static std::string_view chooseTes4EquipmentModel(const Record* rec, bool isFemale)
     {
         if (isFemale && !rec->mModelFemale.empty())
-            return rec->mModelFemale;
+            return rec->mModelFemale.getOriginal();
         else if (!isFemale && !rec->mModelMale.empty())
-            return rec->mModelMale;
+            return rec->mModelMale.getOriginal();
         else
-            return rec->mModel;
+            return rec->mModel.getOriginal();
     }
 
     void ESM4NpcAnimation::updatePartsTES4(const ESM4::Npc& traits)
@@ -74,15 +75,24 @@ namespace MWRender
 
         // TODO: Body and head parts are placed incorrectly, need to attach to bones
 
-        for (const ESM4::Race::BodyPart& bodyPart : (isFemale ? race->mBodyPartsFemale : race->mBodyPartsMale))
-            insertPart(bodyPart.mesh);
-        for (const ESM4::Race::BodyPart& bodyPart : race->mHeadParts)
+        const std::vector<ESM4::Race::BodyPart>& bodyParts = isFemale ? race->mBodyPartsFemale : race->mBodyPartsMale;
+        for (std::size_t i = 0; i < bodyParts.size(); ++i)
+        {
+            // FO3 and FNV's 4th body part is the upper body texture
+            if (i == 3 && (traits.mGameFormat == ESM::GameFormat::FO3 || traits.mGameFormat == ESM::GameFormat::FNV))
+                continue;
+            insertPart(bodyParts[i].mesh);
+        }
+
+        // Oblivion genders share head parts, but later games have female-specific
+        const bool femaleHead = isFemale && !race->mHeadPartsFemale.empty();
+        for (const ESM4::Race::BodyPart& bodyPart : (femaleHead ? race->mHeadPartsFemale : race->mHeadParts))
             insertPart(bodyPart.mesh);
         if (!traits.mHair.isZeroOrUnset())
         {
             const MWWorld::ESMStore* store = MWBase::Environment::get().getESMStore();
             if (const ESM4::Hair* hair = store->get<ESM4::Hair>().search(traits.mHair))
-                insertPart(hair->mModel);
+                insertPart(hair->mModel.getOriginal());
             else
                 Log(Debug::Error) << "Hair not found: " << ESM::RefId(traits.mHair);
         }
@@ -108,7 +118,7 @@ namespace MWRender
                 continue;
             }
             if (usedHeadPartTypes.emplace(part->mType).second)
-                insertPart(part->mModel);
+                insertPart(part->mModel.getOriginal());
         }
     }
 
@@ -176,7 +186,7 @@ namespace MWRender
             if (covers & ~usedParts)
             {
                 usedParts |= covers;
-                insertPart(isFemale ? arma->mModelFemale : arma->mModelMale);
+                insertPart(isFemale ? arma->mModelFemale.getOriginal() : arma->mModelMale.getOriginal());
             }
         }
 

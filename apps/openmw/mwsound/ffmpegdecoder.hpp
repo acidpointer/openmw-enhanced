@@ -30,11 +30,17 @@ extern "C"
 #include <components/files/istreamptr.hpp>
 
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "sounddecoder.hpp"
 
 namespace MWSound
 {
+    bool hasAudioExtension(VFS::Path::NormalizedView fname);
+
+    class HeadCache;
+
     struct AVIOContextDeleter
     {
         void operator()(AVIOContext* ptr) const;
@@ -91,7 +97,25 @@ namespace MWSound
 
         bool getNextPacket();
 
+        // Opens a format context over mDataStream and selects a usable audio
+        // stream. Returns false on failure, leaving the stream position
+        // undefined; the caller rewinds before another attempt.
+        bool openContext(const char* name, const AVInputFormat* fmt, bool limitProbe, AVIOContextPtr& ioCtx,
+            AVFormatContextPtr& formatCtx, AVStream**& stream);
+
         Files::IStreamPtr mDataStream;
+
+        // Embedded cover art shims. A leading id3v2 tag is hidden behind a
+        // window starting at mStreamBase; FLAC PICTURE metadata headers are
+        // served with their type byte relabelled to PADDING (mPatchedBytes,
+        // absolute offset -> byte). Both make the demuxer seek over art it
+        // would otherwise read in full (multi-MB per file in the wild).
+        std::streamoff mStreamBase = 0;
+        std::vector<std::pair<std::streamoff, char>> mPatchedBytes;
+
+        // Sniffs mDataStream and fills the shim state, leaving the stream
+        // positioned at mStreamBase.
+        void applyArtShims();
 
         static int readPacket(void* userData, uint8_t* buf, int bufSize);
 #if OPENMW_FFMPEG_CONST_WRITEPACKET
@@ -118,11 +142,16 @@ namespace MWSound
         FFmpegDecoder(const FFmpegDecoder& rhs);
 
     public:
-        explicit FFmpegDecoder(const VFS::Manager* vfs);
+        explicit FFmpegDecoder(const VFS::Manager* vfs, HeadCache* headCache, bool recordHead);
 
         virtual ~FFmpegDecoder();
 
         friend class SoundManager;
+        friend class WarmQueue;
+
+    private:
+        HeadCache* mHeadCache;
+        bool mRecordHead;
     };
 }
 

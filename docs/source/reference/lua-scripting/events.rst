@@ -159,6 +159,13 @@ Example:
         core.sendGlobalEvent('ModifyItemCondition', {actor = self, item = item, amount = -1})
     end
 
+Spellcast events
+----------------
+
+**ApplyMagicEffects**
+
+Used by built-in scripts to apply effects on Lockables and other actors during spellcasting.
+
 UI events
 ---------
 
@@ -168,7 +175,7 @@ If sent to a player, shows a message as if a call to ui.showMessage was made.
 
 .. code-block:: Lua
 
-    player:sendEvent('ShowMessage', {message = 'Lorem ipsum'})
+    player:sendEvent('ShowMessage', {message = 'Lorem ipsum', showInDialogue = false})
 
 **UiModeChanged**
 
@@ -250,3 +257,12 @@ Unlock a container or door
 .. code-block:: Lua
 
     core.sendGlobalEvent('Unlock', {target = selected})
+
+**SetSaveState**
+
+Sets whether or not an object will be written into the save. For script-spawned objects, setting this to false effectively means they are deleted after the game loads. For objects from content files, setting this to false restores them to their original state upon loading.
+Use this as a means to easily reset **individual** objects. To reset all objects in a given cell instead, use `cell:getAll` and call `object:setSaveState(false)` on each object.
+
+.. code-block:: Lua
+
+   core.sendGlobalEvent('SetSaveState', { nearby.actors[#nearby.actors] = false })

@@ -19,11 +19,15 @@ OpenMW builds and AppImage packaging are very I/O heavy. Keep tool usage scoped 
 - Exclude generated and cache directories from searches and file listings.
 - Read only the relevant slice of large files or logs. Prefer targeted `sed`, `tail`, or exact-pattern searches over dumping full files.
 - Do not rebuild the AppImage just to check a small source edit unless the user asked for a build or runtime verification requires it.
-- When a build is needed, use the existing cached Docker/AppImage build scripts and avoid cleaning `.build/`.
+- When a build is needed, ask the user to run the existing cached Docker/AppImage build scripts and avoid cleaning `.build/`.
 - Keep command output short with `max_output_tokens` or equivalent limits, especially for builds and logs.
 - If I/O quota errors appear, stop broad inspection, summarize current state, and ask whether to continue in a fresh session.
 
 ## Build
+
+Agents must not run builds, Docker image builds, AppImage packaging, or runtime
+verification. Ask the user to run build and runtime checks and report the results.
+Static source checks are allowed.
 
 - Configure fork remote: `./enhanced/scripts/setup-openmw-fork.sh --fork-url <fork-url>`
 - Fetch upstream: `./enhanced/scripts/sync-openmw-upstream.sh`
@@ -42,7 +46,7 @@ Docker builds must keep host-mounted caches under `.build/` so rebuilds stay fas
 
 ## Verification
 
-After packaging, run:
+After packaging, ask the user to run:
 
 ```bash
 APPIMAGE_EXTRACT_AND_RUN=1 .build/dist/OpenMW-Enhanced-x86_64.AppImage --openmw --version

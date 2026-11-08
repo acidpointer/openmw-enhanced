@@ -128,7 +128,7 @@ add_component_dir (vfs
     )
 
 add_component_dir (resource
-    scenemanager keyframemanager imagemanager animblendrulesmanager bulletshapemanager bulletshape niffilemanager objectcache multiobjectcache resourcesystem
+    scenemanager keyframemanager imagemanager animblendrulesmanager bulletshapemanager bulletshape niffilemanager objectcache resourcesystem
     resourcemanager stats animation foreachbulletobject errormarker selectionmarker cachestats bgsmfilemanager
     )
 
@@ -142,7 +142,7 @@ add_component_dir (sceneutil
     detourdebugdraw navmesh agentpath animblendrules shadow mwshadowtechnique recastmesh shadowsbin osgacontroller rtt
     screencapture depth color riggeometryosgaextension extradata unrefqueue lightcommon clearcolor
     enhancedsettings
-    cullsafeboundsvisitor keyframe nodecallback textkeymap glextensions occlusionculling
+    cullsafeboundsvisitor keyframe nodecallback templateref textkeymap userdata glextensions fog texmat material occlusionculling
     )
 
 add_component_dir (nif
@@ -150,7 +150,7 @@ add_component_dir (nif
     )
 
 add_component_dir (nifosg
-    nifloader controller particle matrixtransform fog
+    autotransform nifloader controller particle matrixtransform
     )
 
 add_component_dir (nifbullet
@@ -162,7 +162,7 @@ add_component_dir (toutf8
     toutf8
     )
 
-add_component_dir(esm attr common defs esmcommon records util luascripts format refid esmbridge esmterrain
+add_component_dir(esm attr common defs gameformat esmcommon records util luascripts format refid esmbridge esmterrain
     formid
     fourcc
     stringrefid
@@ -297,7 +297,7 @@ add_component_dir (esm4
 )
 
 add_component_dir (misc
-    barrier budgetmeasurement color compression constants convert coordinateconverter display endianness float16 frameratelimiter
+    barrier budgetmeasurement color compression constants convert coordinateconverter display endianness float16 frameratelimiter framestats
     guarded math mathutil messageformatparser notnullptr objectpool osgpluginchecker osguservalues progressreporter resourcehelpers
     rng strongtypedef thread timeconvert timer tuplehelpers tuplemeta utf8stream weakcache windows
     )
@@ -313,11 +313,6 @@ add_component_dir (stereo
 add_component_dir (debug
     debugging debuglog gldebug debugdraw writeflags
     )
-
-IF(NOT WIN32 AND NOT APPLE)
-    add_compile_definitions(GLOBAL_DATA_PATH="${GLOBAL_DATA_PATH}")
-    add_compile_definitions(GLOBAL_CONFIG_PATH="${GLOBAL_CONFIG_PATH}")
-ENDIF()
 add_component_dir (files
     linuxpath androidpath windowspath macospath fixedpath multidircollection collections configurationmanager
     constrainedfilestream memorystream hash configfileparser openfile constrainedfilestreambuf conversion
@@ -327,6 +322,10 @@ add_component_dir (files
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" AND NOT CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     set_source_files_properties(files/configfileparser.cpp PROPERTIES COMPILE_FLAGS -Wno-shadow)
 endif()
+
+if (NOT WIN32 AND NOT APPLE)
+    set_source_files_properties(files/linuxpath.cpp PROPERTIES COMPILE_DEFINITIONS "GLOBAL_DATA_PATH=\"${GLOBAL_DATA_PATH}\";GLOBAL_CONFIG_PATH=\"${GLOBAL_CONFIG_PATH}\"")
+endif ()
 
 add_component_dir (compiler
     context controlparser errorhandler exception exprparser extensions fileparser generator
@@ -387,8 +386,8 @@ add_component_dir (fallback
 
 add_component_dir (lua_ui
     registerscriptsettings scriptsettings
-    properties widget element util layers content alignment resources
-    adapter text textedit window image container flex
+    properties widget input element util layers content alignment resources
+    adapter text textedit window image container flex padding
     )
 copy_resource_file("lua_ui/content.lua" "${OPENMW_RESOURCES_ROOT}" "resources/lua_libs/content.lua")
 
@@ -404,6 +403,9 @@ elseif(NOT ANDROID)
     add_component_dir (crashcatcher
         crashcatcher
     )
+    if (EXTRA_DEBUGINFOD_URLS)
+        set_source_files_properties(crashcatcher/crashcatcher.cpp PROPERTIES COMPILE_DEFINITIONS "EXTRA_DEBUGINFOD_URLS=\"${EXTRA_DEBUGINFOD_URLS}\"")
+    endif ()
 endif()
 
 add_component_dir(detournavigator
@@ -691,22 +693,28 @@ target_compile_definitions(components PUBLIC
 )
 
 if(OSG_STATIC)
-    unset(_osg_plugins_static_files)
-    add_library(components_osg_plugins INTERFACE)
-    foreach(_plugin ${USED_OSG_PLUGINS})
-        string(TOUPPER ${_plugin} _plugin_uc)
-        if(OPENMW_USE_SYSTEM_OSG)
-            list(APPEND _osg_plugins_static_files ${${_plugin_uc}_LIBRARY})
-        else()
-            list(APPEND _osg_plugins_static_files $<TARGET_FILE:${${_plugin_uc}_LIBRARY}>)
-            target_link_libraries(components_osg_plugins INTERFACE $<TARGET_PROPERTY:${${_plugin_uc}_LIBRARY},LINK_LIBRARIES>)
-            add_dependencies(components_osg_plugins ${${_plugin_uc}_LIBRARY})
-        endif()
-    endforeach()
-    # We use --whole-archive because OSG plugins use registration.
-    get_whole_archive_options(_opts ${_osg_plugins_static_files})
-    target_link_options(components_osg_plugins INTERFACE ${_opts})
-    target_link_libraries(components components_osg_plugins ${COLLADA_DOM_LIBRARIES})
+    if(CMAKE_VERSION VERSION_LESS 3.24)
+        unset(_osg_plugins_static_files)
+        add_library(components_osg_plugins INTERFACE)
+        foreach(_plugin ${USED_OSG_PLUGINS})
+            string(TOUPPER ${_plugin} _plugin_uc)
+            if(OPENMW_USE_SYSTEM_OSG)
+                list(APPEND _osg_plugins_static_files ${${_plugin_uc}_LIBRARY})
+            else()
+                list(APPEND _osg_plugins_static_files $<TARGET_FILE:${${_plugin_uc}_LIBRARY}>)
+                target_link_libraries(components_osg_plugins INTERFACE $<TARGET_PROPERTY:${${_plugin_uc}_LIBRARY},LINK_LIBRARIES>)
+                add_dependencies(components_osg_plugins ${${_plugin_uc}_LIBRARY})
+            endif()
+        endforeach()
+        # We use --whole-archive because OSG plugins use registration.
+        get_whole_archive_options(_opts ${_osg_plugins_static_files})
+        target_link_options(components_osg_plugins INTERFACE ${_opts})
+        target_link_libraries(components components_osg_plugins)
+    else()
+        target_link_libraries(components "$<LINK_LIBRARY:WHOLE_ARCHIVE,${USED_OSG_PLUGINS}>")
+    endif()
+
+    target_link_libraries(components ${COLLADA_DOM_LIBRARIES})
 
     if(OPENMW_USE_SYSTEM_OSG)
         # OSG plugin pkgconfig files are missing these dependencies.

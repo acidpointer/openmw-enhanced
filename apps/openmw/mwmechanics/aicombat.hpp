@@ -29,11 +29,11 @@ namespace MWMechanics
         AiReactionTimer mReaction;
         float mTimerCombatMove;
         bool mReadyToAttack;
+        bool mShouldApproach{ true };
         bool mAttack;
         float mAttackRange;
         bool mCombatMove;
         bool mRotateMove;
-        osg::Vec3f mLastTargetPos;
         const MWWorld::CellStore* mCell;
         std::unique_ptr<Action> mCurrentAction;
         float mActionCooldown;
@@ -65,7 +65,7 @@ namespace MWMechanics
         void updateCombatMove(float duration);
         void stopCombatMove();
         void startAttackIfReady(const MWWorld::Ptr& actor, CharacterController& characterController,
-            const ESM::Weapon* weapon, bool distantCombat, bool canShout);
+            const ESM::Weapon* weapon, bool distantCombat);
         void updateAttack(const MWWorld::Ptr& actor, CharacterController& characterController);
         void stopAttack();
 
@@ -99,6 +99,9 @@ namespace MWMechanics
             options.mShouldCancelPreviousAi = false;
             return options;
         }
+
+        /// Return the combat target if it is an actor, otherwise an empty Ptr.
+        MWWorld::Ptr getTarget() const override;
 
         void writeState(ESM::AiSequence::AiSequence& sequence) const override;
 

@@ -1,15 +1,17 @@
 #include "sdlcursormanager.hpp"
 
+#include <memory>
 #include <stdexcept>
+#include <string>
 
 #include <SDL_endian.h>
+#include <SDL_error.h>
 #include <SDL_hints.h>
 #include <SDL_mouse.h>
 #include <SDL_render.h>
 
 #include <osg/Geometry>
 #include <osg/GraphicsContext>
-#include <osg/TexMat>
 #include <osg/Texture2D>
 #include <osg/Version>
 #include <osgViewer/GraphicsWindow>
@@ -75,20 +77,31 @@ namespace SDLUtil
     void SDLCursorManager::_setGUICursor(std::string_view name)
     {
         auto it = mCursorMap.find(name);
+        if (it == mCursorMap.end())
+            it = mCursorMap.find("arrow");
         if (it != mCursorMap.end())
             SDL_SetCursor(it->second);
     }
 
-    void SDLCursorManager::createCursor(std::string_view name, int rotDegrees, osg::Image* image, Uint8 hotspotX,
-        Uint8 hotspotY, int cursorWidth, int cursorHeight)
+    void SDLCursorManager::createCursor(std::string_view name, double rotDegrees, osg::Image* image, int hotspotX,
+        int hotspotY, int cursorWidth, int cursorHeight)
     {
 #ifndef ANDROID
         _createCursorFromResource(name, rotDegrees, image, hotspotX, hotspotY, cursorWidth, cursorHeight);
 #endif
     }
 
+    void SDLCursorManager::removeCursor(std::string_view name)
+    {
+        auto it = mCursorMap.find(name);
+        if (it == mCursorMap.end())
+            return;
+        SDL_FreeCursor(it->second);
+        mCursorMap.erase(it);
+    }
+
     SDLUtil::SurfaceUniquePtr decompress(
-        osg::ref_ptr<osg::Image> source, float rotDegrees, int cursorWidth, int cursorHeight)
+        osg::ref_ptr<osg::Image> source, double rotDegrees, int cursorWidth, int cursorHeight)
     {
         int width = source->s();
         int height = source->t();
@@ -109,37 +122,50 @@ namespace SDLUtil
         SDL_Surface* cursorSurface = SDL_CreateRGBSurfaceFrom(decompressedImage->data(), width, height,
             decompressedImage->getPixelSizeInBits(), decompressedImage->getRowSizeInBytes(), redMask, greenMask,
             blueMask, alphaMask);
+        if (cursorSurface == nullptr)
+            throw std::runtime_error(std::string("Failed to create cursor surface: ") + SDL_GetError());
+        SDLUtil::SurfaceUniquePtr cursorSurfacePtr(cursorSurface, SDL_FreeSurface);
 
-        SDL_Surface* targetSurface
-            = SDL_CreateRGBSurface(0, cursorWidth, cursorHeight, 32, redMask, greenMask, blueMask, alphaMask);
-        SDL_Renderer* renderer = SDL_CreateSoftwareRenderer(targetSurface);
+        SDLUtil::SurfaceUniquePtr targetSurface(
+            SDL_CreateRGBSurface(0, cursorWidth, cursorHeight, 32, redMask, greenMask, blueMask, alphaMask),
+            SDL_FreeSurface);
+        if (!targetSurface)
+            throw std::runtime_error(std::string("Failed to create cursor target surface: ") + SDL_GetError());
+        std::unique_ptr<SDL_Renderer, decltype(&SDL_DestroyRenderer)> renderer(
+            SDL_CreateSoftwareRenderer(targetSurface.get()), SDL_DestroyRenderer);
+        if (!renderer)
+            throw std::runtime_error(std::string("Failed to create cursor renderer: ") + SDL_GetError());
 
-        SDL_RenderClear(renderer);
+        if (SDL_RenderClear(renderer.get()) != 0)
+            throw std::runtime_error(std::string("Failed to clear cursor renderer: ") + SDL_GetError());
 
         SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
-        SDL_Texture* cursorTexture = SDL_CreateTextureFromSurface(renderer, cursorSurface);
+        std::unique_ptr<SDL_Texture, decltype(&SDL_DestroyTexture)> cursorTexture(
+            SDL_CreateTextureFromSurface(renderer.get(), cursorSurfacePtr.get()), SDL_DestroyTexture);
+        if (!cursorTexture)
+            throw std::runtime_error(std::string("Failed to create cursor texture: ") + SDL_GetError());
 
-        SDL_RenderCopyEx(renderer, cursorTexture, nullptr, nullptr, -rotDegrees, nullptr, SDL_FLIP_NONE);
+        if (SDL_RenderCopyEx(renderer.get(), cursorTexture.get(), nullptr, nullptr, -rotDegrees, nullptr, SDL_FLIP_NONE)
+            != 0)
+            throw std::runtime_error(std::string("Failed to render cursor texture: ") + SDL_GetError());
 
-        SDL_DestroyTexture(cursorTexture);
-        SDL_FreeSurface(cursorSurface);
-        SDL_DestroyRenderer(renderer);
-
-        return SDLUtil::SurfaceUniquePtr(targetSurface, SDL_FreeSurface);
+        return targetSurface;
     }
 
-    void SDLCursorManager::_createCursorFromResource(std::string_view name, int rotDegrees, osg::Image* image,
-        Uint8 hotspotX, Uint8 hotspotY, int cursorWidth, int cursorHeight)
+    void SDLCursorManager::_createCursorFromResource(std::string_view name, double rotDegrees, osg::Image* image,
+        int hotspotX, int hotspotY, int cursorWidth, int cursorHeight)
     {
         if (mCursorMap.find(name) != mCursorMap.end())
             return;
 
         try
         {
-            auto surface = decompress(image, static_cast<float>(rotDegrees), cursorWidth, cursorHeight);
+            auto surface = decompress(image, rotDegrees, cursorWidth, cursorHeight);
 
             // set the cursor and store it for later
             SDL_Cursor* curs = SDL_CreateColorCursor(surface.get(), hotspotX, hotspotY);
+            if (curs == nullptr)
+                throw std::runtime_error(std::string("Failed to create cursor: ") + SDL_GetError());
 
             mCursorMap.emplace(name, curs);
         }

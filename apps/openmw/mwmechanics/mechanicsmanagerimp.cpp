@@ -2,8 +2,7 @@
 
 #include <cassert>
 
-#include <osg/Stats>
-
+#include <components/misc/framestats.hpp>
 #include <components/misc/rng.hpp>
 
 #include <components/esm/records.hpp>
@@ -39,6 +38,7 @@
 #include "autocalcspell.hpp"
 #include "combat.hpp"
 #include "npcstats.hpp"
+#include "spelleffects.hpp"
 #include "spellutil.hpp"
 
 namespace
@@ -124,11 +124,11 @@ namespace MWMechanics
         creatureStats.getSpells().clear(true);
         creatureStats.getActiveSpells().clear(ptr);
 
-        for (size_t i = 0; i < player->mNpdt.mSkills.size(); ++i)
-            npcStats.getSkill(ESM::Skill::indexToRefId(static_cast<int>(i))).setBase(player->mNpdt.mSkills[i]);
+        for (const auto& [skill, value] : player->mNpdt.mSkills)
+            npcStats.getSkill(skill).setBase(value);
 
-        for (size_t i = 0; i < player->mNpdt.mAttributes.size(); ++i)
-            npcStats.setAttribute(ESM::Attribute::indexToRefId(static_cast<int>(i)), player->mNpdt.mSkills[i]);
+        for (const auto& [attribute, value] : player->mNpdt.mAttributes)
+            npcStats.setAttribute(attribute, value);
 
         const MWWorld::ESMStore& esmStore = *MWBase::Environment::get().getESMStore();
 
@@ -146,9 +146,8 @@ namespace MWMechanics
             for (const ESM::Skill& skill : esmStore.get<ESM::Skill>())
             {
                 int bonus = 0;
-                int index = ESM::Skill::refIdToIndex(skill.mId);
                 auto bonusIt = std::find_if(race->mData.mBonus.begin(), race->mData.mBonus.end(),
-                    [&](const auto& v) { return v.mSkill == index; });
+                    [&](const auto& v) { return v.mSkill == skill.mId; });
                 if (bonusIt != race->mData.mBonus.end())
                     bonus = bonusIt->mBonus;
 
@@ -157,7 +156,8 @@ namespace MWMechanics
 
             for (const ESM::RefId& power : race->mPowers.mList)
             {
-                creatureStats.getSpells().add(power);
+                if (const ESM::Spell* spell = esmStore.get<ESM::Spell>().search(power))
+                    creatureStats.getSpells().add(spell);
             }
         }
 
@@ -170,7 +170,8 @@ namespace MWMechanics
 
             for (const ESM::RefId& power : sign->mPowers.mList)
             {
-                creatureStats.getSpells().add(power);
+                if (const ESM::Spell* spell = esmStore.get<ESM::Spell>().search(power))
+                    creatureStats.getSpells().add(spell);
             }
         }
 
@@ -179,23 +180,21 @@ namespace MWMechanics
         {
             const ESM::Class* playerClass = esmStore.get<ESM::Class>().find(player->mClass);
 
-            for (int attribute : playerClass->mData.mAttribute)
+            for (const ESM::RefId& id : playerClass->mData.mAttribute)
             {
-                ESM::RefId id = ESM::Attribute::indexToRefId(attribute);
                 if (!id.empty())
                     creatureStats.setAttribute(id, creatureStats.getAttribute(id).getBase() + 10);
             }
 
-            for (int i = 0; i < 2; ++i)
+            for (const auto& id : playerClass->mData.mMinorSkills)
             {
-                int bonus = i == 0 ? 10 : 25;
-
-                for (const auto& skills : playerClass->mData.mSkills)
-                {
-                    ESM::RefId id = ESM::Skill::indexToRefId(skills[i]);
-                    if (!id.empty())
-                        npcStats.getSkill(id).setBase(npcStats.getSkill(id).getBase() + bonus);
-                }
+                if (!id.empty())
+                    npcStats.getSkill(id).setBase(npcStats.getSkill(id).getBase() + 10);
+            }
+            for (const auto& id : playerClass->mData.mMajorSkills)
+            {
+                if (!id.empty())
+                    npcStats.getSkill(id).setBase(npcStats.getSkill(id).getBase() + 25);
             }
 
             for (const ESM::Skill& skill : esmStore.get<ESM::Skill>())
@@ -846,6 +845,8 @@ namespace MWMechanics
         mUpdatePlayer = true;
         mClassSelected = true;
         mRaceSelected = true;
+
+        restoreMagicSound(getPlayer());
     }
 
     namespace
@@ -884,7 +885,7 @@ namespace MWMechanics
 
     bool MechanicsManager::isAllowedToUse(const MWWorld::Ptr& ptr, const MWWorld::Ptr& target, MWWorld::Ptr& victim)
     {
-        if (target.isEmpty())
+        if (target.isEmpty() || target == ptr)
             return true;
 
         const MWWorld::CellRef& cellref = target.getCellRef();
@@ -1511,15 +1512,16 @@ namespace MWMechanics
         if (target == player || !attacker.getClass().isActor())
             return false;
 
+        MWMechanics::CreatureStats& statsTarget = target.getClass().getCreatureStats(target);
+        AiSequence& seq = statsTarget.getAiSequence();
+        const bool inCombat = seq.isInCombat(attacker);
+
         if (canCommitCrimeAgainst(target, attacker))
             commitCrime(attacker, target, MWBase::MechanicsManager::OT_Assault);
 
-        MWMechanics::CreatureStats& statsTarget = target.getClass().getCreatureStats(target);
-        AiSequence& seq = statsTarget.getAiSequence();
-
         if (!attacker.isEmpty()
             && (attacker.getClass().getCreatureStats(attacker).getAiSequence().isInCombat(target) || attacker == player)
-            && !seq.isInCombat(attacker))
+            && !inCombat)
         {
             // Attacker is in combat with us, but we are not in combat with the attacker yet. Time to fight back.
             // Note: accidental or collateral damage attacks are ignored.
@@ -1990,7 +1992,7 @@ namespace MWMechanics
         mActors.cleanupSummonedCreature(creature);
     }
 
-    void MechanicsManager::reportStats(unsigned int frameNumber, osg::Stats& stats) const
+    void MechanicsManager::reportStats(unsigned int frameNumber, Misc::FrameStats& stats) const
     {
         stats.setAttribute(frameNumber, "Mechanics Actors", static_cast<double>(mActors.size()));
         stats.setAttribute(frameNumber, "Mechanics Objects", static_cast<double>(mObjects.size()));

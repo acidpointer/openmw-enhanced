@@ -36,6 +36,10 @@ namespace SceneUtil
         ~ShadowManager();
 
         void setupShadowSettings(const Settings::ShadowsCategory& settings, Shader::ShaderManager& shaderManager);
+        void setOutdoorShadowCastingMask(unsigned int mask);
+        void setIndoorShadowCastingMask(unsigned int mask);
+
+        void setupShaders(Shader::ShaderManager& shaderManager) const;
 
         void disableShadowsForStateSet(osg::StateSet& stateset) const;
 
@@ -44,8 +48,6 @@ namespace SceneUtil
         void enableIndoorMode(const Settings::ShadowsCategory& settings);
 
         void enableOutdoorMode();
-
-        void updateCastingMasks(unsigned int outdoorMask, unsigned int indoorMask);
 
     protected:
         static ShadowManager* sInstance;

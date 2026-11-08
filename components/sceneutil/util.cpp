@@ -10,6 +10,7 @@
 #include <osg/NodeVisitor>
 #include <osgUtil/CullVisitor>
 #include <osgUtil/RenderStage>
+#include <osgViewer/Renderer>
 
 #include <components/resource/imagemanager.hpp>
 #include <components/resource/scenemanager.hpp>
@@ -82,7 +83,6 @@ namespace SceneUtil
             removeTexture(stateset);
         else
         {
-            stateset->setTextureMode(mTexUnit, GL_TEXTURE_2D, osg::StateAttribute::ON);
             stateset->addUniform(new osg::Uniform("envMapColor", mColor));
         }
     }
@@ -90,7 +90,6 @@ namespace SceneUtil
     void GlowUpdater::removeTexture(osg::StateSet* stateset)
     {
         stateset->removeTextureAttribute(mTexUnit, osg::StateAttribute::TEXTURE);
-        stateset->removeTextureMode(mTexUnit, GL_TEXTURE_2D);
         stateset->removeUniform("envMapColor");
 
         osg::StateSet::TextureAttributeList& list = stateset->getTextureAttributeList();
@@ -230,8 +229,8 @@ namespace SceneUtil
             writableStateSet = new osg::StateSet(*node->getStateSet(), osg::CopyOp::SHALLOW_COPY);
             node->setStateSet(writableStateSet);
         }
-        writableStateSet->setTextureAttributeAndModes(texUnit, textures.front(), osg::StateAttribute::ON);
-        writableStateSet->setTextureAttributeAndModes(texUnit, new TextureType("envMap"), osg::StateAttribute::ON);
+        writableStateSet->setTextureAttribute(texUnit, textures.front(), osg::StateAttribute::ON);
+        writableStateSet->setTextureAttribute(texUnit, new TextureType("envMap"), osg::StateAttribute::ON);
         writableStateSet->addUniform(new osg::Uniform("envMapColor", glowColor));
         resourceSystem->getSceneManager()->recreateShaders(std::move(node));
 
@@ -399,5 +398,19 @@ namespace SceneUtil
             return static_cast<const SceneUtil::TextureType*>(type)->getName();
 
         return texture.getName();
+    }
+
+    void disableFFPStateForRenderer(osgViewer::Renderer* renderer)
+    {
+        auto disableFFPState = [](osgUtil::SceneView* sceneView) {
+            sceneView->setDefaults(osgUtil::SceneView::NO_SCENEVIEW_LIGHT);
+            sceneView->getGlobalStateSet()->removeMode(GL_LIGHT0);
+            sceneView->getGlobalStateSet()->removeAttribute(osg::StateAttribute::LIGHTMODEL);
+            sceneView->getGlobalStateSet()->removeAttribute(osg::StateAttribute::MATERIAL);
+            sceneView->getGlobalStateSet()->removeAttribute(osg::StateAttribute::ALPHAFUNC);
+        };
+
+        disableFFPState(renderer->getSceneView(0));
+        disableFFPState(renderer->getSceneView(1));
     }
 }

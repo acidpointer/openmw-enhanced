@@ -1,10 +1,15 @@
 #include "widget.hpp"
+#include "components/lua/utilpackage.hpp"
 #include "components/lua_ui/util.hpp"
 #include "element.hpp"
+#include "resources.hpp"
 
 #include <SDL_events.h>
 #include <components/sdlutil/sdlmappings.hpp>
 #include <ranges>
+
+#include <MyGUI_InputManager.h>
+#include <MyGUI_PointerManager.h>
 
 namespace
 {
@@ -32,6 +37,9 @@ namespace LuaUi
         , mParent(nullptr)
         , mTemplateChild(false)
         , mElementRoot(false)
+        , mContentWidget(nullptr)
+        , mCursor("arrow")
+        , mHasCursor(false)
     {
     }
 
@@ -48,6 +56,11 @@ namespace LuaUi
     {
         // \todo might be more efficient to only register these if there are Lua callbacks
         registerEvents(mWidget);
+
+        mContentWidget = mWidget->createWidget<MyGUI::Widget>("", MyGUI::IntCoord(), MyGUI::Align::Default);
+        mContentWidget->setNeedMouseFocus(false);
+        mContentWidget->setNeedKeyFocus(false);
+        mContentWidget->setInheritsPick(true);
     }
 
     void WidgetExtension::deinitialize()
@@ -124,7 +137,8 @@ namespace LuaUi
         }
         ext->mParent = this;
         ext->mTemplateChild = false;
-        ext->widget()->attachToWidget(mSlot->widget());
+        ext->widget()->attachToWidget(mSlot->contentWidget());
+        ext->setInheritedCursor(mCursor);
     }
 
     void WidgetExtension::attachTemplate(WidgetExtension* ext)
@@ -132,6 +146,7 @@ namespace LuaUi
         ext->mParent = this;
         ext->mTemplateChild = true;
         ext->widget()->attachToWidget(widget());
+        ext->setInheritedCursor(mCursor);
     }
 
     void WidgetExtension::detachFromParent()
@@ -226,6 +241,12 @@ namespace LuaUi
             attachTemplate(mTemplateChildren[i]);
         }
         updateTemplate();
+
+        // Template children attach directly to this widget, while normal content is
+        // kept in mContentWidget to apply padding and clipping. Reattach the wrapper
+        // after templates so normal content remains the top-most sibling.
+        mContentWidget->detachFromWidget();
+        mContentWidget->attachToWidget(widget());
     }
 
     void WidgetExtension::updateTemplate()
@@ -286,6 +307,10 @@ namespace LuaUi
 
         if (oldCoord != newCoord)
             mWidget->setCoord(newCoord);
+
+        if (mContentWidget)
+            mContentWidget->setCoord(MyGUI::IntCoord(getContentOffset(), getContentSize()));
+
         updateChildrenCoord();
     }
 
@@ -305,9 +330,50 @@ namespace LuaUi
         mAnchor = propertyValue("anchor", MyGUI::FloatSize());
         mVisible = propertyValue("visible", true);
         mWidget->setVisible(mVisible);
-        mWidget->setPointer(propertyValue("pointer", std::string("arrow")));
+        mWidget->setNeedMouseFocus(!propertyValue("ignorePointerEvents", false));
+        CursorResource* cursor = propertyValue<CursorResource*>("cursor", nullptr);
+        mHasCursor = cursor != nullptr;
+        if (mHasCursor)
+            setCursor(cursor->mName);
+        else
+            setInheritedCursor(mParent ? mParent->mCursor : "arrow");
         mWidget->setAlpha(propertyValue("alpha", 1.f));
         mWidget->setInheritsAlpha(propertyValue("inheritAlpha", true));
+        parsePadding();
+    }
+
+    void WidgetExtension::parsePadding()
+    {
+        mPadding = Padding();
+        const LuaUtil::Vec4 value = propertyValue("padding", LuaUtil::Vec4());
+        mPadding = Padding{ static_cast<int>(value.x()), static_cast<int>(value.y()), static_cast<int>(value.z()),
+            static_cast<int>(value.w()) };
+    }
+
+    bool WidgetExtension::setCursor(const std::string& cursor)
+    {
+        if (mCursor == cursor)
+            return false;
+
+        mCursor = cursor;
+        mWidget->setPointer(mCursor);
+        for (WidgetExtension* child : mTemplateChildren)
+            child->setInheritedCursor(mCursor);
+        for (WidgetExtension* child : mChildren)
+            child->setInheritedCursor(mCursor);
+        return true;
+    }
+
+    bool WidgetExtension::setInheritedCursor(const std::string& cursor)
+    {
+        return setCursor(mHasCursor ? mCursor : cursor);
+    }
+
+    void WidgetExtension::refreshCursor()
+    {
+        MyGUI::Widget* focused = MyGUI::InputManager::getInstance().getMouseFocusWidget();
+        if (WidgetExtension* extension = dynamic_cast<WidgetExtension*>(focused))
+            MyGUI::PointerManager::getInstance().setPointer(extension->mCursor);
     }
 
     void WidgetExtension::updateChildrenCoord()
@@ -326,6 +392,18 @@ namespace LuaUi
             return mParent->templateScalingSize();
         else
             return mParent->childScalingSize();
+    }
+
+    MyGUI::IntPoint WidgetExtension::getContentOffset() const
+    {
+        return MyGUI::IntPoint(mPadding.mLeft, mPadding.mTop);
+    }
+
+    MyGUI::IntSize WidgetExtension::getContentSize() const
+    {
+        MyGUI::IntSize fullSize = calculateSize();
+        return MyGUI::IntSize(std::max(0, fullSize.width - (mPadding.mLeft + mPadding.mRight)),
+            std::max(0, fullSize.height - (mPadding.mTop + mPadding.mBottom)));
     }
 
     MyGUI::IntSize WidgetExtension::calculateSize() const
@@ -370,9 +448,14 @@ namespace LuaUi
         return newCoord;
     }
 
+    MyGUI::Widget* WidgetExtension::contentWidget() const
+    {
+        return mContentWidget;
+    }
+
     MyGUI::IntSize WidgetExtension::childScalingSize() const
     {
-        return mSlot->widget()->getSize();
+        return mSlot->getContentSize();
     }
 
     MyGUI::IntSize WidgetExtension::templateScalingSize() const
@@ -453,9 +536,11 @@ namespace LuaUi
             "relativeSize",
             "anchor",
             "visible",
-            "pointer",
+            "ignorePointerEvents",
+            "cursor",
             "alpha",
             "inheritAlpha",
+            "padding",
         };
         return usedProps;
     }
@@ -518,6 +603,18 @@ namespace LuaUi
     {
         protectedCall([=, this](LuaUtil::LuaView& view) {
             propagateEvent("mouseRelease", [&](auto w) { return w->mouseEvent(view, left, top, button); });
+        });
+    }
+
+    void WidgetExtension::mouseWheel(MyGUI::Widget*, float left, float top, float x, float y)
+    {
+        protectedCall([=, this](LuaUtil::LuaView& view) {
+            propagateEvent("mouseWheel", [&](auto w) {
+                sol::table event = view.newTable();
+                event["position"] = osg::Vec2f(left, top);
+                event["delta"] = osg::Vec2f(x, y);
+                return event;
+            });
         });
     }
 

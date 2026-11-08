@@ -49,45 +49,10 @@ namespace Shader
 
 namespace Resource
 {
-    class TemplateRef : public osg::Object
-    {
-    public:
-        TemplateRef(const Object* object)
-            : mObject(object)
-        {
-        }
-        TemplateRef() {}
-        TemplateRef(const TemplateRef& copy, const osg::CopyOp&)
-            : mObject(copy.mObject)
-        {
-        }
-
-        META_Object(Resource, TemplateRef)
-
-    private:
-        osg::ref_ptr<const Object> mObject;
-    };
-
-    class TemplateMultiRef : public osg::Object
-    {
-    public:
-        TemplateMultiRef() {}
-        TemplateMultiRef(const TemplateMultiRef& copy, const osg::CopyOp&)
-            : mObjects(copy.mObjects)
-        {
-        }
-        void addRef(const osg::Node* node);
-
-        META_Object(Resource, TemplateMultiRef)
-
-    private:
-        std::vector<osg::ref_ptr<const Object>> mObjects;
-    };
-
     /// @brief Handles loading and caching of scenes, e.g. .nif files or .osg files
     /// @note Some methods of the scene manager can be used from any thread, see the methods documentation for more
     /// details.
-    class SceneManager : public ResourceManager
+    class SceneManager : public NodeResourceManager<std::string>
     {
     public:
         explicit SceneManager(const VFS::Manager* vfs, Resource::ImageManager* imageManager,
@@ -124,8 +89,10 @@ namespace Resource
         bool isClusteredLightingSupported() const;
 
         void setOpaqueDepthTex(osg::ref_ptr<osg::Texture> texturePing, osg::ref_ptr<osg::Texture> texturePong);
+        void setOpaqueColorTex(osg::ref_ptr<osg::Texture> texturePing, osg::ref_ptr<osg::Texture> texturePong);
 
         osg::ref_ptr<osg::Texture> getOpaqueDepthTex(size_t frame);
+        osg::ref_ptr<osg::Texture> getOpaqueColorTex(size_t frame);
 
         void loadSelectionMarker(
             osg::ref_ptr<osg::Group> parentNode, const char* markerData, long long markerSize) const;
@@ -233,6 +200,7 @@ namespace Resource
         std::string mNormalHeightMapPattern;
         std::string mSpecularMapPattern;
         std::array<osg::ref_ptr<osg::Texture>, 2> mOpaqueDepthTex;
+        std::array<osg::ref_ptr<osg::Texture>, 2> mOpaqueColorTex;
 
         osg::ref_ptr<Resource::SharedStateManager> mSharedStateManager;
 

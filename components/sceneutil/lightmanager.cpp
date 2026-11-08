@@ -58,7 +58,7 @@ namespace SceneUtil
 {
     static int sLightId = 0;
 
-    void configureStateSetSunOverride(const osg::Light* light, osg::StateSet* stateset, int mode)
+    void configureStateSetSunOverride(const Light* light, osg::StateSet* stateset, int mode)
     {
         stateset->addUniform(new osg::Uniform("sun.position", light->getPosition()), mode);
         stateset->addUniform(new osg::Uniform("sun.diffuse", light->getDiffuse()), mode);
@@ -202,9 +202,10 @@ namespace SceneUtil
             }
 
             // Ensure we rebuild the cluster grid only when the projection matrix changes
-            rebuildCluster = cache.clusterFar != clusterFar || cache.mProjection[frameId] != *cv->getProjectionMatrix();
+            if (cache.mClusterFar != clusterFar || cache.mProjection[frameId] != *cv->getProjectionMatrix())
+                rebuildCluster = true;
 
-            cache.clusterFar = clusterFar;
+            cache.mClusterFar = clusterFar;
             cache.mProjection[frameId] = *cv->getProjectionMatrix();
 
             if (rebuildCluster)
@@ -502,6 +503,7 @@ namespace SceneUtil
 
         mLights.clear();
         mLightsInViewSpace.clear();
+        mLightListStateSets.clear();
     }
 
     void LightManager::addLight(LightSource* lightSource, const osg::Matrixf& worldMat, size_t frameNum)
@@ -515,12 +517,12 @@ namespace SceneUtil
         mLights.push_back(l);
     }
 
-    void LightManager::setSunlight(osg::ref_ptr<osg::Light> sun)
+    void LightManager::setSunlight(std::shared_ptr<Light> sun)
     {
-        mSun = sun;
+        mSun = std::move(sun);
     }
 
-    osg::ref_ptr<osg::Light> LightManager::getSunlight()
+    const std::shared_ptr<Light>& LightManager::getSunlight() const
     {
         return mSun;
     }
@@ -528,6 +530,15 @@ namespace SceneUtil
     osg::ref_ptr<osg::StateSet> LightManager::getLightListStateSet(
         const LightList& lightList, size_t frameNum, const osg::RefMatrix* viewMatrix)
     {
+        std::vector<int> lightIds;
+        lightIds.reserve(lightList.size());
+        for (const LightSourceViewBound* light : lightList)
+            lightIds.push_back(light->mLightSource->getId());
+
+        auto [found, inserted] = mLightListStateSets.try_emplace(std::make_pair(viewMatrix, std::move(lightIds)));
+        if (!inserted)
+            return found->second;
+
         osg::ref_ptr<osg::StateSet> stateset = new osg::StateSet;
         osg::ref_ptr<osg::Uniform> data = generateLightBufferUniform();
 
@@ -549,6 +560,7 @@ namespace SceneUtil
         stateset->addUniform(data);
         stateset->addUniform(new osg::Uniform("PointLightCount", static_cast<int>(lightList.size())));
 
+        found->second = stateset;
         return stateset;
     }
 
@@ -653,14 +665,12 @@ namespace SceneUtil
 
     LightSource::LightSource(const LightSource& copy, const osg::CopyOp& copyop)
         : osg::Node(copy, copyop)
+        , mLight(copy.mLight)
         , mRadius(copy.mRadius)
         , mActorFade(copy.mActorFade)
         , mLastAppliedFrame(copy.mLastAppliedFrame)
     {
         mId = sLightId++;
-
-        for (size_t i = 0; i < mLight.size(); ++i)
-            mLight[i] = new osg::Light(*copy.mLight[i].get(), copyop);
     }
 
     void LightListCallback::operator()(osg::Node* node, osgUtil::CullVisitor* cv)

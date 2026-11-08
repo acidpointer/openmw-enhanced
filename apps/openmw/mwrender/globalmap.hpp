@@ -2,6 +2,7 @@
 #define GAME_RENDER_GLOBALMAP_H
 
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,11 @@ namespace osg
     class Image;
     class Group;
     class Camera;
+}
+
+namespace MyGUI
+{
+    class ITexture;
 }
 
 namespace ESM
@@ -29,11 +35,12 @@ namespace MWRender
 {
 
     class CreateMapWorkItem;
+    class LocalMap;
 
     class GlobalMap
     {
     public:
-        GlobalMap(osg::Group* root, SceneUtil::WorkQueue* workQueue);
+        GlobalMap(osg::Group* root, const std::shared_ptr<SceneUtil::WorkQueue>& workQueue);
         ~GlobalMap();
 
         void render();
@@ -43,7 +50,7 @@ namespace MWRender
 
         void worldPosToImageSpace(float x, float z, float& imageX, float& imageY);
 
-        void exploreCell(int cellX, int cellY, osg::ref_ptr<osg::Texture2D> localMapTexture);
+        void exploreCell(int cellX, int cellY, LocalMap& localMap);
 
         /// Clears the overlay
         void clear();
@@ -67,8 +74,8 @@ namespace MWRender
         void write(ESM::GlobalMap& map);
         void read(ESM::GlobalMap& map);
 
-        osg::ref_ptr<osg::Texture2D> getBaseTexture();
-        osg::ref_ptr<osg::Texture2D> getOverlayTexture();
+        std::unique_ptr<MyGUI::ITexture> makeBaseGuiTexture();
+        std::unique_ptr<MyGUI::ITexture> makeOverlayGuiTexture();
 
         void ensureLoaded();
 
@@ -95,16 +102,10 @@ namespace MWRender
 
         struct ImageDest
         {
-            ImageDest()
-                : mX(0)
-                , mY(0)
-                , mFrameDone(0)
-            {
-            }
-
             osg::ref_ptr<osg::Image> mImage;
-            int mX, mY;
-            unsigned int mFrameDone;
+            int mX = 0;
+            int mY = 0;
+            unsigned int mFrameDone = 0;
         };
 
         typedef std::map<osg::ref_ptr<osg::Camera>, ImageDest> ImageDestMap;
@@ -121,9 +122,9 @@ namespace MWRender
         // CPU copy of overlay
         osg::ref_ptr<osg::Image> mOverlayImage;
 
-        osg::ref_ptr<SceneUtil::WorkQueue> mWorkQueue;
-        osg::ref_ptr<CreateMapWorkItem> mWorkItem;
-        osg::ref_ptr<WritePng> mWritePng;
+        std::shared_ptr<SceneUtil::WorkQueue> mWorkQueue;
+        std::shared_ptr<CreateMapWorkItem> mWorkItem;
+        std::shared_ptr<WritePng> mWritePng;
 
         int mWidth;
         int mHeight;

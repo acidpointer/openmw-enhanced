@@ -12,20 +12,14 @@
 
 #include <BulletCollision/CollisionDispatch/btCollisionWorld.h>
 
-#include <osg/Timer>
-
 #include "components/misc/budgetmeasurement.hpp"
+#include "components/misc/framestats.hpp"
 #include "physicssystem.hpp"
 #include "ptrholder.hpp"
 
 namespace Misc
 {
     class Barrier;
-}
-
-namespace MWRender
-{
-    class DebugDrawer;
 }
 
 namespace MWPhysics
@@ -40,7 +34,7 @@ namespace MWPhysics
     class PhysicsTaskScheduler
     {
     public:
-        PhysicsTaskScheduler(float physicsDt, btCollisionWorld* collisionWorld, MWRender::DebugDrawer* debugDrawer);
+        PhysicsTaskScheduler(float physicsDt, btCollisionWorld* collisionWorld);
         ~PhysicsTaskScheduler();
 
         /// @brief move actors taking into account desired movements and collisions
@@ -48,8 +42,8 @@ namespace MWPhysics
         /// @param timeAccum accumulated time from previous run to interpolate movements
         /// @param actorsData per actor data needed to compute new positions
         /// @return new position of each actor
-        void applyQueuedMovements(float& timeAccum, std::vector<Simulation>& simulations, osg::Timer_t frameStart,
-            unsigned int frameNumber, osg::Stats& stats);
+        void applyQueuedMovements(float& timeAccum, std::vector<Simulation>& simulations,
+            Misc::FrameClock::time_point statsEpoch, unsigned int frameNumber, Misc::FrameStats& stats);
 
         void resetSimulation(const ActorMap& actors);
 
@@ -82,15 +76,15 @@ namespace MWPhysics
         void refreshLOSCache();
         void updateAabbs();
         void updatePtrAabb(const std::shared_ptr<PtrHolder>& ptr);
-        void updateStats(osg::Timer_t frameStart, unsigned int frameNumber, osg::Stats& stats);
+        void updateStats(Misc::FrameClock::time_point statsEpoch, unsigned int frameNumber, Misc::FrameStats& stats);
         std::tuple<unsigned, float> calculateStepConfig(float timeAccum) const;
         void afterPreStep();
         void afterPostStep();
         void afterPostSim();
         void syncWithMainThread();
         void waitForWorkers();
-        void prepareWork(float& timeAccum, std::vector<Simulation>& simulations, osg::Timer_t frameStart,
-            unsigned int frameNumber, osg::Stats& stats);
+        void prepareWork(float& timeAccum, std::vector<Simulation>& simulations,
+            Misc::FrameClock::time_point statsEpoch, unsigned int frameNumber, Misc::FrameStats& stats);
 
         std::unique_ptr<WorldFrameData> mWorldFrameData;
         std::vector<Simulation>* mSimulations = nullptr;
@@ -99,7 +93,6 @@ namespace MWPhysics
         float mPhysicsDt;
         float mTimeAccum;
         btCollisionWorld* mCollisionWorld;
-        MWRender::DebugDrawer* mDebugDrawer;
         std::vector<LOSRequest> mLOSCache;
         std::set<std::weak_ptr<PtrHolder>, std::owner_less<std::weak_ptr<PtrHolder>>> mUpdateAabb;
 
@@ -124,16 +117,15 @@ namespace MWPhysics
         mutable std::mutex mUpdateAabbMutex;
 
         unsigned int mFrameNumber;
-        const osg::Timer* mTimer;
 
         unsigned mPrevStepCount;
         Misc::BudgetMeasurement mBudget;
         Misc::BudgetMeasurement mAsyncBudget;
         unsigned int mBudgetCursor;
-        osg::Timer_t mAsyncStartTime;
-        osg::Timer_t mTimeBegin;
-        osg::Timer_t mTimeEnd;
-        osg::Timer_t mFrameStart;
+        Misc::FrameClock::time_point mAsyncStartTime;
+        Misc::FrameClock::time_point mTimeBegin;
+        Misc::FrameClock::time_point mTimeEnd;
+        Misc::FrameClock::time_point mStatsEpoch;
 
         std::unique_ptr<WorkersSync> mWorkersSync;
     };

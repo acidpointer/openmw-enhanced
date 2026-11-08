@@ -2,9 +2,9 @@
 #define GAME_RENDER_OBJECTS_H
 
 #include <map>
+#include <memory>
 #include <string>
 
-#include <osg/Object>
 #include <osg/ref_ptr>
 
 #include "../mwworld/ptr.hpp"
@@ -36,29 +36,9 @@ namespace MWRender
 
     class Animation;
 
-    class PtrHolder : public osg::Object
-    {
-    public:
-        PtrHolder(const MWWorld::Ptr& ptr)
-            : mPtr(ptr)
-        {
-        }
-
-        PtrHolder() {}
-
-        PtrHolder(const PtrHolder& copy, const osg::CopyOp& copyop)
-            : mPtr(copy.mPtr)
-        {
-        }
-
-        META_Object(MWRender, PtrHolder)
-
-        MWWorld::Ptr mPtr;
-    };
-
     class Objects
     {
-        using PtrAnimationMap = std::map<const MWWorld::LiveCellRefBase*, osg::ref_ptr<Animation>>;
+        using PtrAnimationMap = std::map<const MWWorld::LiveCellRefBase*, std::unique_ptr<Animation>>;
 
         typedef std::map<const MWWorld::CellStore*, osg::ref_ptr<osg::Group>> CellMap;
         CellMap mCellSceneNodes;

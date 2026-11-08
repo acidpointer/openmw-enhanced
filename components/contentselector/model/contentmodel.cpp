@@ -652,6 +652,19 @@ bool ContentSelectorModel::ContentModel::isLoadOrderError(const EsmFile* file) c
     return !errors.empty();
 }
 
+QStringList ContentSelectorModel::ContentModel::userFilesInOrder() const
+{
+    QStringList result;
+    result.reserve(mFiles.size());
+    for (const EsmFile* file : mFiles)
+    {
+        if (file->builtIn() || file->fromAnotherConfigFile())
+            continue;
+        result.append(file->fileName());
+    }
+    return result;
+}
+
 void ContentSelectorModel::ContentModel::setContentList(const QStringList& fileList, bool orderOnly)
 {
     QProgressDialog progressDialog("Setting content list", {}, 0, static_cast<int>(fileList.size()));
@@ -735,7 +748,7 @@ QString ContentSelectorModel::ContentModel::toolTip(const EsmFile* file) const
             assert(error.errorCode() != LoadOrderError::ErrorCode::ErrorCode_None);
 
             text += "<p>";
-            text += mErrorToolTips[error.errorCode() - 1].arg(error.fileName());
+            text += mErrorToolTips[error.errorCode() - 1].arg(error.fileName().toHtmlEscaped());
             text += "</p>";
         }
         text += ("</b>");

@@ -31,9 +31,16 @@ Properties
     - util.vector2 (0, 0)
     - | Offsets the widget's position by a fraction of its size.
       | Useful for centering or aligning to a corner.
+  * - padding
+    - util.vector4 (0, 0, 0, 0)
+    - | Adds inset spacing between the outer edge of the widget and its content.
+      | Components specify the left, top, right, and bottom insets in pixels, respectively.
   * - visible
     - boolean (true)
     - Defines if the widget is visible
+  * - ignorePointerEvents
+    - boolean (false)
+    - Defines whether the widget participates in pointer events or pointer hit detection.
   * - propagateEvents
     - boolean (true)
     - Allows base widget events to propagate to the widget's parent.
@@ -45,8 +52,9 @@ Properties
     - boolean (true)
     - | Modulate `alpha` with parents `alpha`.
       | If the parent has `inheritAlpha` set to `true`, the value after modulating is passed to the child.
-
-.. TODO: document the mouse pointer property, when API for reading / adding pointer types is available
+  * - cursor
+    - `CursorResource <../openmw_ui.html##(CursorResource)>`_
+    - Sets the cursor to be displayed when hovering over this widget.
 
 Events
 ------
@@ -85,6 +93,9 @@ The event is still allowed to propagate if the event handler returns `true`.
   * - mouseRelease  
     -  `MouseEvent <../openmw_ui.html##(MouseEvent)>`_
     - A mouse button was released on this widget
+  * - mouseWheel
+    - `MouseWheelEvent <../openmw_ui.html##(MouseWheelEvent)>`_
+    - The mouse wheel was scrolled on this widget.
   * - focusGain
     - nil
     - Widget gained focus (either through mouse or keyboard)

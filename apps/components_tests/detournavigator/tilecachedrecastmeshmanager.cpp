@@ -2,6 +2,7 @@
 #include <components/detournavigator/debug.hpp>
 #include <components/detournavigator/settingsutils.hpp>
 #include <components/detournavigator/tilecachedrecastmeshmanager.hpp>
+#include <memory>
 
 #include <BulletCollision/CollisionShapes/btBoxShape.h>
 
@@ -19,8 +20,9 @@ namespace
     {
         RecastSettings mSettings;
         const ObjectTransform mObjectTransform{ ESM::Position{ { 0, 0, 0 }, { 0, 0, 0 } }, 0.0f };
-        const osg::ref_ptr<const Resource::BulletShape> mShape = new Resource::BulletShape;
-        const osg::ref_ptr<const Resource::BulletShapeInstance> mInstance = new Resource::BulletShapeInstance(mShape);
+        const std::shared_ptr<const Resource::BulletShape> mShape = std::make_shared<Resource::BulletShape>();
+        const std::shared_ptr<const Resource::BulletShapeInstance> mInstance
+            = std::make_shared<Resource::BulletShapeInstance>(mShape);
         const ESM::RefId mWorldspace = ESM::RefId::stringRefId("worldspace");
 
         DetourNavigatorTileCachedRecastMeshManagerTest()
@@ -111,6 +113,46 @@ namespace
                 std::pair(TilePosition(-1, 0), ChangeType::add), std::pair(TilePosition(0, -1), ChangeType::update),
                 std::pair(TilePosition(0, 0), ChangeType::update), std::pair(TilePosition(1, -1), ChangeType::remove),
                 std::pair(TilePosition(1, 0), ChangeType::remove)));
+    }
+
+    TEST_F(DetourNavigatorTileCachedRecastMeshManagerTest, object_removals_report_types)
+    {
+        TileCachedRecastMeshManager manager(mSettings);
+        const btBoxShape boxShape1(btVector3(20, 20, 100));
+        const btBoxShape boxShape2(btVector3(20, 20, 100));
+        const CollisionShape shape1(mInstance, boxShape1, mObjectTransform);
+        const CollisionShape shape2(mInstance, boxShape2, mObjectTransform);
+        const TilesPositionsRange range{
+            .mBegin = TilePosition(0, 0),
+            .mEnd = TilePosition(1, 1),
+        };
+        manager.setRange(range, nullptr);
+        manager.addWater(osg::Vec2i(0, 0), std::numeric_limits<int>::max(), 0.0f, nullptr);
+        manager.addObject(ObjectId(&boxShape1), shape1, btTransform::getIdentity(), AreaType::AreaType_ground, nullptr);
+        manager.addObject(ObjectId(&boxShape2), shape2, btTransform::getIdentity(), AreaType::AreaType_ground, nullptr);
+        EXPECT_THAT(manager.takeChangedTiles(nullptr), ElementsAre(std::pair(TilePosition(0, 0), ChangeType::add)));
+        manager.removeObject(ObjectId(&boxShape1), nullptr);
+        EXPECT_THAT(manager.takeChangedTiles(nullptr), ElementsAre(std::pair(TilePosition(0, 0), ChangeType::update)));
+        manager.removeObject(ObjectId(&boxShape2), nullptr);
+        EXPECT_THAT(manager.takeChangedTiles(nullptr), ElementsAre(std::pair(TilePosition(0, 0), ChangeType::remove)));
+    }
+
+    TEST_F(DetourNavigatorTileCachedRecastMeshManagerTest, pending_remove_reports_add)
+    {
+        TileCachedRecastMeshManager manager(mSettings);
+        const btBoxShape boxShape1(btVector3(20, 20, 100));
+        const btBoxShape boxShape2(btVector3(20, 20, 100));
+        const CollisionShape shape1(mInstance, boxShape1, mObjectTransform);
+        const CollisionShape shape2(mInstance, boxShape2, mObjectTransform);
+        const TilesPositionsRange range{
+            .mBegin = TilePosition(0, 0),
+            .mEnd = TilePosition(1, 1),
+        };
+        manager.setRange(range, nullptr);
+        manager.addObject(ObjectId(&boxShape1), shape1, btTransform::getIdentity(), AreaType::AreaType_ground, nullptr);
+        manager.addObject(ObjectId(&boxShape2), shape2, btTransform::getIdentity(), AreaType::AreaType_ground, nullptr);
+        manager.removeObject(ObjectId(&boxShape1), nullptr);
+        EXPECT_THAT(manager.takeChangedTiles(nullptr), ElementsAre(std::pair(TilePosition(0, 0), ChangeType::add)));
     }
 
     TEST_F(DetourNavigatorTileCachedRecastMeshManagerTest,
@@ -388,6 +430,26 @@ namespace
             EXPECT_EQ(v, ChangeType::remove) << k;
     }
 
+    TEST_F(DetourNavigatorTileCachedRecastMeshManagerTest, water_removal_reports_types)
+    {
+        TileCachedRecastMeshManager manager(mSettings);
+        const btBoxShape boxShape(btVector3(20, 20, 100));
+        const CollisionShape shape(mInstance, boxShape, mObjectTransform);
+        manager.addObject(ObjectId(&boxShape), shape, btTransform::getIdentity(), AreaType::AreaType_ground, nullptr);
+        const osg::Vec2i cellPosition(0, 0);
+        const int cellSize = 8192;
+        manager.addWater(cellPosition, cellSize, 0.0f, nullptr);
+        manager.takeChangedTiles(nullptr);
+        manager.removeWater(cellPosition, nullptr);
+        const auto changedTiles = manager.takeChangedTiles(nullptr);
+        EXPECT_EQ(changedTiles.size(), 169);
+        for (const auto& [k, v] : changedTiles)
+        {
+            const bool hasObject = -1 <= k.x() && k.x() <= 0 && -1 <= k.y() && k.y() <= 0;
+            EXPECT_EQ(v, hasObject ? ChangeType::update : ChangeType::remove) << k;
+        }
+    }
+
     TEST_F(DetourNavigatorTileCachedRecastMeshManagerTest, remove_water_for_existing_cell_should_remove_empty_tiles)
     {
         TileCachedRecastMeshManager manager(mSettings);
@@ -440,15 +502,22 @@ namespace
     {
         TileCachedRecastMeshManager manager(mSettings);
         manager.setWorldspace(mWorldspace, nullptr);
+        const TilesPositionsRange range{
+            .mBegin = TilePosition(0, 0),
+            .mEnd = TilePosition(1, 1),
+        };
+        manager.setRange(range, nullptr);
         const btBoxShape boxShape(btVector3(20, 20, 100));
         const CollisionShape shape(nullptr, boxShape, mObjectTransform);
         ASSERT_TRUE(manager.addObject(
             ObjectId(&boxShape), shape, btTransform::getIdentity(), AreaType::AreaType_ground, nullptr));
+        EXPECT_THAT(manager.takeChangedTiles(nullptr), ElementsAre(std::pair(TilePosition(0, 0), ChangeType::add)));
         const ESM::RefId otherWorldspace(ESM::FormId::fromUint32(0x1));
-        manager.setWorldspace(ESM::FormId::fromUint32(0x1), nullptr);
-        for (int x = -1; x < 1; ++x)
-            for (int y = -1; y < 1; ++y)
-                ASSERT_EQ(manager.getMesh(otherWorldspace, TilePosition(x, y)), nullptr);
+        manager.setWorldspace(otherWorldspace, nullptr);
+        ASSERT_EQ(manager.getMesh(otherWorldspace, TilePosition(0, 0)), nullptr);
+        ASSERT_TRUE(manager.addObject(
+            ObjectId(&boxShape), shape, btTransform::getIdentity(), AreaType::AreaType_ground, nullptr));
+        EXPECT_THAT(manager.takeChangedTiles(nullptr), ElementsAre(std::pair(TilePosition(0, 0), ChangeType::add)));
     }
 
     TEST_F(DetourNavigatorTileCachedRecastMeshManagerTest, set_range_should_add_changed_tiles)

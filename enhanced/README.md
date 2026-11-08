@@ -61,3 +61,22 @@ Build with Bullet threading disabled:
 
 Docker mounts persistent caches from `.build/` so repeated builds reuse CMake
 outputs, ccache, Cargo downloads, and release artifacts.
+
+## Manual verification after upstream synchronization
+
+Build and runtime checks are run by the user. Agents may perform static source
+checks, but must not run builds or packaging.
+
+After building, check the packaged version:
+
+```sh
+APPIMAGE_EXTRACT_AND_RUN=1 .build/dist/OpenMW-Enhanced-x86_64.AppImage --openmw --version
+```
+
+Launch the AppImage and confirm the launcher retains the existing mod/content
+selection. In game, check exterior and interior transitions, doors and distant
+objects with occlusion enabled, water/refraction, first/third-person screen-space
+shadows, and the shadow settings (resolution, soft shadows, temporal reuse).
+Screen-space shadows require post-processing to be enabled. Check the log for
+bundled `usr/bin/openmw.cfg` and `defaults.bin` together with user
+`~/.config/openmw/openmw.cfg` and `settings.cfg`.

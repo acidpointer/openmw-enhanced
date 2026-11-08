@@ -2,16 +2,6 @@ Models Settings
 ###############
 
 .. omw-setting::
-   :title: load unsupported nif files
-   :type: boolean
-   :range: true, false
-   :default: false
-
-   Allows the engine to load arbitrary NIF files that appear valid.
-   Support is limited and experimental; enabling may cause crashes or memory issues.
-   Do not enable unless you understand the risks.
-
-.. omw-setting::
    :title: xbaseanim
    :type: string
    :default: meshes/xbase_anim.nif
@@ -144,31 +134,3 @@ Models Settings
    :default: meshes/sky_night_02.nif
 
    Sky stars mesh used during night, takes priority over skynight01.
-
-.. omw-setting::
-   :title: weatherashcloud
-   :type: string
-   :default: meshes/ashcloud.nif
-
-   Ash clouds weather effect file from Morrowind (not used by OpenMW).
-
-.. omw-setting::
-   :title: weatherblightcloud
-   :type: string
-   :default: meshes/blightcloud.nif
-
-   Blight clouds weather effect file from Morrowind (not used by OpenMW).
-
-.. omw-setting::
-   :title: weathersnow
-   :type: string
-   :default: meshes/snow.nif
-
-   Snow falling weather effect file from Morrowind (not used by OpenMW).
-
-.. omw-setting::
-   :title: weatherblizzard
-   :type: string
-   :default: meshes/blizzard.nif
-
-   Blizzard weather effect file from Morrowind (not used by OpenMW).

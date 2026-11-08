@@ -1,16 +1,19 @@
 #ifndef GAME_MWWORLD_WORLDIMP_H
 #define GAME_MWWORLD_WORLDIMP_H
 
-#include <osg/Timer>
+#include <memory>
+
 #include <osg/ref_ptr>
 
 #include <components/debug/debuglog.hpp>
 #include <components/esm3/readerscache.hpp>
+#include <components/misc/framestats.hpp>
 #include <components/misc/rng.hpp>
 #include <components/settings/settings.hpp>
 #include <components/vfs/pathutil.hpp>
 
 #include "../mwbase/world.hpp"
+#include "../mwphysics/raycasting.hpp"
 
 #include "contentloader.hpp"
 #include "esmstore.hpp"
@@ -25,7 +28,6 @@
 namespace osg
 {
     class Group;
-    class Stats;
 }
 
 namespace osgViewer
@@ -94,7 +96,7 @@ namespace MWWorld
         MWWorld::Globals mGlobalVariables;
         Misc::Rng::Generator mPrng;
         WorldModel mWorldModel;
-        std::vector<int> mESMVersions; // the versions of esm files
+        std::vector<ESM::GameFormat> mGameFormats; // the game formats of esm files
 
         std::string mCurrentWorldSpace;
 
@@ -103,6 +105,7 @@ namespace MWWorld
         std::unique_ptr<DetourNavigator::Navigator> mNavigator;
         std::unique_ptr<MWRender::RenderingManager> mRendering;
         std::unique_ptr<MWWorld::Scene> mWorldScene;
+        std::unique_ptr<MWWorld::WeatherStore> mWeatherStore;
         std::unique_ptr<MWWorld::WeatherManager> mWeatherManager;
         std::unique_ptr<MWWorld::DateTimeManager> mTimeManager;
         std::unique_ptr<ProjectileManager> mProjectileManager;
@@ -122,6 +125,7 @@ namespace MWWorld
         float mSwimHeightScale;
 
         float mDistanceToFocusObject;
+        MWPhysics::RayCastingResult mFocusRay;
 
         bool mTeleportEnabled;
         bool mLevitationEnabled;
@@ -161,7 +165,8 @@ namespace MWWorld
         void processDoors(float duration);
         ///< Run physics simulation and modify \a world accordingly.
 
-        void doPhysics(float duration, osg::Timer_t frameStart, unsigned int frameNumber, osg::Stats& stats);
+        void doPhysics(
+            float duration, Misc::FrameClock::time_point statsEpoch, unsigned int frameNumber, Misc::FrameStats& stats);
         ///< Run physics simulation and modify \a world accordingly.
 
         void updateNavigator();
@@ -202,7 +207,7 @@ namespace MWWorld
 
         // Must be called after `loadData`.
         void init(Debug::Level maxRecastLogLevel, osgViewer::Viewer* viewer, osg::ref_ptr<osg::Group> rootNode,
-            SceneUtil::WorkQueue* workQueue, SceneUtil::UnrefQueue& unrefQueue);
+            const std::shared_ptr<SceneUtil::WorkQueue>& workQueue, SceneUtil::UnrefQueue& unrefQueue);
 
         virtual ~World();
 
@@ -241,13 +246,15 @@ namespace MWWorld
 
         const MWWorld::ESMStore& getStore() const override { return mStore; }
 
-        const std::vector<int>& getESMVersions() const override;
+        const std::vector<ESM::GameFormat>& getGameFormats() const override;
 
         LocalScripts& getLocalScripts() override;
 
         bool isCellExterior() const override;
 
         bool isCellQuasiExterior() const override;
+
+        const std::set<CellStore*, std::less<>>& getActiveCells() const override;
 
         ESM::RefId getCurrentWorldspace() const;
 
@@ -311,16 +318,12 @@ namespace MWWorld
         bool toggleSky() override;
         ///< \return Resulting mode
 
-        void changeWeather(const ESM::RefId& region, const unsigned int id) override;
+        void changeWeather(ESM::RefId region, ESM::RefId id) override;
 
-        void changeWeather(const ESM::RefId& region, const ESM::RefId& id) override;
-
-        const std::vector<MWWorld::Weather>& getAllWeather() const override;
+        MWWorld::WeatherStore& getAllWeather() const override;
 
         int getCurrentWeatherScriptId() const override;
-        const MWWorld::Weather& getCurrentWeather() const override;
-        const MWWorld::Weather* getWeather(size_t index) const override;
-        const MWWorld::Weather* getWeather(const ESM::RefId& id) const override;
+        const MWWorld::Weather* getCurrentWeather() const override;
         int getNextWeatherScriptId() const override;
         const MWWorld::Weather* getNextWeather() const override;
 
@@ -332,10 +335,12 @@ namespace MWWorld
 
         int getSecundaPhase() const override;
 
+        std::vector<MWWorld::Moon> getCurrentMoons() const override;
+
         void setMoonColour(bool red) override;
 
-        void modRegion(const ESM::RefId& regionid, std::span<const uint8_t> chances) override;
-        std::span<const uint8_t> getRegionWeatherChances(const ESM::RefId& regionid) const override;
+        void modRegion(ESM::RefId regionid, const std::map<ESM::RefId, uint8_t>& chances) override;
+        const std::map<ESM::RefId, uint8_t>& getRegionWeatherChances(ESM::RefId regionid) const override;
 
         void changeToInteriorCell(const std::string_view cellName, const ESM::Position& position, bool adjustPlayerPos,
             bool changeEvent = true) override;
@@ -350,6 +355,8 @@ namespace MWWorld
         ///< Return pointer to the object the player is looking at, if it is within activation range
 
         float getDistanceToFocusObject() override;
+
+        const MWPhysics::RayCastingResult& getFocusRay() const override { return mFocusRay; }
 
         /// @note No-op for items in containers. Use ContainerStore::removeItem instead.
         void deleteObject(const Ptr& ptr) override;
@@ -414,8 +421,8 @@ namespace MWWorld
         ///< \return Resulting mode
 
         void update(float duration, bool paused);
-        void updatePhysics(
-            float duration, bool paused, osg::Timer_t frameStart, unsigned int frameNumber, osg::Stats& stats);
+        void updatePhysics(float duration, bool paused, Misc::FrameClock::time_point statsEpoch,
+            unsigned int frameNumber, Misc::FrameStats& stats);
 
         void updateFocusObject();
 
@@ -522,7 +529,7 @@ namespace MWWorld
         void reattachPlayerCamera() override;
 
         /// \todo this does not belong here
-        void screenshot(osg::Image* image, int w, int h) override;
+        std::vector<char> screenshot(int w, int h) override;
 
         /// Find center of exterior cell above land surface
         /// \return false if exterior with given name not exists, true otherwise
@@ -565,9 +572,9 @@ namespace MWWorld
         void castSpell(const MWWorld::Ptr& actor, bool manualSpell = false) override;
 
         void launchMagicBolt(const ESM::RefId& spellId, const MWWorld::Ptr& caster, const osg::Vec3f& fallbackDirection,
-            ESM::RefNum item) override;
+            ESM::RefNum item, const std::optional<MWMechanics::MovingTarget>& movingTarget) override;
         void launchProjectile(MWWorld::Ptr& actor, MWWorld::Ptr& projectile, const osg::Vec3f& worldPos,
-            const osg::Quat& orient, MWWorld::Ptr& bow, float speed, float attackStrength) override;
+            const osg::Quat& orient, MWWorld::Ptr& bow, float speed, float attackStrength, float attackWindUp) override;
         void updateProjectilesCasters() override;
 
         void applyLoopingParticles(const MWWorld::Ptr& ptr) const override;
@@ -665,7 +672,7 @@ namespace MWWorld
 
         bool isAreaOccupiedByOtherActor(const MWWorld::ConstPtr& actor, const osg::Vec3f& position) const override;
 
-        void reportStats(unsigned int frameNumber, osg::Stats& stats) const override;
+        void reportStats(unsigned int frameNumber, Misc::FrameStats& stats) const override;
 
         std::vector<MWWorld::Ptr> getAll(const ESM::RefId& id) override;
 

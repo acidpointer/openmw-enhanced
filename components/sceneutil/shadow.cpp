@@ -1,5 +1,7 @@
 #include "shadow.hpp"
 
+#include <limits>
+
 #include <osgShadow/ShadowSettings>
 #include <osgShadow/ShadowedScene>
 
@@ -28,15 +30,11 @@ namespace SceneUtil
     {
         mEnableShadows = settings.mEnableShadows;
 
-        if (!mEnableShadows)
-        {
+        if (mEnableShadows)
+            mShadowTechnique->enableShadows();
+        else
             mShadowTechnique->disableShadows();
-            return;
-        }
 
-        mShadowTechnique->enableShadows();
-
-        mShadowSettings->setLightNum(0);
         mShadowSettings->setReceivesShadowTraversalMask(~0u);
 
         const int numberOfShadowMapsPerLight = settings.mNumberOfShadowMaps;
@@ -49,8 +47,13 @@ namespace SceneUtil
         if (maximumShadowMapDistance > 0)
         {
             const float shadowFadeStart = settings.mShadowFadeStart;
-            mShadowSettings->setMaximumShadowMapDistance(maximumShadowMapDistance);
+            mShadowTechnique->setMaximumShadowMapDistance(maximumShadowMapDistance);
             mShadowTechnique->setShadowFadeStart(maximumShadowMapDistance * shadowFadeStart);
+        }
+        else
+        {
+            mShadowTechnique->setMaximumShadowMapDistance(std::numeric_limits<float>::max());
+            mShadowTechnique->setShadowFadeStart(std::numeric_limits<float>::max());
         }
 
         mShadowSettings->setMinimumShadowMapNearFarRatio(settings.mMinimumLispsmNearFarRatio);
@@ -60,6 +63,8 @@ namespace SceneUtil
             mShadowSettings->setComputeNearFarModeOverride(osg::CullSettings::COMPUTE_NEAR_FAR_USING_PRIMITIVES);
         else if (Misc::StringUtils::ciEqual(computeSceneBounds, "bounds"))
             mShadowSettings->setComputeNearFarModeOverride(osg::CullSettings::COMPUTE_NEAR_FAR_USING_BOUNDING_VOLUMES);
+        else
+            mShadowSettings->setComputeNearFarModeOverride(osg::CullSettings::DO_NOT_COMPUTE_NEAR_FAR);
 
         const short mapres = static_cast<short>(settings.mShadowMapResolution);
         mShadowSettings->setTextureSize(osg::Vec2s(mapres, mapres));
@@ -79,17 +84,29 @@ namespace SceneUtil
 
         mShadowSettings->setMultipleShadowMapHint(osgShadow::ShadowSettings::CASCADED);
 
-        if (settings.mEnableDebugHud)
+        if (mEnableShadows && settings.mEnableDebugHud)
             mShadowTechnique->enableDebugHUD();
         else
             mShadowTechnique->disableDebugHUD();
     }
 
+    void ShadowManager::setOutdoorShadowCastingMask(unsigned int mask)
+    {
+        mOutdoorShadowCastingMask = mask;
+    }
+
+    void ShadowManager::setIndoorShadowCastingMask(unsigned int mask)
+    {
+        mIndoorShadowCastingMask = mask;
+    }
+
+    void ShadowManager::setupShaders(Shader::ShaderManager& shaderManager) const
+    {
+        mShadowTechnique->setupCastingShader(shaderManager);
+    }
+
     void ShadowManager::disableShadowsForStateSet(osg::StateSet& stateset) const
     {
-        if (!mEnableShadows)
-            return;
-
         osg::ref_ptr<osg::Image> fakeShadowMapImage = new osg::Image();
         fakeShadowMapImage->allocateImage(1, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT);
         *(float*)fakeShadowMapImage->data() = std::numeric_limits<float>::infinity();
@@ -134,7 +151,6 @@ namespace SceneUtil
         mShadowSettings = mShadowedScene->getShadowSettings();
         setupShadowSettings(settings, shaderManager);
 
-        mShadowTechnique->setupCastingShader(shaderManager);
         mShadowTechnique->setWorldMask(worldMask);
 
         enableOutdoorMode();
@@ -150,7 +166,7 @@ namespace SceneUtil
 
     Shader::ShaderManager::DefineMap ShadowManager::getShadowDefines(const Settings::ShadowsCategory& settings) const
     {
-        if (!mEnableShadows)
+        if (!settings.mEnableShadows)
             return getShadowsDisabledDefines();
 
         Shader::ShaderManager::DefineMap definesWithShadows;
@@ -220,10 +236,4 @@ namespace SceneUtil
         mShadowSettings->setCastsShadowTraversalMask(mOutdoorShadowCastingMask);
     }
 
-    void ShadowManager::updateCastingMasks(unsigned int outdoorMask, unsigned int indoorMask)
-    {
-        mOutdoorShadowCastingMask = outdoorMask;
-        mIndoorShadowCastingMask = indoorMask;
-        mShadowSettings->setCastsShadowTraversalMask(mOutdoorShadowCastingMask);
-    }
 }

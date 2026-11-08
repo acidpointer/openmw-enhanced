@@ -26,6 +26,7 @@ namespace Config
         constexpr char sDataKey[] = "data";
         constexpr char sArchiveKey[] = "fallback-archive";
         constexpr char sContentKey[] = "content";
+        constexpr char sOrderKey[] = "order";
         constexpr char sFirstRunKey[] = "firstrun";
         constexpr char sImportContentSetupKey[] = "importcontentsetup";
         constexpr char sImportFontSetupKey[] = "importfontsetup";
@@ -33,6 +34,7 @@ namespace Config
         constexpr char sMainWindowHeightKey[] = "MainWindow/height";
         constexpr char sMainWindowPosXKey[] = "MainWindow/posx";
         constexpr char sMainWindowPosYKey[] = "MainWindow/posy";
+        constexpr char sWatchdogKey[] = "watchdog";
 
         QString makeNewContentListName()
         {
@@ -88,18 +90,24 @@ namespace Config
                 return false;
 
             const QString profileName = key.mid(0, separator);
+            const QString suffix = key.mid(separator + 1);
 
-            if (key.endsWith(sArchiveKey))
+            if (suffix == sArchiveKey)
             {
                 profiles[profileName].mArchives.append(value);
                 return true;
             }
-            if (key.endsWith(sDataKey))
+            if (suffix == sDataKey)
             {
                 profiles[profileName].mData.append(value);
                 return true;
             }
-            if (key.endsWith(sContentKey))
+            if (suffix == sOrderKey)
+            {
+                profiles[profileName].mUserFilesInOrder.append(value);
+                return true;
+            }
+            if (suffix == sContentKey)
             {
                 profiles[profileName].mContent.append(value);
                 return true;
@@ -115,8 +123,11 @@ namespace Config
                 settings.mLanguage = value;
                 return true;
             }
+            if (key == sWatchdogKey)
+                return parseBool(value, settings.mWatchdog);
 
-            return false;
+            settings.mUnknown.emplaceBack(key, value);
+            return true;
         }
 
         bool parseProfilesSection(const QString& key, const QString& value, LauncherSettings::Profiles& profiles)
@@ -127,7 +138,9 @@ namespace Config
                 return true;
             }
 
-            return parseProfilePart(key, value, profiles.mValues);
+            if (!parseProfilePart(key, value, profiles.mValues))
+                profiles.mUnknown.emplaceBack(key, value);
+            return true;
         }
 
         bool parseGeneralSection(const QString& key, const QString& value, LauncherSettings::General& general)
@@ -143,7 +156,8 @@ namespace Config
             if (key == sMainWindowPosYKey)
                 return parseInt(value, general.mMainWindow.mPosY);
 
-            return false;
+            general.mUnknown.emplaceBack(key, value);
+            return true;
         }
 
         bool parseImporterSection(const QString& key, const QString& value, LauncherSettings::Importer& importer)
@@ -153,7 +167,14 @@ namespace Config
             if (key == sImportFontSetupKey)
                 return parseBool(value, importer.mImportFontSetup);
 
-            return false;
+            importer.mUnknown.emplaceBack(key, value);
+            return true;
+        }
+
+        void writeUnknownKeys(const LauncherSettings::UnknownKeys& values, QTextStream& stream)
+        {
+            for (const auto& [key, value] : values)
+                stream << key << '=' << value << '\n';
         }
 
         template <std::size_t size>
@@ -192,6 +213,8 @@ namespace Config
         {
             writeSectionHeader(sSettingsSection, stream);
             writeKeyValue(sLanguageKey, value.mLanguage, stream);
+            writeKeyValue(sWatchdogKey, true, stream); // Set so future reads check for dropped launcher settings
+            writeUnknownKeys(value.mUnknown, stream);
         }
 
         void writeProfiles(const LauncherSettings::Profiles& value, QTextStream& stream)
@@ -203,7 +226,9 @@ namespace Config
                 writeKeyValues(it->first, sArchiveKey, it->second.mArchives, stream);
                 writeKeyValues(it->first, sDataKey, it->second.mData, stream);
                 writeKeyValues(it->first, sContentKey, it->second.mContent, stream);
+                writeKeyValues(it->first, sOrderKey, it->second.mUserFilesInOrder, stream);
             }
+            writeUnknownKeys(value.mUnknown, stream);
         }
 
         void writeGeneral(const LauncherSettings::General& value, QTextStream& stream)
@@ -214,6 +239,7 @@ namespace Config
             writeKeyValue(sMainWindowPosYKey, value.mMainWindow.mPosY, stream);
             writeKeyValue(sMainWindowPosXKey, value.mMainWindow.mPosX, stream);
             writeKeyValue(sMainWindowHeightKey, value.mMainWindow.mHeight, stream);
+            writeUnknownKeys(value.mUnknown, stream);
         }
 
         void writeImporter(const LauncherSettings::Importer& value, QTextStream& stream)
@@ -221,6 +247,7 @@ namespace Config
             writeSectionHeader(sImporterSection, stream);
             writeKeyValue(sImportContentSetupKey, value.mImportContentSetup, stream);
             writeKeyValue(sImportFontSetupKey, value.mImportFontSetup, stream);
+            writeUnknownKeys(value.mUnknown, stream);
         }
     }
 }
@@ -231,6 +258,22 @@ void Config::LauncherSettings::writeFile(QTextStream& stream) const
     writeProfiles(mProfiles, stream);
     writeGeneral(mGeneral, stream);
     writeImporter(mImporter, stream);
+
+    for (auto it = mUnknownSections.constBegin(); it != mUnknownSections.constEnd(); ++it)
+    {
+        stream << '\n' << '[' << it.key() << "]\n";
+        writeUnknownKeys(it.value(), stream);
+    }
+}
+
+void Config::LauncherSettings::removeContentList(const QString& value)
+{
+    mProfiles.mValues.erase(value);
+
+    mProfiles.mUnknown.removeIf([&](const QPair<QString, QString>& keyValue) {
+        const int separator = keyValue.first.lastIndexOf('/');
+        return separator != -1 && keyValue.first.left(separator) == value;
+    });
 }
 
 QStringList Config::LauncherSettings::getContentLists()
@@ -312,16 +355,25 @@ void Config::LauncherSettings::setContentList(const GameSettings& gameSettings)
     QStringList newListDirs;
     for (const auto& dir : dirs)
         newListDirs.push_back(dir.originalRepresentation);
-    setContentList(newContentListName, newListDirs, archives, files);
+    setContentList(newContentListName, newListDirs, archives, files, {});
 }
 
 void Config::LauncherSettings::setContentList(const QString& contentListName, const QStringList& dirNames,
-    const QStringList& archiveNames, const QStringList& fileNames)
+    const QStringList& archiveNames, const QStringList& fileNames, const QStringList& userFilesInOrder)
 {
     Profile& profile = mProfiles.mValues[contentListName];
     profile.mData = dirNames;
     profile.mArchives = archiveNames;
     profile.mContent = fileNames;
+    profile.mUserFilesInOrder = userFilesInOrder;
+}
+
+QStringList Config::LauncherSettings::getUserFilesInOrder(const QString& contentListName) const
+{
+    const Profile* profile = findProfile(contentListName);
+    if (profile == nullptr)
+        return {};
+    return profile->mUserFilesInOrder;
 }
 
 QStringList Config::LauncherSettings::getDataDirectoryList(const QString& contentListName) const
@@ -359,13 +411,16 @@ bool Config::LauncherSettings::setValue(const QString& sectionPrefix, const QStr
     if (sectionPrefix == sImporterSection)
         return parseImporterSection(key, value, mImporter);
 
-    return false;
+    mUnknownSections[sectionPrefix].emplaceBack(key, value);
+    return true;
 }
 
-void Config::LauncherSettings::readFile(QTextStream& stream)
+void Config::LauncherSettings::readFile(QTextStream& stream, bool missingOnly)
 {
     const QRegularExpression sectionRe("^\\[([^]]+)\\]$");
     const QRegularExpression keyRe("^([^=]+)\\s*=\\s*(.+)$");
+
+    QSet<QString> readKeys;
 
     QString section;
 
@@ -393,11 +448,18 @@ void Config::LauncherSettings::readFile(QTextStream& stream)
         const QString key = keyMatch.captured(1).trimmed();
         const QString value = keyMatch.captured(2).trimmed();
 
+        const QString id = "[" + section + "]." + key;
+        if (missingOnly && mReadKeys.contains(id))
+            continue;
+
         if (!setValue(section, key, value))
-            Log(Debug::Warning) << "Unsupported setting in the launcher config file: section: "
+            Log(Debug::Warning) << "Invalid value in the launcher config file: section: "
                                 << section.toUtf8().constData() << " key: " << key.toUtf8().constData()
                                 << " value: " << value.toUtf8().constData();
+        else
+            readKeys.insert(id);
     }
+    mReadKeys.unite(readKeys);
 }
 
 const Config::LauncherSettings::Profile* Config::LauncherSettings::findProfile(const QString& name) const
@@ -414,4 +476,6 @@ void Config::LauncherSettings::clear()
     mGeneral = General{};
     mProfiles = Profiles{};
     mImporter = Importer{};
+    mReadKeys.clear();
+    mUnknownSections.clear();
 }

@@ -8,6 +8,8 @@
 #include <components/lua/util.hpp>
 #include <components/misc/resourcehelpers.hpp>
 
+#include "../../mwmechanics/spellutil.hpp"
+
 namespace
 {
     struct MutableIngredientEffectsList
@@ -109,9 +111,8 @@ namespace MWLua
                             const size_t length = table.size();
                             for (uint32_t i = 0; i < numEffects; ++i)
                             {
-                                if (i >= length)
-                                    blankIndex(ingred.mData, i);
-                                else
+                                blankIndex(ingred.mData, i);
+                                if (i < length)
                                     setFromTable(ingred.mData, i, table[LuaUtil::toLuaIndex(i)]);
                             }
                         }
@@ -134,9 +135,8 @@ namespace MWLua
                           if (i == 0 || i > numEffects)
                               throw std::runtime_error("index out of range");
                           --i;
-                          if (value == sol::nil)
-                              blankIndex(ingred.mData, i);
-                          else
+                          blankIndex(ingred.mData, i);
+                          if (value != sol::nil)
                               setFromTable(ingred.mData, i, value.as<sol::lua_table>());
                       };
                 listType[sol::meta_function::ipairs] = lua["ipairsForArray"].template get<sol::function>();
@@ -169,21 +169,8 @@ namespace MWLua
                     = sol::readonly_property([lua = lua.lua_state()](const ESM::Ingredient& rec) -> sol::table {
                           sol::table res(lua, sol::create);
                           for (uint32_t i = 0; i < 4; ++i)
-                          {
-                              if (rec.mData.mEffectID[i].empty())
-                                  continue;
-                              ESM::IndexedENAMstruct effect;
-                              effect.mData.mEffectID = rec.mData.mEffectID[i];
-                              effect.mData.mSkill = rec.mData.mSkills[i];
-                              effect.mData.mAttribute = rec.mData.mAttributes[i];
-                              effect.mData.mRange = ESM::RT_Self;
-                              effect.mData.mArea = 0;
-                              effect.mData.mDuration = 0;
-                              effect.mData.mMagnMin = 0;
-                              effect.mData.mMagnMax = 0;
-                              effect.mIndex = i;
-                              res[LuaUtil::toLuaIndex(i)] = effect;
-                          }
+                              if (auto effect = MWMechanics::getIngredientEffect(&rec, i))
+                                  res[LuaUtil::toLuaIndex(i)] = *effect;
                           return res;
                       });
             }
@@ -214,9 +201,8 @@ namespace MWLua
             const size_t length = effects.size();
             for (uint32_t i = 0; i < numEffects; ++i)
             {
-                if (i >= length)
-                    blankIndex(ingred.mData, i);
-                else
+                blankIndex(ingred.mData, i);
+                if (i < length)
                     setFromTable(ingred.mData, i, effects[LuaUtil::toLuaIndex(i)]);
             }
         }

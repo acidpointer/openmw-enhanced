@@ -5,6 +5,47 @@
 -- @usage
 -- local ui = require('openmw.ui')
 
+--- Cursor capture modes.
+-- @type CursorMode
+-- @field CONFINED The cursor can move only within the OpenMW window. It interacts with UI widgets, does not rotate the camera, and does not trigger gameplay mouse bindings.
+-- @field FREE The cursor can move outside the OpenMW window. It interacts with UI widgets, does not rotate the camera, and does not trigger gameplay mouse bindings.
+-- @field LOCKED The cursor uses relative mouse input, rotates the camera, and does not interact with UI widgets.
+
+--- Cursor capture modes.
+-- @field [parent=#ui] #CursorMode CursorMode
+
+--- Set how the mouse pointer is captured and whether it interacts with UI widgets. Cursor visibility is controlled separately.
+-- @function [parent=#ui] setCursorMode
+-- @param #CursorMode mode
+
+--- Get the current mouse pointer capture mode.
+-- @function [parent=#ui] getCursorMode
+-- @return #CursorMode
+
+--- Set the cursor position in pixels. The position is clamped to the OpenMW window.
+-- @function [parent=#ui] setCursorPosition
+-- @param openmw.util#Vector2 position
+
+--- Return the cursor position in pixels.
+-- @function [parent=#ui] getCursorPosition
+-- @return openmw.util#Vector2
+
+--- Set whether the mouse cursor is visible.
+-- @function [parent=#ui] setCursorVisible
+-- @param #boolean visible
+
+--- Return whether the mouse cursor is visible.
+-- @function [parent=#ui] getCursorVisible
+-- @return #boolean
+
+--- Override the engine cursor. Pass `nil` to restore the cursor back to engine-controlled.
+-- @function [parent=#ui] setCursor
+-- @param #CursorResource cursor
+
+--- Return the currently displayed Lua cursor resource, or `nil` when a native engine-controlled cursor is displayed.
+-- @function [parent=#ui] getCursor
+-- @return #CursorResource cursor
+
 ---
 -- Widget types
 -- @field [parent=#ui] #TYPE TYPE
@@ -99,6 +140,19 @@
 --   * `noWarnUnused` - if set to true this element will never generate warnings about unused properties.
 --
 -- @return #Element
+
+---
+-- Returns currently rendered Lua UI root Elements in this Lua context.
+-- If `layer` is provided, only Elements attached to that layer are returned.
+-- Elements in distinct MyGUI layer nodes are returned from lower to higher render order. Elements sharing a layer
+-- node, such as those on a non-overlapped layer, retain an unspecified relative order.
+-- All Lua-created layers do not share a single layer node, and thus individual elements in a Lua-created
+-- layer are returned in their rendering order bottom-to-top.
+-- Note: this returns Elements created with `ui.create`. It does not return native engine UI widgets or child layouts
+-- that are not separate Elements.
+-- @function [parent=#ui] getElements
+-- @param #string layer Optional layer name
+-- @return #list<#Element>
 
 ---
 -- Adds a settings page to main menu setting's Scripts tab.
@@ -293,6 +347,12 @@
 --   Matches the arguments of @{openmw_input#input.isMouseButtonPressed} (`nil` for none, 1 for left, 3 for right).
 
 ---
+-- Mouse wheel event, passed as an argument to mouseWheel UI events
+-- @type MouseWheelEvent
+-- @field openmw.util#Vector2 position Absolute position of the mouse cursor
+-- @field openmw.util#Vector2 delta The wheel delta on the X and Y axis. The values are usually -1, 0 or 1, but may be different for high-precision wheels such as fraction values.
+
+---
 -- Register a new texture resource. Can be used to manually atlas UI textures.
 -- @function [parent=#ui] texture
 -- @param #TextureResourceOptions options
@@ -315,6 +375,9 @@
 ---
 -- A texture ready to be used by UI widgets
 -- @type TextureResource
+-- @field #string path Path to the texture file
+-- @field openmw.util#Vector2 offset Offset of this resource in the texture. (0, 0) by default
+-- @field openmw.util#Vector2 size Size of the resource in the texture. (0, 0) by default. 0 means the whole texture size is used.
 
 ---
 -- Table with arguments passed to ui.texture.
@@ -322,5 +385,39 @@
 -- @field #string path Path to the texture file. Required
 -- @field openmw.util#Vector2 offset Offset of this resource in the texture. (0, 0) by default
 -- @field openmw.util#Vector2 size Size of the resource in the texture. (0, 0) by default. 0 means the whole texture size is used.
+
+---
+-- Register a hardware cursor backed by a texture in the virtual filesystem. Use the result as a widget's `props.cursor`, or pass it to @{#(ui).setCursor} to override all widget cursors.
+-- Repeated calls with the same options will return the same CursorResource if it already has been registered.
+-- @function [parent=#ui] cursor
+-- @param #CursorResourceOptions options
+-- @return #CursorResource
+-- @usage
+-- local ui = require('openmw.ui')
+-- local vector2 = require('openmw.util').vector2
+-- local hand = ui.cursor {
+--     path = 'textures/my_mod/hand.dds',
+--     size = vector2(32, 32),
+--     hotspot = vector2(2, 1),
+--     rotation = math.pi / 2,
+-- }
+-- local button = ui.create {
+--     type = ui.TYPE.Widget,
+--     props = { cursor = hand },
+-- }
+
+--- A hardware cursor ready to be used by Lua UI widgets.
+-- @type CursorResource
+-- @field #string path Path to the texture file
+-- @field openmw.util#Vector2 size Cursor size in pixels
+-- @field openmw.util#Vector2 hotspot Position in pixels within the cursor texture that tracks the mouse pointer
+-- @field #number rotation Clockwise rotation in radians, normalized to [0, 2π)
+
+--- Table with arguments passed to ui.cursor.
+-- @type CursorResourceOptions
+-- @field #string path Path to the cursor texture file. Required
+-- @field openmw.util#Vector2 size Size of the cursor in pixels, at most 128 by 128. Required
+-- @field openmw.util#Vector2 hotspot Position in pixels within the cursor texture that tracks the mouse pointer. Required
+-- @field #number rotation Optional clockwise rotation in radians (0 by default). The hotspot is specified in the final rotated cursor canvas - rotation does not enlarge that canvas.
 
 return nil

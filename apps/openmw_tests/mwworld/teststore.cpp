@@ -15,6 +15,7 @@
 #include <components/esm/typetraits.hpp>
 #include <components/esm3/esmreader.hpp>
 #include <components/esm3/esmwriter.hpp>
+#include <components/esm3/readerscache.hpp>
 #include <components/esm3/typetraits.hpp>
 #include <components/esm4/common.hpp>
 #include <components/esm4/reader.hpp>
@@ -346,7 +347,7 @@ TYPED_TEST_P(StoreTest, delete_test)
 template <typename T>
 static unsigned int hasSameRecordId(const MWWorld::Store<T>& store, ESM::RecNameInts recName)
 {
-    if constexpr (MWWorld::HasRecordId<T>::value)
+    if constexpr (MWWorld::HasRecordId<T>)
     {
         return T::sRecordId == recName ? 1 : 0;
     }
@@ -359,7 +360,7 @@ static unsigned int hasSameRecordId(const MWWorld::Store<T>& store, ESM::RecName
 template <typename T>
 static void testRecNameIntCount(const MWWorld::Store<T>& store, const MWWorld::ESMStore::StoreTuple& stores)
 {
-    if constexpr (MWWorld::HasRecordId<T>::value)
+    if constexpr (MWWorld::HasRecordId<T>)
     {
         const unsigned int recordIdCount
             = std::apply([](auto&&... x) { return (hasSameRecordId(x, T::sRecordId) + ...); }, stores);
@@ -441,7 +442,7 @@ namespace
         const int index = 3;
         const std::string stringId = "foobar";
         decltype(RecordType::mId) refId;
-        if constexpr (ESM::hasIndex<RecordType> && !std::is_same_v<RecordType, ESM::LandTexture>)
+        if constexpr (ESM::HasIndex<RecordType> && !std::is_same_v<RecordType, ESM::LandTexture>)
             refId = RecordType::indexToRefId(index);
         else if constexpr (std::is_same_v<RecordType, ESM::Cell>)
         {
@@ -467,10 +468,10 @@ namespace
 
             record.mId = refId;
 
-            if constexpr (ESM::hasStringId<RecordType>)
+            if constexpr (ESM::HasStringId<RecordType>)
                 record.mStringId = stringId;
 
-            if constexpr (ESM::hasIndex<RecordType>)
+            if constexpr (ESM::HasIndex<RecordType>)
                 record.mIndex = index;
 
             if constexpr (std::is_same_v<RecordType, ESM::Global>)
@@ -480,7 +481,7 @@ namespace
             ESM::Dialogue* dialogue = nullptr;
             MWWorld::ESMStore esmStore;
 
-            if constexpr (std::is_same_v<RecordType, ESM::Attribute>)
+            if constexpr (std::is_same_v<RecordType, ESM::Attribute> || std::is_same_v<RecordType, ESM::WeaponType>)
             {
                 ASSERT_ANY_THROW(getEsmFile(record, false, formatVersion));
                 continue;
@@ -497,7 +498,7 @@ namespace
                 ASSERT_NE(texture, nullptr);
                 return;
             }
-            else if constexpr (ESM::hasIndex<RecordType>)
+            else if constexpr (ESM::HasIndex<RecordType>)
                 result = esmStore.get<RecordType>().search(index);
             else
                 result = esmStore.get<RecordType>().search(refId);
@@ -507,16 +508,26 @@ namespace
         }
     }
 
-    static_assert(ESM::hasStringId<ESM::Dialogue>);
+    static_assert(ESM::HasStringId<ESM::Dialogue>);
 
-    template <class T, class = std::void_t<>>
-    struct HasSaveFunction : std::false_type
+    template <class T>
+    concept CanSave = requires(T& record, ESM::ESMWriter& writer)
+    {
+        record.save(writer, bool());
+    };
+
+    template <class T>
+    struct HasSaveFunction : std::bool_constant<CanSave<T>>
     {
     };
 
     template <class T>
-    struct HasSaveFunction<T, std::void_t<decltype(std::declval<T>().save(std::declval<ESM::ESMWriter&>(), bool()))>>
-        : std::true_type
+    struct HasId : std::bool_constant<ESM::HasId<T>>
+    {
+    };
+
+    template <class T>
+    struct HasModel : std::bool_constant<ESM::HasModel<T>>
     {
     };
 
@@ -573,13 +584,13 @@ namespace
     };
 
     using RecordTypes = typename ToRecordTypes<MWWorld::ESMStore::StoreTuple>::Type;
-    using RecordTypesWithId = typename FilterTypes<ESM::HasId, RecordTypes>::Type;
+    using RecordTypesWithId = typename FilterTypes<HasId, RecordTypes>::Type;
     using RecordTypesWithSave = typename FilterTypes<HasSaveFunction, RecordTypesWithId>::Type;
-    using RecordTypesWithModel = typename FilterTypes<ESM::HasModel, RecordTypesWithSave>::Type;
+    using RecordTypesWithModel = typename FilterTypes<HasModel, RecordTypesWithSave>::Type;
 
     REGISTER_TYPED_TEST_SUITE_P(StoreSaveLoadTest, shouldNotChangeRefId);
 
-    static_assert(std::tuple_size_v<RecordTypesWithSave> == 40);
+    static_assert(std::tuple_size_v<RecordTypesWithSave> == 41);
 
     INSTANTIATE_TYPED_TEST_SUITE_P(
         RecordTypesTest, StoreSaveLoadTest, typename AsTestingTypes<RecordTypesWithSave>::Type);
@@ -872,5 +883,82 @@ namespace
         const ESM::Dialogue* dialogue = esmStore.get<ESM::Dialogue>().search(ESM::RefId::stringRefId("dialogue"));
         ASSERT_NE(dialogue, nullptr);
         EXPECT_THAT(dialogue->mInfo, ElementsAre(HasIdEqualTo("info0"), HasIdEqualTo("info2")));
+    }
+
+    void saveCell(ESM::ESMWriter& writer, const ESM::Cell& cell, std::span<const ESM::CellRef> refs)
+    {
+        writer.startRecord(ESM::REC_CELL);
+        cell.save(writer);
+        for (const ESM::CellRef& ref : refs)
+            ref.save(writer);
+        writer.endRecord(ESM::REC_CELL);
+    }
+
+    ESM::CellRef makeRef(std::uint32_t index, std::string_view id)
+    {
+        ESM::CellRef ref;
+        ref.blank();
+        ref.mRefNum.mIndex = index;
+        ref.mRefNum.mContentFile = 0;
+        ref.mRefID = ESM::RefId::stringRefId(id);
+        return ref;
+    }
+
+    TEST(MWWorldStoreTest, shouldIndexRefCellsExteriorsFirst)
+    {
+        const std::filesystem::path path = TestingOpenMW::outputFilePath("test_ref_cells.esm");
+        {
+            ESM::Cell interior;
+            interior.blank();
+            interior.mName = "room";
+            interior.mData.mFlags = ESM::Cell::Interior;
+            ESM::Cell exterior;
+            exterior.blank();
+            exterior.mData.mX = 1;
+            exterior.mData.mY = 2;
+
+            // validateRecords() needs one class and one race.
+            ESM::Class cls;
+            cls.blank();
+            cls.mId = ESM::RefId::stringRefId("class");
+            ESM::Race race;
+            race.blank();
+            race.mId = ESM::RefId::stringRefId("race");
+
+            std::ofstream stream(path, std::ios::binary);
+            ESM::ESMWriter writer;
+            writer.setFormatVersion(ESM::CurrentContentFormatVersion);
+            writer.save(stream);
+            writer.startRecord(ESM::REC_CLAS);
+            cls.save(writer);
+            writer.endRecord(ESM::REC_CLAS);
+            writer.startRecord(ESM::REC_RACE);
+            race.save(writer);
+            writer.endRecord(ESM::REC_RACE);
+            saveCell(writer, interior, std::array{ makeRef(1, "chair") });
+            saveCell(writer, exterior, std::array{ makeRef(2, "chair"), makeRef(3, "chair"), makeRef(4, "rock") });
+            writer.close();
+        }
+
+        ESM::ReadersCache readers;
+        MWWorld::ESMStore esmStore;
+        {
+            ESM::ReadersCache::BusyItem reader = readers.get(0);
+            reader->setIndex(0);
+            reader->open(path);
+            ESM::Dialogue* dialogue = nullptr;
+            esmStore.load(*reader, &dummyListener, dialogue);
+        }
+        esmStore.setUp();
+        esmStore.validateRecords(readers);
+
+        const ESM::RefId chair = ESM::RefId::stringRefId("chair");
+        EXPECT_EQ(esmStore.getRefCount(chair), 3);
+        const std::span<const ESM::Cell* const> cells = esmStore.getRefCells(chair);
+        ASSERT_EQ(cells.size(), 2u);
+        EXPECT_TRUE(cells[0]->isExterior());
+        EXPECT_FALSE(cells[1]->isExterior());
+        EXPECT_EQ(esmStore.getRefCells(ESM::RefId::stringRefId("rock")).size(), 1u);
+        EXPECT_TRUE(esmStore.getRefCells(ESM::RefId::stringRefId("missing")).empty());
     }
 }

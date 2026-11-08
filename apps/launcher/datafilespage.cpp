@@ -459,7 +459,7 @@ void Launcher::DataFilesPage::populateFileViews(const QString& contentModelName)
             auto emptyIcon = QIcon(pixmap);
             item->setIcon(emptyIcon);
         }
-        item->setToolTip(tooltip.join('\n'));
+        item->setToolTip(Qt::convertFromPlainText(tooltip.join('\n')));
     }
     progressBar.setValue(progressBar.maximum());
     mSelector->sortFiles();
@@ -509,7 +509,8 @@ void Launcher::DataFilesPage::populateFileViews(const QString& contentModelName)
             nonUserContent.push_back(content.value);
     }
     mSelector->setNonUserContent(nonUserContent);
-    mSelector->setProfileContent(mLauncherSettings.getContentListFiles(contentModelName));
+    mSelector->setProfileContent(mLauncherSettings.getContentListFiles(contentModelName),
+        mLauncherSettings.getUserFilesInOrder(contentModelName));
 }
 
 void Launcher::DataFilesPage::saveSettings(const QString& profile)
@@ -548,7 +549,7 @@ void Launcher::DataFilesPage::saveSettings(const QString& profile)
         if (mGameSettings.isUserSetting(archive))
             archiveNames.push_back(archive.originalRepresentation);
     }
-    mLauncherSettings.setContentList(profileName, dirNames, archiveNames, fileNames);
+    mLauncherSettings.setContentList(profileName, dirNames, archiveNames, fileNames, mSelector->userFilesInOrder());
     mGameSettings.setContentList(dirList, selectedArchivePaths(), fileNames);
 
     QString language(mSelector->languageBox()->currentData().toString());
@@ -755,7 +756,8 @@ void Launcher::DataFilesPage::on_cloneProfileAction_triggered()
         if (mGameSettings.isUserSetting(archive))
             archiveNames.push_back(archive.originalRepresentation);
     }
-    mLauncherSettings.setContentList(profile, dirNames, archiveNames, selectedFilePaths());
+    mLauncherSettings.setContentList(
+        profile, dirNames, archiveNames, selectedFilePaths(), mSelector->userFilesInOrder());
     addProfile(profile, true);
 }
 
@@ -1007,7 +1009,7 @@ bool Launcher::DataFilesPage::showDeleteMessageBox(const QString& text)
     msgBox.setWindowTitle(tr("Delete Content List"));
     msgBox.setIcon(QMessageBox::Warning);
     msgBox.setStandardButtons(QMessageBox::Cancel);
-    msgBox.setText(tr("Are you sure you want to delete <b>%1</b>?").arg(text));
+    msgBox.setText(tr("Are you sure you want to delete <b>%1</b>?").arg(text.toHtmlEscaped()));
 
     QAbstractButton* deleteButton = msgBox.addButton(tr("Delete"), QMessageBox::ActionRole);
 

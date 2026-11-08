@@ -52,6 +52,9 @@ namespace MWLua
     ESM::Probe tableToProbe(const sol::table& rec);
     void addMutableProbeType(sol::state_view& lua);
     void addApparatusBindings(sol::table apparatus, const Context& context);
+    ESM::Apparatus tableToApparatus(const sol::table& rec);
+    void addMutableApparatusType(sol::state_view& lua);
+    sol::table makeApparatusTypeTable(sol::state_view lua);
     void addRepairBindings(sol::table repair, const Context& context);
     ESM::Repair tableToRepair(const sol::table& rec);
     void addMutableRepairType(sol::state_view& lua);
@@ -73,6 +76,11 @@ namespace MWLua
     ESM::Light tableToLight(const sol::table& rec);
     void addMutableLightType(sol::state_view& lua);
     void addLevelledCreatureBindings(sol::table list, const Context& context);
+    ESM::CreatureLevList tableToCreatureLevList(const sol::table& rec);
+    void addMutableCreatureLevListType(sol::state_view& lua);
+    sol::table addLevelledItemBindings(const Context& context);
+    ESM::ItemLevList tableToItemLevList(const sol::table& rec);
+    void addMutableItemLevListType(sol::state_view& lua);
 
     void addESM4DoorBindings(sol::table door, const Context& context);
     void addESM4TerminalBindings(sol::table term, const Context& context);

@@ -31,6 +31,7 @@
 
 #include "glextensions.hpp"
 #include "shadowsbin.hpp"
+#include "lightmanager.hpp"
 
 // NOLINTBEGIN(readability-identifier-naming)
 
@@ -485,10 +486,10 @@ MWShadowTechnique::LightData::LightData(MWShadowTechnique::ViewDependentData* vd
 {
 }
 
-void MWShadowTechnique::LightData::setLightData(osg::RefMatrix* lm, const osg::Light* l, const osg::Matrixd& modelViewMatrix)
+void MWShadowTechnique::LightData::setLightData(osg::RefMatrix* lm, std::shared_ptr<const Light> l, const osg::Matrixd& modelViewMatrix)
 {
     lightMatrix = lm;
-    light = l;
+    light = std::move(l);
 
     lightPos = light->getPosition();
     directionalLight = (light->getPosition().w()== 0.0);
@@ -507,6 +508,7 @@ void MWShadowTechnique::LightData::setLightData(osg::RefMatrix* lm, const osg::L
             OSG_INFO<<"   new LightDir ="<<lightDir<<std::endl;
         }
     }
+#if 0
     else
     {
         OSG_INFO<<"   Positional light, lightPos="<<lightPos<<std::endl;
@@ -524,6 +526,7 @@ void MWShadowTechnique::LightData::setLightData(osg::RefMatrix* lm, const osg::L
         }
         lightPos3.set(lightPos.x()/lightPos.w(), lightPos.y()/lightPos.w(), lightPos.z()/lightPos.w());
     }
+#endif
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -625,6 +628,21 @@ void MWShadowTechnique::ShadowData::releaseGLObjects(osg::State* state) const
     OSG_INFO<<"MWShadowTechnique::ShadowData::releaseGLObjects"<<std::endl;
     _texture->releaseGLObjects(state);
     _camera->releaseGLObjects(state);
+}
+
+void MWShadowTechnique::ShadowData::updateTextureSize()
+{
+    const ShadowSettings* settings = _viewDependentData->getViewDependentShadowMap()->getShadowedScene()->getShadowSettings();
+
+    const osg::Vec2s textureSize = settings->getDebugDraw() ? osg::Vec2s(512, 512) : settings->getTextureSize();
+    if (_texture->getTextureWidth() == textureSize.x() || _texture->getTextureHeight() == textureSize.y())
+        return;
+
+    _texture->setTextureSize(textureSize.x(), textureSize.y());
+    _texture->dirtyTextureObject();
+    _camera->dirtyAttachmentMap();
+
+    _camera->setViewport(0, 0, textureSize.x(), textureSize.y());
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -892,9 +910,35 @@ void SceneUtil::MWShadowTechnique::setPolygonOffset(float factor, float units)
     }
 }
 
+void MWShadowTechnique::setMaximumShadowMapDistance(float distance)
+{
+    if (_shadowedScene && _shadowedScene->getShadowSettings())
+        _shadowedScene->getShadowSettings()->setMaximumShadowMapDistance(distance);
+
+    osg::ref_ptr<osg::Uniform> newDistance = new osg::Uniform("maximumShadowMapDistance", distance);
+    for (auto& list : _uniforms)
+    {
+        for (auto& u : list)
+        {
+            if (u->getName() == "maximumShadowMapDistance")
+                u = newDistance;
+        }
+    }
+}
+
 void SceneUtil::MWShadowTechnique::setShadowFadeStart(float shadowFadeStart)
 {
     _shadowFadeStart = shadowFadeStart;
+
+    osg::ref_ptr<osg::Uniform> newFadeStart = new osg::Uniform("shadowFadeStart", shadowFadeStart);
+    for (auto& list : _uniforms)
+    {
+        for (auto& u : list)
+        {
+            if (u->getName() == "shadowFadeStart")
+                u = newFadeStart;
+        }
+    }
 }
 
 void SceneUtil::MWShadowTechnique::enableFrontFaceCulling()
@@ -928,13 +972,10 @@ void SceneUtil::MWShadowTechnique::setupCastingShader(Shader::ShaderManager & sh
     for (int alphaFunc = GL_NEVER; alphaFunc <= GL_ALWAYS; ++alphaFunc)
     {
         auto& program = _castingPrograms[alphaFunc - GL_NEVER];
-        program = new osg::Program();
-        program->addShader(castingVertexShader);
-        program->addShader(shaderManager.getShader("shadowcasting.frag", { {"alphaFunc", std::to_string(alphaFunc)},
-                                                                                    {"alphaToCoverage", "0"},
-                                                                                    {"adjustCoverage", "1"},
-                                                                                    {"useGPUShader4", useGPUShader4}
-                                                                                  }));
+        program = shaderManager.getProgram(castingVertexShader,
+            shaderManager.getShader("shadowcasting.frag",
+                { { "alphaFunc", std::to_string(alphaFunc) }, { "alphaToCoverage", "0" }, { "adjustCoverage", "1" },
+                    { "useGPUShader4", useGPUShader4 } }));
     }
 }
 
@@ -1396,6 +1437,8 @@ void MWShadowTechnique::cull(osgUtil::CullVisitor& cv)
         }
 #endif
 
+        const bool debug = settings->getDebugDraw();
+
         // 4. For each light/shadow map
         for (unsigned int sm_i=0; sm_i<numShadowMapsPerLight; ++sm_i)
         {
@@ -1411,6 +1454,9 @@ void MWShadowTechnique::cull(osgUtil::CullVisitor& cv)
                 OSG_INFO<<"Taking ShadowData from from of previous_sdl"<<std::endl;
                 sd = previous_sdl.front();
                 previous_sdl.erase(previous_sdl.begin());
+
+                if (!debug)
+                    sd->updateTextureSize();
             }
 
             osg::ref_ptr<osg::Camera> camera = sd->_camera;
@@ -1418,7 +1464,7 @@ void MWShadowTechnique::cull(osgUtil::CullVisitor& cv)
             camera->setProjectionMatrix(projectionMatrix);
             camera->setViewMatrix(viewMatrix);
 
-            if (settings->getDebugDraw())
+            if (debug)
             {
                 camera->getViewport()->x() = pos_x;
                 pos_x += static_cast<unsigned int>(camera->getViewport()->width()) + 40;
@@ -1632,40 +1678,35 @@ bool MWShadowTechnique::selectActiveLights(osgUtil::CullVisitor* cv, ViewDepende
 
     osg::Matrixd modelViewMatrix = *(cv->getModelViewMatrix());
 
-    osgUtil::PositionalStateContainer::AttrMatrixList& aml =
-        rs->getPositionalStateContainer()->getAttrMatrixList();
-
-
-    const ShadowSettings* settings = getShadowedScene()->getShadowSettings();
-
-    for(osgUtil::PositionalStateContainer::AttrMatrixList::reverse_iterator itr = aml.rbegin();
-        itr != aml.rend();
-        ++itr)
+    struct FindFirstLightManager : public osg::NodeVisitor
     {
-        const osg::Light* light = dynamic_cast<const osg::Light*>(itr->first.get());
-        if (light && light->getLightNum() >= 0)
+        FindFirstLightManager()
+            : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
         {
-            // is LightNum matched to that defined in settings
-            if (settings && settings->getLightNum()>=0 && light->getLightNum()!=settings->getLightNum()) continue;
-
-            LightDataList::iterator pll_itr = pll.begin();
-            for(; pll_itr != pll.end(); ++pll_itr)
-            {
-                if ((*pll_itr)->light->getLightNum()==light->getLightNum()) break;
-            }
-
-            if (pll_itr==pll.end())
-            {
-                OSG_INFO<<"Light num "<<light->getLightNum()<<std::endl;
-                LightData* ld = new LightData(vdd);
-                ld->setLightData(itr->second.get(), light, modelViewMatrix);
-                pll.push_back(ld);
-            }
-            else
-            {
-                OSG_INFO<<"Light num "<<light->getLightNum()<<" already used, ignore light"<<std::endl;
-            }
         }
+
+        void apply(osg::Group& node) override
+        {
+            if (auto* lm = dynamic_cast<LightManager*>(&node))
+            {
+                mLightManager = lm;
+                mLocalToWorld = new osg::RefMatrix(osg::computeLocalToWorld(getNodePath()));
+                return;
+            }
+            traverse(node);
+        }
+        LightManager* mLightManager = nullptr;
+        osg::ref_ptr<osg::RefMatrix> mLocalToWorld;
+    };
+
+    FindFirstLightManager lightManagerFinder;
+
+    _shadowedScene->accept(lightManagerFinder);
+
+    if (lightManagerFinder.mLightManager && lightManagerFinder.mLightManager->getSunlight()) {
+        LightData* ld = new LightData(vdd);
+        ld->setLightData(lightManagerFinder.mLocalToWorld, lightManagerFinder.mLightManager->getSunlight(), modelViewMatrix);
+        pll.push_back(ld);
     }
 
     return !pll.empty();
@@ -2046,7 +2087,11 @@ bool MWShadowTechnique::computeShadowCameraSettings(Frustum& frustum, LightData&
         double minRatio = 0.0001;
         double zMin=zMax*minRatio;
 
+#if 0
         double fov = positionedLight.light->getSpotCutoff() * 2.0;
+#else
+        double fov = 180.0;
+#endif
         if(fov < 180.0)   // spotlight
         {
             projectionMatrix.makePerspective(fov, 1.0, zMin, zMax);
@@ -3265,7 +3310,7 @@ osg::StateSet* MWShadowTechnique::prepareStateSetForRenderingShadow(ViewDependen
 
     stateset->clear();
 
-    stateset->setTextureAttributeAndModes(0, _fallbackBaseTexture.get(), osg::StateAttribute::ON);
+    stateset->setTextureAttribute(0, _fallbackBaseTexture.get(), osg::StateAttribute::ON);
 
     for(const auto& uniform : _uniforms[traversalNumber % 2])
     {

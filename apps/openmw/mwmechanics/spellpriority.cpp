@@ -239,13 +239,19 @@ namespace MWMechanics
             || effect.mEffectID == ESM::MagicEffect::ResistBlightDisease
             || effect.mEffectID == ESM::MagicEffect::ResistCommonDisease
             || effect.mEffectID == ESM::MagicEffect::ResistCorprusDisease
-            || effect.mEffectID == ESM::MagicEffect::Invisibility || effect.mEffectID == ESM::MagicEffect::Chameleon
-            || effect.mEffectID == ESM::MagicEffect::NightEye || effect.mEffectID == ESM::MagicEffect::Vampirism
-            || effect.mEffectID == ESM::MagicEffect::StuntedMagicka || effect.mEffectID == ESM::MagicEffect::ExtraSpell
-            || effect.mEffectID == ESM::MagicEffect::RemoveCurse
+            || effect.mEffectID == ESM::MagicEffect::Invisibility || effect.mEffectID == ESM::MagicEffect::NightEye
+            || effect.mEffectID == ESM::MagicEffect::Vampirism || effect.mEffectID == ESM::MagicEffect::StuntedMagicka
+            || effect.mEffectID == ESM::MagicEffect::ExtraSpell || effect.mEffectID == ESM::MagicEffect::RemoveCurse
             || effect.mEffectID == ESM::MagicEffect::CommandCreature
             || effect.mEffectID == ESM::MagicEffect::CommandHumanoid)
             return 0.f;
+        else if (effect.mEffectID == ESM::MagicEffect::Chameleon)
+        {
+            const MWWorld::Store<ESM::GameSetting>& gmst
+                = MWBase::Environment::get().getESMStore()->get<ESM::GameSetting>();
+            static const float fCombatInvisoMult = gmst.find("fCombatInvisoMult")->mValue.getFloat();
+            rating *= fCombatInvisoMult;
+        }
         else if (effect.mEffectID == ESM::MagicEffect::Blind)
         {
             if (enemy.isEmpty())
@@ -379,7 +385,7 @@ namespace MWMechanics
                     [](const MWWorld::ConstPtr& weapon) {
                         if (weapon.getClass().getItemHealth(weapon) <= 0.f)
                             return false;
-                        short type = weapon.get<ESM::Weapon>()->mBase->mData.mType;
+                        const ESM::RefId type = weapon.get<ESM::Weapon>()->mBase->mData.mType;
                         return !(MWMechanics::getWeaponType(type)->mFlags & ESM::WeaponType::TwoHanded);
                     });
                 if (oneHanded == store.cend())
@@ -613,7 +619,7 @@ namespace MWMechanics
                 for (const auto e : boundWeapons)
                     if (actor.getClass().getCreatureStats(actor).getMagicEffects().getOrDefault(e).getMagnitude() > 0.f
                         && (e != ESM::MagicEffect::BoundLongbow || effect.mEffectID == e
-                            || rateAmmo(actor, enemy, getWeaponType(ESM::Weapon::MarksmanBow)->mAmmoType) <= 0.f))
+                            || rateAmmo(actor, enemy, getWeaponType(ESM::WeaponType::MarksmanBow)->mAmmoType) <= 0.f))
                         return 0.f;
                 ESM::RefId skill = ESM::Skill::ShortBlade;
                 if (effect.mEffectID == ESM::MagicEffect::BoundLongsword)
@@ -627,7 +633,7 @@ namespace MWMechanics
                 else if (effect.mEffectID == ESM::MagicEffect::BoundLongbow)
                 {
                     // AI should not summon the bow if there is no suitable ammo.
-                    if (rateAmmo(actor, enemy, getWeaponType(ESM::Weapon::MarksmanBow)->mAmmoType) <= 0.f)
+                    if (rateAmmo(actor, enemy, getWeaponType(ESM::WeaponType::MarksmanBow)->mAmmoType) <= 0.f)
                         return 0.f;
                     skill = ESM::Skill::Marksman;
                 }

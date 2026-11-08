@@ -117,6 +117,13 @@ namespace MWWorld
 
         MWScript::Locals& getLocals();
 
+        /// Whether automatic execution of this object's local MWScript is enabled.
+        bool isLocalScriptEnabled() const;
+
+        /// Enable or pause automatic local MWScript execution, preserving its variables.
+        /// @param enabled Whether to resume automatic execution when the object is active.
+        void setLocalScriptEnabled(bool enabled);
+
         bool isEnabled() const;
 
         void enable();
@@ -145,6 +152,10 @@ namespace MWWorld
 
         bool hasChanged() const;
         ///< Has this RefData changed since it was originally loaded?
+
+        void setChanged(bool changed);
+        ///< Explicitly set the modified flag. Setting to false prevents this object from being
+        ///< written to save games (for objects originating from a content file).
 
         const ESM::AnimationState& getAnimationState() const;
         ESM::AnimationState& getAnimationState();

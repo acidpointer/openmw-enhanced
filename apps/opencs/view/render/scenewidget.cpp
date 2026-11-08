@@ -21,8 +21,6 @@
 #include <osg/Geometry>
 #include <osg/GraphicsContext>
 #include <osg/Group>
-#include <osg/Light>
-#include <osg/Material>
 #include <osg/Matrix>
 #include <osg/PrimitiveSet>
 #include <osg/StateAttribute>
@@ -48,7 +46,10 @@
 #include <components/resource/scenemanager.hpp>
 #include <components/sceneutil/glextensions.hpp>
 #include <components/sceneutil/lightmanager.hpp>
+#include <components/sceneutil/material.hpp>
+#include <components/sceneutil/serialize.hpp>
 #include <components/sceneutil/stateupdater.hpp>
+#include <components/sceneutil/texmat.hpp>
 #include <components/shader/removedalphafunc.hpp>
 
 #include "../widget/scenetoolmode.hpp"
@@ -116,6 +117,8 @@ namespace CSVRender
         : QWidget(parent, f)
         , mRootNode(nullptr)
     {
+        SceneUtil::registerSerializers(false);
+
         mView = new osgViewer::View;
 
         mWidget = new osgQOpenGLWidget(this);
@@ -149,7 +152,7 @@ namespace CSVRender
             = new SceneUtil::LightManager(SceneUtil::LightSettings{}, resourceSystem.get());
         lightMgr->setLightingMask(Mask_Lighting);
 
-        mSunLight = new osg::Light;
+        mSunLight = std::make_shared<SceneUtil::Light>();
         mSunLight->setDiffuse(osg::Vec4f(0, 0, 0, 1));
         mSunLight->setAmbient(osg::Vec4f(0, 0, 0, 1));
         mSunLight->setSpecular(osg::Vec4f(0, 0, 0, 0));
@@ -172,6 +175,8 @@ namespace CSVRender
         mRootNode->getOrCreateStateSet()->setMode(
             GL_LIGHTING, osg::StateAttribute::OFF | osg::StateAttribute::PROTECTED | osg::StateAttribute::OVERRIDE);
 
+        SceneUtil::initTexMatForStateSet(*mRootNode->getOrCreateStateSet());
+
         mView->getCamera()->setViewport(new osg::Viewport(0, 0, width(), height()));
 
         mView->getCamera()->getOrCreateStateSet()->setMode(GL_NORMALIZE, osg::StateAttribute::ON);
@@ -179,11 +184,10 @@ namespace CSVRender
         mView->getCamera()->setComputeNearFarMode(osg::Camera::DO_NOT_COMPUTE_NEAR_FAR);
         mView->getCamera()->setName(Constants::SceneCamera);
 
-        osg::ref_ptr<osg::Material> defaultMat(new osg::Material);
-        defaultMat->setColorMode(osg::Material::OFF);
-        defaultMat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4f(1, 1, 1, 1));
-        defaultMat->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4f(1, 1, 1, 1));
-        defaultMat->setSpecular(osg::Material::FRONT_AND_BACK, osg::Vec4f(0.f, 0.f, 0.f, 0.f));
+        osg::ref_ptr<SceneUtil::Material> defaultMat(new SceneUtil::Material);
+        defaultMat->updateStateSet(mRootNode->getOrCreateStateSet());
+        mRootNode->getOrCreateStateSet()->addUniform(new osg::Uniform("alpha", 1.f));
+        mRootNode->getOrCreateStateSet()->addUniform(new osg::Uniform("actorFade", 1.f));
         mView->getCamera()->getOrCreateStateSet()->setAttribute(defaultMat);
 
         mView->setSceneData(mRootNode);
@@ -239,7 +243,7 @@ namespace CSVRender
     SceneWidget::SceneWidget(std::shared_ptr<Resource::ResourceSystem> resourceSystem, QWidget* parent,
         Qt::WindowFlags f, bool retrieveInput)
         : RenderWidget(resourceSystem, parent, f)
-        , mResourceSystem(resourceSystem)
+        , mResourceSystem(std::move(resourceSystem))
         , mHasDefaultAmbient(false)
         , mIsExterior(true)
         , mCamPositionSet(false)
@@ -379,30 +383,35 @@ namespace CSVRender
     void SceneWidget::setLighting(LightingMode mode)
     {
         int index = 0;
+        osg::Vec4f ambient(mDefaultAmbient);
+        osg::Vec4f diffuse(1.f, 1.f, 1.f, 1.f);
+
+        // FIXME: this doesn't match the engine
+        // Should be set from UnpagedWorldspaceWidget::update()
+        osg::Vec4f position = osg::Vec4f(0.f, 0.f, 1.f, 0.f);
+
         switch (mode)
         {
             case LightingMode::Day:
-                mSunLight->setPosition(osg::Vec4f(0.f, 0.f, 1.f, 0.f));
-                mSunLight->setAmbient(osg::Vec4f(0.f, 0.f, 0.f, 1.f));
-                mSunLight->setDiffuse(osg::Vec4f(1.f, 1.f, 1.f, 1.f));
-                mStateUpdater->setAmbientColor(
-                    mHasDefaultAmbient ? mDefaultAmbient : osg::Vec4f(0.7f, 0.7f, 0.7f, 1.f));
+                if (!mHasDefaultAmbient)
+                    ambient = osg::Vec4f(0.7f, 0.7f, 0.7f, 1.f);
                 break;
             case LightingMode::Night:
-                mSunLight->setPosition(osg::Vec4f(0.f, 0.f, 1.f, 0.f));
-                mSunLight->setAmbient(osg::Vec4f(0.f, 0.f, 0.f, 1.f));
-                mSunLight->setDiffuse(osg::Vec4f(0.2f, 0.2f, 0.2f, 1.f));
-                mStateUpdater->setAmbientColor(
-                    mHasDefaultAmbient ? mDefaultAmbient : osg::Vec4f(0.2f, 0.2f, 0.2f, 1.f));
+                diffuse = osg::Vec4f(0.2f, 0.2f, 0.2f, 1.f);
+                if (!mHasDefaultAmbient)
+                    ambient = osg::Vec4f(0.2f, 0.2f, 0.2f, 1.f);
                 index = mIsExterior ? 1 : 0;
                 break;
             case LightingMode::Bright:
-                mSunLight->setPosition(osg::Vec4f(0.f, 0.f, 1.f, 0.f));
-                mSunLight->setAmbient(osg::Vec4f(0.f, 0.f, 0.f, 1.f));
-                mSunLight->setDiffuse(osg::Vec4f(1.f, 1.f, 1.f, 1.f));
-                mStateUpdater->setAmbientColor(osg::Vec4f(1.f, 1.f, 1.f, 1.f));
+                ambient = osg::Vec4f(1.f, 1.f, 1.f, 1.f);
                 break;
         }
+
+        mSunLight->setPosition(position);
+        mSunLight->setDiffuse(diffuse);
+        mSunLight->setSpecular(diffuse);
+        mSunLight->setAmbient(ambient);
+        mStateUpdater->setAmbientColor(ambient);
 
         DayNightSwitchVisitor visitor(index);
         mRootNode->accept(visitor);

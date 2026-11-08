@@ -33,6 +33,7 @@
 
 #include <components/esm/defs.hpp>
 #include <components/esm/formid.hpp>
+#include <components/esm/path.hpp>
 
 namespace ESM4
 {
@@ -121,7 +122,7 @@ namespace ESM4
             TYPE_TES4 = 0x1000,
             TYPE_FO3 = 0x2000,
             TYPE_TES5 = 0x3000,
-            TYPE_FONV = 0x4000,
+            TYPE_FNV = 0x4000,
             //
             TES4_HideRings = 0x0001,
             TES4_HideAmulet = 0x0002,
@@ -154,10 +155,10 @@ namespace ESM4
 
         std::string mEditorId;
         std::string mFullName;
-        std::string mModelMale;
-        std::string mModelMaleWorld;
-        std::string mModelFemale;
-        std::string mModelFemaleWorld;
+        ESM::Path mModelMale;
+        ESM::Path mModelMaleWorld;
+        ESM::Path mModelFemale;
+        ESM::Path mModelFemaleWorld;
         std::string mText;
         std::string mIconMale;
         std::string mMiniIconMale;
@@ -167,7 +168,7 @@ namespace ESM4
         ESM::FormId mPickUpSound;
         ESM::FormId mDropSound;
 
-        std::string mModel; // FIXME: for OpenCS
+        ESM::Path mModel; // FIXME: for OpenCS
 
         float mBoundRadius;
 

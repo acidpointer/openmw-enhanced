@@ -424,6 +424,12 @@ namespace
             },
             target);
     }
+
+    void playMagicSound(const MWWorld::Ptr& target, float magnitude)
+    {
+        MWBase::Environment::get().getSoundManager()->playSound3D(target, ESM::RefId::stringRefId("magic sound"),
+            std::clamp(magnitude / 100.f, 0.f, 1.f), 1.f, MWSound::Type::Sfx, MWSound::PlayMode::LoopNoEnv);
+    }
 }
 
 namespace MWMechanics
@@ -612,17 +618,21 @@ namespace MWMechanics
                 if (!target.getClass().isNpc())
                     return ESM::ActiveEffect::Flag_Invalid;
             }
+            else if (effect.mEffectId == ESM::MagicEffect::Soultrap)
+            {
+                if (target.getClass().isNpc() || target.get<ESM::Creature>()->mBase->mData.mSoul <= 0)
+                {
+                    if (caster == getPlayer())
+                        MWBase::Environment::get().getWindowManager()->messageBox("#{sMagicInvalidTarget}");
+                    return ESM::ActiveEffect::Flag_Invalid;
+                }
+            }
             else if (effect.mEffectId == ESM::MagicEffect::Sound)
             {
                 if (target == getPlayer())
                 {
                     const auto& magnitudes = target.getClass().getCreatureStats(target).getMagicEffects();
-                    float volume = std::clamp(
-                        (magnitudes.getOrDefault(effect.mEffectId).getModifier() + effect.mMagnitude) / 100.f, 0.f,
-                        1.f);
-                    MWBase::Environment::get().getSoundManager()->playSound3D(target,
-                        ESM::RefId::stringRefId("magic sound"), volume, 1.f, MWSound::Type::Sfx,
-                        MWSound::PlayMode::LoopNoEnv);
+                    playMagicSound(target, magnitudes.getOrDefault(effect.mEffectId).getModifier() + effect.mMagnitude);
                 }
             }
             else if (effect.mEffectId == ESM::MagicEffect::SummonScamp
@@ -1345,11 +1355,6 @@ namespace MWMechanics
 
                 if (!spellParams.hasFlag(ESM::ActiveSpells::Flag_Lua))
                     playEffects(target, *magicEffect, (isTemporary || (isEquipment && playNonLooping)));
-
-                if (effect.mEffectId == ESM::MagicEffect::Soultrap && !target.getClass().isNpc()
-                    && target.getType() == ESM::Creature::sRecordId
-                    && target.get<ESM::Creature>()->mBase->mData.mSoul == 0 && caster == getPlayer())
-                    MWBase::Environment::get().getWindowManager()->messageBox("#{sMagicInvalidTarget}");
             }
             float magnitude = roll(effect);
             // Note that there's an early out for Flag_Applied AppliedOnce effects so we don't have to exclude them here
@@ -1415,4 +1420,11 @@ namespace MWMechanics
         }
     }
 
+    void restoreMagicSound(const MWWorld::Ptr& player)
+    {
+        const auto& magnitudes = player.getClass().getCreatureStats(player).getMagicEffects();
+        const float modifier = magnitudes.getOrDefault(ESM::MagicEffect::Sound).getModifier();
+        if (modifier > 0.f)
+            playMagicSound(player, modifier);
+    }
 }

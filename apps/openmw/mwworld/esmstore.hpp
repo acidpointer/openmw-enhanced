@@ -3,9 +3,11 @@
 
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_map>
+#include <vector>
 
 #include <components/esm/luascripts.hpp>
 #include <components/esm/refid.hpp>
@@ -69,6 +71,7 @@ namespace ESM
     struct StartScript;
     struct Static;
     struct Weapon;
+    struct WeaponType;
 }
 
 namespace ESM4
@@ -86,6 +89,7 @@ namespace ESM4
     struct Container;
     struct Creature;
     struct Door;
+    struct Eyes;
     struct Flora;
     struct Furniture;
     struct Hair;
@@ -131,8 +135,8 @@ namespace MWWorld
             Store<ESM::CreatureLevList>, Store<ESM::ItemLevList>, Store<ESM::Light>, Store<ESM::Lockpick>,
             Store<ESM::Miscellaneous>, Store<ESM::NPC>, Store<ESM::Probe>, Store<ESM::Race>, Store<ESM::Region>,
             Store<ESM::Repair>, Store<ESM::SoundGenerator>, Store<ESM::Sound>, Store<ESM::Spell>,
-            Store<ESM::StartScript>, Store<ESM::Static>, Store<ESM::Weapon>, Store<ESM::GameSetting>,
-            Store<ESM::Script>,
+            Store<ESM::StartScript>, Store<ESM::Static>, Store<ESM::Weapon>, Store<ESM::WeaponType>,
+            Store<ESM::GameSetting>, Store<ESM::Script>,
 
             // Lists that need special rules
             Store<ESM::Cell>, Store<ESM::Land>, Store<ESM::LandTexture>, Store<ESM::Pathgrid>,
@@ -144,7 +148,7 @@ namespace MWWorld
 
             Store<ESM4::Activator>, Store<ESM4::ActorCharacter>, Store<ESM4::ActorCreature>, Store<ESM4::Ammunition>,
             Store<ESM4::Armor>, Store<ESM4::ArmorAddon>, Store<ESM4::Book>, Store<ESM4::Cell>, Store<ESM4::Clothing>,
-            Store<ESM4::Container>, Store<ESM4::Creature>, Store<ESM4::Door>, Store<ESM4::Furniture>,
+            Store<ESM4::Container>, Store<ESM4::Creature>, Store<ESM4::Door>, Store<ESM4::Eyes>, Store<ESM4::Furniture>,
             Store<ESM4::Flora>, Store<ESM4::Hair>, Store<ESM4::HeadPart>, Store<ESM4::Ingredient>, Store<ESM4::ItemMod>,
             Store<ESM4::Land>, Store<ESM4::LandTexture>, Store<ESM4::LevelledCreature>, Store<ESM4::LevelledItem>,
             Store<ESM4::LevelledNpc>, Store<ESM4::Light>, Store<ESM4::MiscItem>, Store<ESM4::MovableStatic>,
@@ -162,7 +166,13 @@ namespace MWWorld
 
         std::unique_ptr<ESMStoreImp> mStoreImp;
 
-        std::unordered_map<ESM::RefId, int> mRefCount;
+        struct RefInfo
+        {
+            int mCount = 0;
+            std::vector<const ESM::Cell*> mCells;
+        };
+
+        std::unordered_map<ESM::RefId, RefInfo> mRefInfo;
 
         std::vector<StoreBase*> mStores;
         std::vector<DynamicStore*> mDynamicStores;
@@ -299,9 +309,12 @@ namespace MWWorld
         /// @return The number of instances defined in the base files. Excludes changes from the save file.
         int getRefCount(const ESM::RefId& id) const;
 
+        /// @return Cells defining the ref, exteriors first.
+        std::span<const ESM::Cell* const> getRefCells(const ESM::RefId& id) const;
+
         /// Actors with the same ID share spells, abilities, etc.
         /// @return The shared spell list to use for this actor and whether or not it has already been initialized.
-        std::pair<std::shared_ptr<MWMechanics::SpellList>, bool> getSpellList(const ESM::RefId& id) const;
+        std::pair<std::shared_ptr<MWMechanics::SpellList>, bool> getSpellList(ESM::RefId id, bool autoCalc) const;
     };
     template <>
     const ESM::Cell* ESMStore::insert<ESM::Cell>(const ESM::Cell& cell);
@@ -309,14 +322,10 @@ namespace MWWorld
     template <>
     const ESM::NPC* ESMStore::insert<ESM::NPC>(const ESM::NPC& npc);
 
-    template <class T, class = std::void_t<>>
-    struct HasRecordId : std::false_type
-    {
-    };
-
     template <class T>
-    struct HasRecordId<T, std::void_t<decltype(T::sRecordId)>> : std::true_type
+    concept HasRecordId = requires
     {
+        T::sRecordId;
     };
 }
 

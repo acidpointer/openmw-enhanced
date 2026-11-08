@@ -3,7 +3,6 @@
 
 #include <osg/Vec2i>
 #include <osg/Vec4i>
-#include <osg/ref_ptr>
 
 #include "positioncellgrid.hpp"
 #include "ptr.hpp"
@@ -19,7 +18,11 @@
 namespace osg
 {
     class Vec3f;
-    class Stats;
+}
+
+namespace Misc
+{
+    class FrameStats;
 }
 
 namespace ESM
@@ -110,7 +113,7 @@ namespace MWWorld
 
         std::vector<ESM::RefNum> mPagedRefs;
 
-        std::vector<osg::ref_ptr<SceneUtil::WorkItem>> mWorkItems;
+        std::vector<std::shared_ptr<SceneUtil::WorkItem>> mWorkItems;
 
         std::optional<ChangeCellGridRequest> mChangeCellGridRequest;
 
@@ -202,7 +205,7 @@ namespace MWWorld
         void testExteriorCells();
         void testInteriorCells();
 
-        void reportStats(unsigned int frameNumber, osg::Stats& stats) const;
+        void reportStats(unsigned int frameNumber, Misc::FrameStats& stats) const;
     };
 }
 

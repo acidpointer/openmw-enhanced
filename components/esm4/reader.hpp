@@ -28,6 +28,7 @@
 #include <istream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 
 #include "cellgrid.hpp"
@@ -35,6 +36,8 @@
 #include "loadtes4.hpp"
 
 #include <components/esm/formid.hpp>
+#include <components/esm/gameformat.hpp>
+#include <components/esm/path.hpp>
 #include <components/files/istreamptr.hpp>
 
 namespace ToUTF8
@@ -147,6 +150,8 @@ namespace ESM4
     {
         VFS::Manager const* mVFS;
         Header mHeader; // ESM4 header
+        ESM::GameFormat mGameFormat = ESM::GameFormat::Unknown;
+        std::optional<std::uint16_t> mHeaderFormVersion;
 
         ReaderContext mCtx;
 
@@ -257,6 +262,13 @@ namespace ESM4
         inline bool hasFormVersion() const { return mCtx.recHeaderSize == sizeof(RecordHeader); }
         inline unsigned int formVersion() const { return mCtx.recordHeader.record.version; }
 
+        // The form version in the file's header record, if any
+        inline std::optional<std::uint16_t> headerFormVersion() const { return mHeaderFormVersion; }
+
+        // Override the auto-detected game format
+        inline void setGameFormat(ESM::GameFormat newFormat) { mGameFormat = newFormat; }
+        inline ESM::GameFormat gameFormat() const { return mGameFormat; }
+
         void buildLStringIndex();
         void getLocalizedString(std::string& str);
 
@@ -358,6 +370,14 @@ namespace ESM4
         // Note: uses the string size from the subrecord header rather than checking null termination
         bool getZString(std::string& str) { return getStringImpl(str, mCtx.subRecordHeader.dataSize, *mStream, true); }
         bool getString(std::string& str) { return getStringImpl(str, mCtx.subRecordHeader.dataSize, *mStream); }
+
+        bool getZString(ESM::Path& path)
+        {
+            std::string value;
+            const bool result = getZString(value);
+            path = std::move(value);
+            return result;
+        }
 
         bool getZeroTerminatedStringArray(std::vector<std::string>& values);
 

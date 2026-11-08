@@ -20,18 +20,45 @@
 
 ---
 -- Functions related to MWScript.
+-- Calls that change MWScript state take effect after the current Lua update.
 -- @type MWScriptFunctions
 
 ---
+-- Variable names are case-insensitive.
 -- @type MWScriptVariables
 -- @map <#string, #number>
 
 ---
--- Returns local mwscript on ``object``. Returns `nil` if the script doesn't exist or is not started.
+-- Returns the local MWScript on `object`, including when paused, or `nil` if it has not been initialized.
 -- @function [parent=#MWScriptFunctions] getLocalScript
 -- @param openmw.core#GameObject object
 -- @param openmw.core#GameObject player (optional) Will be used in multiplayer mode to get the script if there is a separate instance for each player. Currently has no effect.
 -- @return #MWScript, #nil
+
+---
+-- Runs the MWScript attached to `object` once, even if automatic execution is paused.
+-- Uses the object's local variables and implicit reference without changing its paused state.
+-- Works even if `getLocalScript` returns `nil`; the variables are initialized before the run.
+-- @function [parent=#MWScriptFunctions] runLocalScript
+-- @param openmw.core#GameObject object
+-- @param openmw.core#GameObject player (optional) Will be used in multiplayer mode to select the player's instance of the script. Currently has no effect.
+-- @return #boolean `false` if no attached script record exists; `true` if execution was queued.
+
+---
+-- Pauses automatic execution of the MWScript attached to `object` without clearing its variables.
+-- The paused state persists across saves. Existing activation interception is unaffected.
+-- @function [parent=#MWScriptFunctions] pauseLocalScript
+-- @param openmw.core#GameObject object
+-- @param openmw.core#GameObject player (optional) Will be used in multiplayer mode to select the player's instance of the script. Currently has no effect.
+-- @return #boolean `false` if no attached script record exists; `true` if the change was queued.
+
+---
+-- Resumes automatic execution of the MWScript attached to `object` without resetting its variables.
+-- The script runs only when the engine processes the object.
+-- @function [parent=#MWScriptFunctions] resumeLocalScript
+-- @param openmw.core#GameObject object
+-- @param openmw.core#GameObject player (optional) Will be used in multiplayer mode to select the player's instance of the script. Currently has no effect.
+-- @return #boolean `false` if no attached script record exists; `true` if the change was queued.
 
 ---
 -- Returns mutable global variables. In multiplayer, these may be specific to the provided player.
@@ -40,7 +67,7 @@
 -- @return #MWScriptVariables
 
 ---
--- Returns global mwscript with given recordId. Returns `nil` if the script doesn't exist or is not started.
+-- Returns the global MWScript with the given recordId, including when stopped, or `nil` if no instance exists.
 -- Currently there can be only one instance of each mwscript, but in multiplayer it will be possible to have a separate instance per player.
 -- @function [parent=#MWScriptFunctions] getGlobalScript
 -- @param #string recordId
@@ -48,18 +75,42 @@
 -- @return #MWScript, #nil
 
 ---
+-- Starts a global MWScript with `target` as its implicit reference, if provided.
+-- An already running script is not restarted or retargeted.
+-- Works even if `getGlobalScript` returns `nil`; the instance is created when the start takes effect.
+-- @function [parent=#MWScriptFunctions] startGlobalScript
+-- @param #string recordId
+-- @param openmw.core#GameObject target (optional) The script's implicit reference.
+-- @param openmw.core#GameObject player (optional) Will be used in multiplayer mode to select the player's instance of the script. Currently has no effect.
+-- @return #boolean `false` if the script record does not exist; `true` if the start was queued.
+
+---
+-- Stops a global MWScript without clearing its variables.
+-- The stopped instance remains accessible through `getGlobalScript`.
+-- @function [parent=#MWScriptFunctions] stopGlobalScript
+-- @param #string recordId
+-- @param openmw.core#GameObject player (optional) Will be used in multiplayer mode to select the player's instance of the script. Currently has no effect.
+-- @return #boolean `false` if the script record does not exist; `true` if the stop was queued.
+
+---
+-- Runs a dialogue response's result script with `actor` as its implicit reference, without selecting the response.
+-- Initializes the actor's attached MWScript variables, if any. Dialogue-dependent commands require the matching conversation and topic.
+-- @function [parent=#MWScriptFunctions] runResultScript
+-- @param openmw.core#DialogueRecordInfo info The response whose result script should run.
+-- @param openmw.core#GameObject actor
+-- @return #boolean `false` if the response has no result script; `true` if execution was queued.
+
+---
 -- @type MWScript
 -- @field #string recordId Id of the script
--- @field openmw.core#GameObject object The object the script is attached to.
+-- @field openmw.core#GameObject object The script's implicit reference, or nil.
 -- @field openmw.core#GameObject player The player the script refers to.
--- @field #boolean isRunning Whether the script is currently running
+-- @field #boolean isRunning For local scripts, whether the object is scheduled for automatic execution and is not paused. For global scripts, whether the script is running.
 -- @field #MWScriptVariables variables Local variables of the script (mutable)
 -- @usage
--- for _, script in ipairs(world.mwscript.getLocalScripts(object)) do
---   -- print the value of local variable 'something' (0 if there is no such variable)
---   print(script.variables.something)
---   -- set the variable 'something' (raises an error if there is no such variable)
---   script.variables.something = 5
+-- local script = world.mwscript.getLocalScript(object)
+-- if script then
+--   print(script.recordId, script.isRunning)
 -- end
 
 ---
@@ -139,6 +190,13 @@
 -- @return #table
 
 ---
+-- Find all objects within a given range of a world position
+-- @function [parent=#world] getObjectsInRange
+-- @param openmw.util#Vector3 position The world position
+-- @param #number range The range
+-- @return #list<openmw.core#GameObject>
+
+---
 -- Return an object by RefNum/FormId.
 -- Note: the function always returns @{openmw.core#GameObject} and doesn't validate that
 -- the object exists in the game world. If it doesn't exist or not yet loaded to memory),
@@ -147,6 +205,18 @@
 -- @param #string formId String returned by `core.getFormId`
 -- @return openmw.core#GameObject
 -- @usage local obj = world.getObjectByFormId(core.getFormId('Morrowind.esm', 128964))
+
+---
+-- Returns all objects with the given record ID.
+-- Note: Searching all world spaces or a large world space can impact performance.
+-- @function [parent=#world] getObjectsByRecordId
+-- @param #string recordId Record ID
+-- @param #string worldSpaceId (Optional) ID of the world space to search. (Note that an interior cell's world space ID is its ID and that the ESM3 exterior world space's ID is `sys::default`.)
+-- @param #bool loadedOnly (Optional) When true, only cells that have previously been loaded are searched.
+-- @return list<openmw.core#GameObject>
+-- @usage for _, object in pairs(world.getObjectsByRecordId('TempleMarker', world.players[1].cell.worldSpaceId)) do
+--   print(object.cell.name)
+-- end
 
 ---
 -- Create a new instance of the given record.
@@ -175,10 +245,12 @@
 -- * @{openmw.types#BookRecord},
 -- * @{openmw.types#ClothingRecord},
 -- * @{openmw.types#ContainerRecord},
+-- * @{openmw.types#CreatureLevelledListRecord},
 -- * @{openmw.types#CreatureRecord},
 -- * @{openmw.types#DoorRecord},
 -- * @{openmw.core#Enchantment},
 -- * @{openmw.types#IngredientRecord},
+-- * @{openmw.types#ItemLevelledListRecord},
 -- * @{openmw.types#LightRecord},
 -- * @{openmw.types#MiscellaneousRecord},
 -- * @{openmw.types#NpcRecord},

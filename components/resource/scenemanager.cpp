@@ -2,11 +2,13 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 
 #include <osg/AlphaFunc>
 #include <osg/Capability>
 #include <osg/ColorMaski>
 #include <osg/Group>
+#include <osg/Material>
 #include <osg/Node>
 #include <osg/UserDataContainer>
 
@@ -45,6 +47,7 @@
 #include <components/sceneutil/lightmanager.hpp>
 #include <components/sceneutil/optimizer.hpp>
 #include <components/sceneutil/riggeometryosgaextension.hpp>
+#include <components/sceneutil/templateref.hpp>
 #include <components/sceneutil/util.hpp>
 #include <components/sceneutil/visitor.hpp>
 
@@ -129,15 +132,60 @@ namespace
     private:
         unsigned int mMask;
     };
+
+    class ReplaceMaterialVisitor : public osg::NodeVisitor
+    {
+    public:
+        ReplaceMaterialVisitor()
+            : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+        {
+        }
+
+        void apply(osg::Node& node) override
+        {
+            osg::StateSet* stateSet = node.getStateSet();
+
+            if (stateSet)
+            {
+                if (osg::Material* material
+                    = dynamic_cast<osg::Material*>(stateSet->getAttribute(osg::StateAttribute::MATERIAL)))
+                    stateSet->setAttribute(new SceneUtil::Material({
+                        .mDiffuse = material->getDiffuse(osg::Material::FRONT_AND_BACK),
+                        .mAmbient = material->getAmbient(osg::Material::FRONT_AND_BACK),
+                        .mSpecular = material->getSpecular(osg::Material::FRONT_AND_BACK),
+                        .mEmission = material->getEmission(osg::Material::FRONT_AND_BACK),
+                        .mShininess = material->getShininess(osg::Material::FRONT_AND_BACK),
+                        .mVertexColorMode = fromOSGColorMode(material->getColorMode()),
+                    }));
+            };
+
+            traverse(node);
+        }
+
+    private:
+        SceneUtil::VertexColorModes fromOSGColorMode(osg::Material::ColorMode mode)
+        {
+            switch (mode)
+            {
+                case osg::Material::AMBIENT:
+                    return SceneUtil::VertexColorModes::Ambient;
+                case osg::Material::DIFFUSE:
+                    return SceneUtil::VertexColorModes::Diffuse;
+                case osg::Material::SPECULAR:
+                    return SceneUtil::VertexColorModes::Specular;
+                case osg::Material::EMISSION:
+                    return SceneUtil::VertexColorModes::Emission;
+                case osg::Material::AMBIENT_AND_DIFFUSE:
+                    return SceneUtil::VertexColorModes::AmbientAndDiffuse;
+                default:
+                    return SceneUtil::VertexColorModes::None;
+            }
+        }
+    };
 }
 
 namespace Resource
 {
-    void TemplateMultiRef::addRef(const osg::Node* node)
-    {
-        mObjects.emplace_back(node);
-    }
-
     class SharedStateManager : public osgDB::SharedStateManager
     {
     public:
@@ -442,7 +490,7 @@ namespace Resource
 
     SceneManager::SceneManager(const VFS::Manager* vfs, Resource::ImageManager* imageManager,
         Resource::NifFileManager* nifFileManager, Resource::BgsmFileManager* bgsmFileManager, double expiryDelay)
-        : ResourceManager(vfs, expiryDelay)
+        : NodeResourceManager<std::string>(vfs, expiryDelay)
         , mShaderManager(new Shader::ShaderManager)
         , mSharedStateManager(new SharedStateManager)
         , mImageManager(imageManager)
@@ -526,6 +574,16 @@ namespace Resource
         return mOpaqueDepthTex[frame % 2];
     }
 
+    void SceneManager::setOpaqueColorTex(osg::ref_ptr<osg::Texture> texturePing, osg::ref_ptr<osg::Texture> texturePong)
+    {
+        mOpaqueColorTex = { texturePing, texturePong };
+    }
+
+    osg::ref_ptr<osg::Texture> SceneManager::getOpaqueColorTex(size_t frame)
+    {
+        return mOpaqueColorTex[frame % 2];
+    }
+
     SceneManager::~SceneManager()
     {
         // this has to be defined in the .cpp file as we can't delete incomplete types
@@ -597,12 +655,8 @@ namespace Resource
             const bool isColladaFile = ext == "dae";
             osgDB::ReaderWriter* reader = osgDB::Registry::instance()->getReaderWriterForExtension(std::string(ext));
             if (!reader)
-            {
-                std::stringstream errormsg;
-                errormsg << "Error loading " << normalizedFilename << ": no readerwriter for '" << ext << "' found"
-                         << std::endl;
-                throw std::runtime_error(errormsg.str());
-            }
+                throw std::runtime_error(
+                    std::format("Error loading {}: no readerwriter for '{}' found", normalizedFilename.value(), ext));
 
             osg::ref_ptr<osgDB::Options> options(new osgDB::Options);
             // Set a ReadFileCallback so that image files referenced in the model are read from our virtual file system
@@ -617,12 +671,8 @@ namespace Resource
 
             osgDB::ReaderWriter::ReadResult result = reader->readNode(model, options);
             if (!result.success())
-            {
-                std::stringstream errormsg;
-                errormsg << "Error loading " << normalizedFilename << ": " << result.message() << " code "
-                         << result.status() << std::endl;
-                throw std::runtime_error(errormsg.str());
-            }
+                throw std::runtime_error(std::format("Error loading {}: {} code {}", normalizedFilename.value(),
+                    result.message(), static_cast<int>(result.status())));
 
             // Recognize and hide collision node
             unsigned int hiddenNodeMask = 0;
@@ -647,6 +697,9 @@ namespace Resource
             // Replace osg::Depth with reverse-Z-compatible SceneUtil::AutoDepth
             SceneUtil::ReplaceDepthVisitor replaceDepthVisitor;
             node->accept(replaceDepthVisitor);
+
+            ReplaceMaterialVisitor replaceMaterialVisitor;
+            node->accept(replaceMaterialVisitor);
 
             for (osg::Node* foundRigNode : rigFinder.mFoundNodes)
             {
@@ -684,9 +737,9 @@ namespace Resource
                             osg::ref_ptr<osg::MatrixTransform> backToOriginTrans = new osg::MatrixTransform();
 
                             newRiggeometryHolder->getOrCreateUserDataContainer()->addUserObject(
-                                new TemplateRef(newRiggeometryHolder->getGeometry(0)));
+                                newRiggeometryHolder->getGeometry(0));
                             backToOriginTrans->getOrCreateUserDataContainer()->addUserObject(
-                                new TemplateRef(newRiggeometryHolder->getGeometry(0)));
+                                newRiggeometryHolder->getGeometry(0));
 
                             newRiggeometryHolder->setBodyPart(true);
 
@@ -699,14 +752,11 @@ namespace Resource
                             backToOriginTrans->addChild(newRiggeometryHolder);
                             group->addChild(backToOriginTrans);
 
-                            node->getOrCreateUserDataContainer()->addUserObject(
-                                new TemplateRef(newRiggeometryHolder->getGeometry(0)));
+                            node->getOrCreateUserDataContainer()->addUserObject(newRiggeometryHolder->getGeometry(0));
                         }
                     }
                 }
 
-                node->getOrCreateStateSet()->addUniform(new osg::Uniform("emissiveMult", 1.f));
-                node->getOrCreateStateSet()->addUniform(new osg::Uniform("specStrength", 1.f));
                 node->getOrCreateStateSet()->addUniform(new osg::Uniform("envMapColor", osg::Vec4f(1, 1, 1, 1)));
                 node->getOrCreateStateSet()->addUniform(new osg::Uniform("useFalloff", false));
                 node->getOrCreateStateSet()->addUniform(new osg::Uniform("distortionStrength", 0.f));
@@ -1018,10 +1068,13 @@ namespace Resource
             }
         }
         osg::ref_ptr<osg::Node> cloned = static_cast<osg::Node*>(base->clone(copyop));
+
+        copyop.remapControllerTargets();
+
         // add a ref to the original template to help verify the safety of shallow cloning operations
         // in addition, if this node is managed by a cache, we hint to the cache that it's still being used and should
         // be kept in cache
-        cloned->getOrCreateUserDataContainer()->addUserObject(new TemplateRef(base));
+        SceneUtil::addTemplateRef(*cloned, base);
         return cloned;
     }
 
@@ -1139,7 +1192,7 @@ namespace Resource
 
     void SceneManager::updateCache(double referenceTime)
     {
-        ResourceManager::updateCache(referenceTime);
+        NodeResourceManager<std::string>::updateCache(referenceTime);
 
         mSharedStateMutex.lock();
         mSharedStateManager->prune();
@@ -1167,7 +1220,7 @@ namespace Resource
 
     void SceneManager::clearCache()
     {
-        ResourceManager::clearCache();
+        NodeResourceManager<std::string>::clearCache();
 
         std::lock_guard<std::mutex> lock(mSharedStateMutex);
         mSharedStateManager->clearCache();

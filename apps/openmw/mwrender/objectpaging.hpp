@@ -29,7 +29,7 @@ namespace MWRender
 
     typedef std::tuple<osg::Vec2f, float, bool> ChunkId; // Center, Size, ActiveGrid
 
-    class ObjectPaging : public Resource::GenericResourceManager<ChunkId>, public Terrain::QuadTreeWorld::ChunkManager
+    class ObjectPaging : public Resource::NodeResourceManager<ChunkId>, public Terrain::QuadTreeWorld::ChunkManager
     {
     public:
         ObjectPaging(Resource::SceneManager* sceneManager, ESM::RefId worldspace);
@@ -101,22 +101,10 @@ namespace MWRender
         LODNameCache mLODNameCache;
     };
 
-    class RefnumMarker : public osg::Object
+    struct RefnumMarker
     {
-    public:
-        RefnumMarker()
-            : mNumVertices(0)
-        {
-        }
-        RefnumMarker(const RefnumMarker& copy, osg::CopyOp co)
-            : mRefnum(copy.mRefnum)
-            , mNumVertices(copy.mNumVertices)
-        {
-        }
-        META_Object(MWRender, RefnumMarker)
-
         ESM::RefNum mRefnum;
-        unsigned int mNumVertices;
+        unsigned int mNumVertices = 0;
     };
 }
 

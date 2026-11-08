@@ -2,8 +2,10 @@
 
 #include <osg/Depth>
 #include <osg/GLExtensions>
+
+#include <components/stereo/multiview.hpp>
+#include <components/stereo/stereomanager.hpp>
 #include <osg/MatrixTransform>
-#include <osg/UserDataContainer>
 
 #include <osgUtil/CullVisitor>
 #include <osgUtil/RenderBin>
@@ -22,6 +24,8 @@
 #include <components/sceneutil/depth.hpp>
 #include <components/sceneutil/keyframe.hpp>
 #include <components/sceneutil/lightcommon.hpp>
+#include <components/sceneutil/textkeymap.hpp>
+#include <components/sceneutil/userdata.hpp>
 #include <components/sceneutil/visitor.hpp>
 #include <components/settings/values.hpp>
 
@@ -311,9 +315,9 @@ namespace MWRender
 
         if (viewChange && Settings::game().mShieldSheathing)
         {
-            int weaptype = ESM::Weapon::None;
-            MWMechanics::getActiveWeapon(mPtr, &weaptype);
-            showCarriedLeft(updateCarriedLeftVisible(weaptype));
+            ESM::RefId weaponTypeId;
+            MWMechanics::getActiveWeapon(mPtr, &weaponTypeId);
+            showCarriedLeft(updateCarriedLeftVisible(weaponTypeId));
         }
     }
 
@@ -356,14 +360,31 @@ namespace MWRender
             auto worldDepthFBO = postProcessor->getFbo(PostProcessor::FBO_WorldDepth, frameId);
             if (opaqueDepthFBO && worldDepthFBO)
             {
-                osg::GLExtensions* ext = state->get<osg::GLExtensions>();
-                const osg::Texture* texture
-                    = worldDepthFBO->getAttachment(osg::FrameBufferObject::BufferComponent::PACKED_DEPTH_STENCIL_BUFFER)
-                          .getTexture();
-                opaqueDepthFBO->apply(*state, osg::FrameBufferObject::READ_FRAMEBUFFER);
-                worldDepthFBO->apply(*state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
-                ext->glBlitFramebuffer(0, 0, texture->getTextureWidth(), texture->getTextureHeight(), 0, 0,
-                    texture->getTextureWidth(), texture->getTextureHeight(), GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+                // Keep world depth separate from first-person hands for screen-space shadows.
+                if (Stereo::getMultiview())
+                {
+                    auto& resolve = mWorldDepthResolve[frameId];
+                    if (!resolve)
+                        resolve = std::make_unique<Stereo::MultiviewFramebufferResolve>(
+                            opaqueDepthFBO, worldDepthFBO, GL_DEPTH_BUFFER_BIT);
+                    else
+                    {
+                        resolve->setMsaaFbo(opaqueDepthFBO);
+                        resolve->setResolveFbo(worldDepthFBO);
+                    }
+                    resolve->resolveImplementation(*state);
+                }
+                else
+                {
+                    osg::GLExtensions* ext = state->get<osg::GLExtensions>();
+                    const osg::Texture* texture
+                        = worldDepthFBO->getAttachment(osg::FrameBufferObject::BufferComponent::PACKED_DEPTH_STENCIL_BUFFER)
+                              .getTexture();
+                    opaqueDepthFBO->apply(*state, osg::FrameBufferObject::READ_FRAMEBUFFER);
+                    worldDepthFBO->apply(*state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
+                    ext->glBlitFramebuffer(0, 0, texture->getTextureWidth(), texture->getTextureHeight(), 0, 0,
+                        texture->getTextureWidth(), texture->getTextureHeight(), GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+                }
             }
 
             opaqueDepthFBO->apply(*state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
@@ -379,6 +400,7 @@ namespace MWRender
             state->checkGLErrors("after DepthClearCallback::drawImplementation");
         }
 
+        std::array<std::unique_ptr<Stereo::MultiviewFramebufferResolve>, 2> mWorldDepthResolve;
         osg::ref_ptr<osg::Depth> mDepth;
         osg::ref_ptr<osg::StateSet> mStateSet;
     };
@@ -715,7 +737,7 @@ namespace MWRender
         if (enchantedGlow)
             mGlowUpdater = SceneUtil::addEnchantedGlow(attached, mResourceSystem, *glowColor);
 
-        return std::make_unique<PartHolder>(std::move(attached));
+        return std::make_unique<PartHolder>(std::move(attached), model);
     }
 
     osg::Vec3f NpcAnimation::runAnimation(float timepassed)
@@ -798,8 +820,8 @@ namespace MWRender
                 MWWorld::ConstContainerStoreIterator weapon = inv.getSlot(MWWorld::InventoryStore::Slot_CarriedRight);
                 if (weapon != inv.end() && weapon->getType() == ESM::Weapon::sRecordId)
                 {
-                    int weaponType = weapon->get<ESM::Weapon>()->mBase->mData.mType;
-                    const std::string& weaponBonename = MWMechanics::getWeaponType(weaponType)->mAttachBone;
+                    const ESM::RefId weaponTypeId = weapon->get<ESM::Weapon>()->mBase->mData.mType;
+                    const std::string& weaponBonename = MWMechanics::getWeaponType(weaponTypeId)->mAttachBone;
 
                     if (weaponBonename != bonename)
                     {
@@ -845,27 +867,18 @@ namespace MWRender
             {
                 src = mHeadAnimationTime;
 
-                if (node->getUserDataContainer())
+                if (const SceneUtil::TextKeyMap* keys = SceneUtil::findUserData<SceneUtil::TextKeyMap>(*node))
                 {
-                    for (unsigned int i = 0; i < node->getUserDataContainer()->getNumUserObjects(); ++i)
+                    for (const auto& key : *keys)
                     {
-                        osg::Object* obj = node->getUserDataContainer()->getUserObject(i);
-                        if (SceneUtil::TextKeyMapHolder* keys = dynamic_cast<SceneUtil::TextKeyMapHolder*>(obj))
-                        {
-                            for (const auto& key : keys->mTextKeys)
-                            {
-                                if (Misc::StringUtils::ciEqual(key.second, "talk: start"))
-                                    mHeadAnimationTime->setTalkStart(key.first);
-                                if (Misc::StringUtils::ciEqual(key.second, "talk: stop"))
-                                    mHeadAnimationTime->setTalkStop(key.first);
-                                if (Misc::StringUtils::ciEqual(key.second, "blink: start"))
-                                    mHeadAnimationTime->setBlinkStart(key.first);
-                                if (Misc::StringUtils::ciEqual(key.second, "blink: stop"))
-                                    mHeadAnimationTime->setBlinkStop(key.first);
-                            }
-
-                            break;
-                        }
+                        if (Misc::StringUtils::ciEqual(key.second, "talk: start"))
+                            mHeadAnimationTime->setTalkStart(key.first);
+                        if (Misc::StringUtils::ciEqual(key.second, "talk: stop"))
+                            mHeadAnimationTime->setTalkStop(key.first);
+                        if (Misc::StringUtils::ciEqual(key.second, "blink: start"))
+                            mHeadAnimationTime->setBlinkStart(key.first);
+                        if (Misc::StringUtils::ciEqual(key.second, "blink: stop"))
+                            mHeadAnimationTime->setBlinkStop(key.first);
                     }
                 }
                 SceneUtil::ForceControllerSourcesVisitor assignVisitor(std::move(src));
@@ -982,9 +995,10 @@ namespace MWRender
 
                 // Crossbows start out with a bolt attached
                 if (weapon->getType() == ESM::Weapon::sRecordId
-                    && weapon->get<ESM::Weapon>()->mBase->mData.mType == ESM::Weapon::MarksmanCrossbow)
+                    && weapon->get<ESM::Weapon>()->mBase->mData.mType == ESM::WeaponType::MarksmanCrossbow)
                 {
-                    int ammotype = MWMechanics::getWeaponType(ESM::Weapon::MarksmanCrossbow)->mAmmoType;
+                    const ESM::RefId ammotype
+                        = MWMechanics::getWeaponType(ESM::WeaponType::MarksmanCrossbow)->mAmmoType;
                     MWWorld::ConstContainerStoreIterator ammo = inv.getSlot(MWWorld::InventoryStore::Slot_Ammunition);
                     if (ammo != inv.end() && ammo->get<ESM::Weapon>()->mBase->mData.mType == ammotype)
                         attachArrow();
@@ -1003,7 +1017,7 @@ namespace MWRender
         updateQuiver();
     }
 
-    bool NpcAnimation::updateCarriedLeftVisible(const int weaptype) const
+    bool NpcAnimation::updateCarriedLeftVisible(ESM::RefId weaptype) const
     {
         if (Settings::game().mShieldSheathing)
         {
@@ -1083,9 +1097,9 @@ namespace MWRender
         updateQuiver();
     }
 
-    void NpcAnimation::releaseArrow(float attackStrength)
+    void NpcAnimation::releaseArrow(float attackStrength, float attackWindUp)
     {
-        WeaponAnimation::releaseArrow(mPtr, attackStrength);
+        WeaponAnimation::releaseArrow(mPtr, attackStrength, attackWindUp);
         updateQuiver();
     }
 
@@ -1100,9 +1114,9 @@ namespace MWRender
         if (weapon == inv.end() || weapon->getType() != ESM::Weapon::sRecordId)
             return nullptr;
 
-        int type = weapon->get<ESM::Weapon>()->mBase->mData.mType;
-        int ammoType = MWMechanics::getWeaponType(type)->mAmmoType;
-        if (ammoType == ESM::Weapon::None)
+        const ESM::RefId type = weapon->get<ESM::Weapon>()->mBase->mData.mType;
+        const ESM::RefId ammoType = MWMechanics::getWeaponType(type)->mAmmoType;
+        if (ammoType.empty())
             return nullptr;
 
         // Try to find and attachment bone in actor's skeleton, otherwise fall back to the ArrowBone in weapon's mesh
@@ -1143,9 +1157,9 @@ namespace MWRender
     {
         if (Settings::game().mShieldSheathing)
         {
-            int weaptype = ESM::Weapon::None;
-            MWMechanics::getActiveWeapon(mPtr, &weaptype);
-            showCarriedLeft(updateCarriedLeftVisible(weaptype));
+            ESM::RefId weaponTypeId;
+            MWMechanics::getActiveWeapon(mPtr, &weaponTypeId);
+            showCarriedLeft(updateCarriedLeftVisible(weaponTypeId));
         }
 
         updateParts();

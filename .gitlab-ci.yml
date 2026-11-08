@@ -7,19 +7,20 @@ stages:
   - checks
   - build
   - test
+  - repush
 
 workflow:
   auto_cancel:
     on_new_commit: interruptible
   rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_PIPELINE_SOURCE == "schedule"
     - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
       when: never
     - if: $CI_COMMIT_BRANCH && $CI_COMMIT_REF_PROTECTED == 'true'
       # continue running master and release branch pipelines when we do back-to-back merges in case one introduces a regression
       auto_cancel:
         on_new_commit: none
-    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != "coverity"
 
 # https://blog.nimbleways.com/let-s-make-faster-gitlab-ci-cd-pipelines/
 variables:
@@ -29,6 +30,7 @@ variables:
   ARTIFACT_COMPRESSION_LEVEL: "fast"
   CACHE_COMPRESSION_LEVEL: "fast"
   FF_TIMESTAMPS: "true"
+  OPENMW_DEBUGINFOD: OFF
 
 .Ubuntu_Image:
   tags:
@@ -71,7 +73,7 @@ Ubuntu_GCC_preprocess:
     - export CCACHE_BASEDIR="`pwd`"
     - export CCACHE_DIR="`pwd`/ccache" && mkdir -pv "$CCACHE_DIR"
     - ccache -z -M "${CCACHE_SIZE}"
-    - CI/before_script.linux.sh
+    - CI/before_script.linux.sh -C
     - cd build
     - cmake --build . -- -j $(nproc)
     - df -h
@@ -95,12 +97,128 @@ Ubuntu_GCC_preprocess:
     - df -h
     - du -sh build/
     - du -sh build/install/
-    - du -sh apt-cache/
     - du -sh ccache/
   artifacts:
     paths:
       - build/install/
       - "**/CMakeCache.txt"
+
+Almalinux_Generic:
+  tags:
+    - saas-linux-medium-amd64
+  image: almalinux:9
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"
+  cache:
+    - key:
+        prefix: almalinux-generic-$CI_COMMIT_REF_PROTECTED
+        files:
+          - CI/linux/deps_versions.sh
+      paths:
+        - deps
+        - ccache
+  stage: build
+  variables:
+    OPENMW_CXX_FLAGS: "-Werror -Werror=implicit-fallthrough"
+    CC: gcc
+    CXX: g++
+    OPENMW_LOCAL_INSTALL: 1
+    CI_OPENMW_USE_VCPKG: true
+    CUSTOM_CPACK_LABEL: $CI_COMMIT_REF_SLUG
+    CCACHE_SIZE: 1G
+  before_script:
+    - dnf install -y epel-release
+    - dnf install -y git binutils gcc-toolset-13 ccache cmake unzip pkg-config p7zip p7zip-plugins pipx mesa-libGL-devel libxkbcommon-devel mesa-libEGL-devel fontconfig
+    - source /opt/rh/gcc-toolset-13/enable
+    - ./CI/linux/before_install_for_vcpkg.sh
+  script:
+    - df -h
+    - export CCACHE_BASEDIR="`pwd`"
+    - export CCACHE_DIR="`pwd`/ccache" && mkdir -pv "$CCACHE_DIR"
+    - ccache -z -M "${CCACHE_SIZE}"
+    - CI/before_script.linux.sh -C
+    - cd build
+    - cmake --build . -- -j $(nproc)
+    - ccache -svv
+    - |
+      if [[ -v AWS_ACCESS_KEY_ID ]]; then
+          dnf install -y awscli2 jq
+          ../CI/store-symbols.sh
+          aws --endpoint-url https://rgw.ctrl-c.liu.se s3 sync --size-only SymStore s3://openmw-sym
+      fi
+    - printf "CI_COMMIT_REF_NAME ${CI_COMMIT_REF_NAME}\nCI_JOB_ID ${CI_JOB_ID}\nCI_COMMIT_SHA ${CI_COMMIT_SHA}\n" > CI-ID.txt
+    - cpack -G TXZ -D CPACK_STRIP_FILES=ON -D CPACK_THREADS=0 -D CPACK_INCLUDE_TOPLEVEL_DIRECTORY=0
+    - |
+      if [[ -v AWS_ACCESS_KEY_ID ]]; then
+          artifactDirectory="${CI_PROJECT_NAMESPACE//[\"<>|$'\t'\/\\?*]/_}/${CI_COMMIT_REF_NAME//[\"<>|$'\t'\/\\?*]/_}/${CI_COMMIT_SHORT_SHA//[\"<>|$'\t'\/\\?*]/_}-${CI_JOB_ID//[\"<>|$'\t'\/\\?*]/_}/"
+          aws --endpoint-url https://rgw.ctrl-c.liu.se s3 cp OpenMW*.tar.xz s3://openmw-artifacts/$artifactDirectory
+      fi
+  artifacts:
+    paths:
+      - "**/CMakeCache.txt"
+      - build/OpenMW*.tar.xz
+
+.base_Generic_Integration_Tests:
+  stage: test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"
+  needs:
+    - job: "Almalinux_Generic"
+      artifacts: true
+  script:
+    - mkdir -p install
+    - |
+      for package in build/OpenMW*.tar.xz; do
+          echo "Extracting '$package'..."
+          tar -xf "$package" -C install
+      done
+    - export OPENMW_DEBUGINFOD=ON
+    - CI/run_integration_tests.sh
+  after_script:
+    - |
+      if [[ -f /tmp/openmw-crash.log ]]; then
+        cat /tmp/openmw-crash.log
+        cp /tmp/openmw-crash.log openmw-crash.log
+      fi
+  variables:
+    EXAMPLE_SUITE_REVISION: a1ba6fc9d7315c2158ef4c60349fc4e71b7ca343
+    OPENMW_BINARY: install/openmw
+  artifacts:
+    paths:
+      - openmw-crash.log
+
+Almalinux_Generic_Integration_Tests:
+  extends: .base_Generic_Integration_Tests
+  image: almalinux:9
+  before_script:
+    - dnf install -y python3-pip xorg-x11-server-Xvfb alsa-utils git-lfs openal-soft
+    - pip3 install --user numpy matplotlib termtables click
+  variables:
+    PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+Arch_Linux_Generic_Integration_Tests:
+  extends: .base_Generic_Integration_Tests
+  image: archlinux
+  before_script:
+    - pacman --noconfirm -Sy python python-pip python-numpy python-matplotlib python-click xorg-server-xvfb alsa-utils git-lfs openal
+    - python -m venv --system-site-packages testvenv
+    - export PATH="$(pwd)/testvenv/bin:$PATH"
+    - hash -r
+    - pip install termtables
+
+PushToCoverityBranch:
+  tags:
+    - saas-linux-small-amd64
+  image:
+    name: alpine/git
+    entrypoint: [""]
+  stage: repush
+  rules:
+    - if: $CI_PROJECT_ID != "7107382"
+      when: never
+    - if: $CI_COMMIT_REF_NAME == "master"
+  script:
+    - git push $CI_REPOSITORY_URL HEAD:coverity
 
 Coverity:
   tags:
@@ -111,7 +229,7 @@ Coverity:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
   cache:
-    key: Coverity.ubuntu_24.04.v2
+    key: Coverity.ubuntu_24.04.v2.$CI_COMMIT_REF_PROTECTED
     paths:
     - apt-cache/
     - ccache/
@@ -132,7 +250,7 @@ Coverity:
     - export COVERITY_NO_LOG_ENVIRONMENT_VARIABLES=1
     - mkdir -pv "${CCACHE_DIR}"
     - ccache -z -M "${CCACHE_SIZE}"
-    - CI/before_script.linux.sh
+    - CI/before_script.linux.sh -C
     - cov-analysis-linux64-*/bin/cov-configure --template --comptype prefix --compiler ccache
     - cov-analysis-linux64-*/bin/cov-build --dir cov-int cmake --build build -- -j $(nproc)
     - ccache -svv
@@ -167,7 +285,7 @@ Coverity_Upload:
 Ubuntu_GCC:
   extends: .Ubuntu
   cache:
-    key: Ubuntu_GCC.ubuntu_24.04.v2
+    key: Ubuntu_GCC.ubuntu_24.04.v2.$CI_COMMIT_REF_PROTECTED
   before_script:
     - CI/install_debian_deps.sh gcc openmw-deps openmw-deps-dynamic
   variables:
@@ -181,7 +299,7 @@ Ubuntu_GCC:
 Ubuntu_GCC_asan:
   extends: Ubuntu_GCC
   cache:
-    key: Ubuntu_GCC_asan.ubuntu_24.04.v2
+    key: Ubuntu_GCC_asan.ubuntu_24.04.v2.$CI_COMMIT_REF_PROTECTED
   variables:
     CMAKE_BUILD_TYPE: Debug
     CMAKE_CXX_FLAGS_DEBUG: -g -O1 -fno-omit-frame-pointer -fsanitize=address -fsanitize=pointer-subtract -fsanitize=leak
@@ -236,7 +354,7 @@ Teal:
 Ubuntu_GCC_Debug:
   extends: .Ubuntu
   cache:
-    key: Ubuntu_GCC_Debug.ubuntu_24.04.v3
+    key: Ubuntu_GCC_Debug.ubuntu_24.04.v3.$CI_COMMIT_REF_PROTECTED
   before_script:
     - CI/install_debian_deps.sh gcc openmw-deps openmw-deps-dynamic
   variables:
@@ -252,7 +370,7 @@ Ubuntu_GCC_Debug:
 Ubuntu_GCC_tests:
   extends: Ubuntu_GCC
   cache:
-    key: Ubuntu_GCC_tests.ubuntu_24.04.v2
+    key: Ubuntu_GCC_tests.ubuntu_24.04.v2.$CI_COMMIT_REF_PROTECTED
   variables:
     CCACHE_SIZE: 1G
     BUILD_TESTS_ONLY: 1
@@ -266,7 +384,7 @@ Ubuntu_GCC_tests:
 .Ubuntu_GCC_tests_Debug:
   extends: Ubuntu_GCC
   cache:
-    key: Ubuntu_GCC_tests_Debug.ubuntu_24.04.v2
+    key: Ubuntu_GCC_tests_Debug.ubuntu_24.04.v2.$CI_COMMIT_REF_PROTECTED
   variables:
     CCACHE_SIZE: 1G
     BUILD_TESTS_ONLY: 1
@@ -282,7 +400,7 @@ Ubuntu_GCC_tests:
 Ubuntu_GCC_tests_asan:
   extends: Ubuntu_GCC
   cache:
-    key: Ubuntu_GCC_tests_asan.ubuntu_24.04.v2
+    key: Ubuntu_GCC_tests_asan.ubuntu_24.04.v2.$CI_COMMIT_REF_PROTECTED
   variables:
     CCACHE_SIZE: 1G
     BUILD_TESTS_ONLY: 1
@@ -305,7 +423,7 @@ Ubuntu_GCC_tests_asan:
 Ubuntu_GCC_tests_ubsan:
   extends: Ubuntu_GCC
   cache:
-    key: Ubuntu_GCC_tests_ubsan.ubuntu_24.04.v2
+    key: Ubuntu_GCC_tests_ubsan.ubuntu_24.04.v2.$CI_COMMIT_REF_PROTECTED
   variables:
     CCACHE_SIZE: 1G
     BUILD_TESTS_ONLY: 1
@@ -325,7 +443,7 @@ Ubuntu_GCC_tests_ubsan:
 .Ubuntu_GCC_tests_tsan:
   extends: Ubuntu_GCC
   cache:
-    key: Ubuntu_GCC_tests_tsan.ubuntu_24.04.v2
+    key: Ubuntu_GCC_tests_tsan.ubuntu_24.04.v2.$CI_COMMIT_REF_PROTECTED
   variables:
     CCACHE_SIZE: 1G
     BUILD_TESTS_ONLY: 1
@@ -376,7 +494,7 @@ Ubuntu_GCC_tests_coverage:
         - "CI/**/*"
         - ".gitlab-ci.yml"
   cache:
-    key: Ubuntu_GCC_FetchContent_Static_Deps.ubuntu_24.04.v2
+    key: Ubuntu_GCC_FetchContent_Static_Deps.ubuntu_24.04.v2.$CI_COMMIT_REF_PROTECTED
     paths:
       - apt-cache/
       - ccache/
@@ -395,7 +513,7 @@ Ubuntu_Clang:
   before_script:
     - CI/install_debian_deps.sh clang openmw-deps openmw-deps-dynamic
   cache:
-    key: Ubuntu_Clang.ubuntu_24.04.v3
+    key: Ubuntu_Clang.ubuntu_24.04.v3.$CI_COMMIT_REF_PROTECTED
   variables:
     CC: clang
     CXX: clang++
@@ -411,7 +529,7 @@ Ubuntu_Clang:
     - curl https://raw.githubusercontent.com/matus-chochlik/ctcache/e33c063ca6e52b48bcefbc45d46d8c150ffa81ca/src/ctcache/clang_tidy_cache.py -o /usr/local/bin/clang_tidy_cache.py
     - chmod 0775 /usr/local/bin/clang_tidy_cache.py
   cache:
-    key: Ubuntu_Clang_Tidy.ubuntu_24.04.v2
+    key: Ubuntu_Clang_Tidy.ubuntu_24.04.v2.$CI_COMMIT_REF_PROTECTED
     paths:
       - apt-cache/
       - ctcache/
@@ -431,7 +549,7 @@ Ubuntu_Clang:
     - mkdir -pv "${CCACHE_DIR}"
     - mkdir -pv "${CTCACHE_DIR}"
     - ccache -z -M "${CCACHE_SIZE}"
-    - CI/before_script.linux.sh
+    - CI/before_script.linux.sh -C
     - mkdir -p build/extern build/apps/launcher build/apps/opencs build/apps/wizard
     - cp extern/.clang-tidy build/extern/
     - cp extern/.clang-tidy build/apps/launcher/
@@ -483,7 +601,7 @@ Ubuntu_Clang_Tidy_other:
 Ubuntu_Clang_tests_Debug:
   extends: Ubuntu_Clang
   cache:
-    key: Ubuntu_Clang_tests_Debug.ubuntu_24.04.v2
+    key: Ubuntu_Clang_tests_Debug.ubuntu_24.04.v2.$CI_COMMIT_REF_PROTECTED
   variables:
     CCACHE_SIZE: 1G
     BUILD_TESTS_ONLY: 1
@@ -501,6 +619,7 @@ Ubuntu_Clang_tests_Debug:
   variables:
     PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
     EXAMPLE_SUITE_REVISION: a1ba6fc9d7315c2158ef4c60349fc4e71b7ca343
+    ENABLE_DEBUG_ARCHIVES: 1
   cache:
     paths:
       - .cache/pip
@@ -512,13 +631,25 @@ Ubuntu_Clang_tests_Debug:
     - CI/run_integration_tests.sh
   after_script:
     - if [[ -f /tmp/openmw-crash.log ]]; then cat /tmp/openmw-crash.log; fi
+    - mkdir -p integration_tests_output
+    - if [[ -f /tmp/openmw-crash.log ]]; then cp -v /tmp/openmw-crash.log integration_tests_output/; fi
+  artifacts:
+    name: ${CI_JOB_NAME}-${CI_COMMIT_REF_NAME}-${CI_COMMIT_SHA}
+    when: always
+    expire_in: 1 day
+    paths:
+      - integration_tests_output/*.log
+      - integration_tests_output/config/*.log
+      - integration_tests_output/config/*.cfg
+      - integration_tests_output/config/*.yaml
+      - integration_tests_output/userdata/screenshots/
 
 Ubuntu_Clang_integration_tests:
   extends: .Ubuntu_integration_tests_base
   needs:
     - Ubuntu_Clang
   cache:
-    key: Ubuntu_Clang_integration_tests.ubuntu_24.04.v3
+    key: Ubuntu_Clang_integration_tests.ubuntu_24.04.v4.$CI_COMMIT_REF_PROTECTED
   variables:
     OPENMW_DEPS: openmw-integration-tests
 
@@ -527,7 +658,7 @@ Ubuntu_GCC_integration_tests_asan:
   needs:
     - Ubuntu_GCC_asan
   cache:
-    key: Ubuntu_GCC_integration_tests_asan.ubuntu_24.04.v2
+    key: Ubuntu_GCC_integration_tests_asan.ubuntu_24.04.v3.$CI_COMMIT_REF_PROTECTED
   variables:
     OPENMW_DEPS: openmw-integration-tests libasan
     ASAN_OPTIONS: halt_on_error=1:strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:detect_leaks=0
@@ -539,7 +670,7 @@ Ubuntu_GCC_integration_tests_asan:
       when: never
     # Merge request event rule is architecture-specific
     # Unlike ARM64, AMD64 job is manual non-blocking as it's seldom useful
-    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "push"
   image: macos-26-xcode-26
   tags:
     - saas-macos-medium-m1
@@ -584,7 +715,7 @@ macOS26_Xcode26_amd64:
       allow_failure: true
   cache:
     key:
-      prefix: macOS26_Xcode26_amd64.v1
+      prefix: macOS26_Xcode26_amd64.v1.$CI_COMMIT_REF_PROTECTED
       files:
         - CI/macos/deps_versions.sh
     paths:
@@ -603,7 +734,7 @@ macOS26_Xcode26_arm64:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
   cache:
     key:
-      prefix: macOS26_Xcode26_arm64.v1
+      prefix: macOS26_Xcode26_arm64.v1.$CI_COMMIT_REF_PROTECTED
       files:
         - CI/macos/deps_versions.sh
     paths:
@@ -830,22 +961,10 @@ macOS26_Xcode26_arm64:
     # Gitlab can't successfully execute following binaries due to unknown reason
     # executables: "components-tests.exe,openmw-tests.exe,openmw-cs-tests.exe,openmw_detournavigator_navmeshtilescache_benchmark.exe"
   rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      changes:
-        paths:
-          - .gitlab-ci.yml
-          - CMakeLists.txt
-          - "**/CMakeLists.txt"
-          - "**/*.cmake"
-          - "CI/*msvc*"
-    - if: $CI_PIPELINE_SOURCE == "push"
-      #changes:
-      #  paths:
-      #    - CMakeLists.txt
-      #    - "**/CMakeLists.txt"
-      #    - "**/*.cmake"
-      #    - "CI/*msvc*"
-      #  compare_to: the last time this job worked for a parent commit
+    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"
+      # triggered by TriggerNinja - globbing expressions and job names live in its script
+      when: manual
+      allow_failure: true
 
 Windows_Ninja_RelWithDebInfo_GroupOne:
   extends:
@@ -863,7 +982,7 @@ Windows_Ninja_RelWithDebInfo_GroupOne:
       - deps
       - MSVC2022_64_Ninja/deps/Qt
     - key:
-        prefix: ninja-2022-RelWithDebInfo-GroupOne
+        prefix: ninja-2022-RelWithDebInfo-GroupOne-$CI_COMMIT_REF_PROTECTED
         files:
           - CI/deps_versions.msvc.sh
       paths:
@@ -884,12 +1003,54 @@ Windows_Ninja_RelWithDebInfo_GroupTwo:
       paths:
       - deps
       - MSVC2022_64_Ninja/deps/Qt
-      key:
-        prefix: ninja-2022-RelWithDebInfo-GroupTwo
+    - key:
+        prefix: ninja-2022-RelWithDebInfo-GroupTwo-$CI_COMMIT_REF_PROTECTED
         files:
           - CI/deps_versions.msvc.sh
       paths:
       - ccache
+
+TriggerNinja:
+  tags:
+    - saas-linux-small-amd64
+  stage: build
+  image: curlimages/curl-base
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - apk add bash git jq
+    - CI/trigger_ninja_if_necessary.sh
+
+DetectStatus:
+  tags:
+    - saas-linux-small-amd64
+  stage: build
+  image: curlimages/curl-base
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"
+      allow_failure: true
+  needs:
+    - job: "Windows_Ninja_RelWithDebInfo_GroupOne"
+      artifacts: false
+    - job: "Windows_Ninja_RelWithDebInfo_GroupTwo"
+      artifacts: false
+  script:
+    - apk add bash git jq
+    - CI/detect_and_report_ninja_status.sh
+
+ReportStatus:
+  tags:
+    - saas-linux-small-amd64
+  stage: build
+  image: curlimages/curl-base
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - apk add bash git jq
+    - exit $DESIRED_EXIT_CODE
 
 .Windows_Compress_And_Upload_Symbols_Ninja_RelWithDebInfo:
   extends:
@@ -927,14 +1088,14 @@ Windows_Ninja_CacheInit_RelWithDebInfo:
       - MSVC2022_64_Ninja/deps/Qt
       policy: push
     - key:
-        prefix: ninja-2022-RelWithDebInfo-GroupOne
+        prefix: ninja-2022-RelWithDebInfo-GroupOne-$CI_COMMIT_REF_PROTECTED
         files:
           - CI/deps_versions.msvc.sh
       paths:
       - ccache
       policy: push
     - key:
-        prefix: ninja-2022-RelWithDebInfo-GroupTwo
+        prefix: ninja-2022-RelWithDebInfo-GroupTwo-$CI_COMMIT_REF_PROTECTED
         files:
           - CI/deps_versions.msvc.sh
       paths:
@@ -1064,10 +1225,8 @@ Windows_Ninja_CacheInit_RelWithDebInfo:
     config: "RelWithDebInfo"
     # Gitlab can't successfully execute following binaries due to unknown reason
     # executables: "components-tests.exe,openmw-tests.exe,openmw-cs-tests.exe,openmw_detournavigator_navmeshtilescache_benchmark.exe"
-  # temporarily enabled while we're linking these on the downloads page
   rules:
-    # run this for both pushes and schedules so 'latest successful pipeline for branch' always includes it
-    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"
 
 Windows_MSBuild_RelWithDebInfo_GroupOne:
   extends:
@@ -1085,7 +1244,7 @@ Windows_MSBuild_RelWithDebInfo_GroupOne:
       - deps
       - MSVC2022_64/deps/Qt
     - key:
-        prefix: msbuild-2022-RelWithDebInfo-GroupOne
+        prefix: msbuild-2022-RelWithDebInfo-GroupOne-$CI_COMMIT_REF_PROTECTED
         files:
           - CI/deps_versions.msvc.sh
       paths:
@@ -1107,7 +1266,7 @@ Windows_MSBuild_RelWithDebInfo_GroupTwo:
       - deps
       - MSVC2022_64/deps/Qt
     - key:
-        prefix: msbuild-2022-RelWithDebInfo-GroupTwo
+        prefix: msbuild-2022-RelWithDebInfo-GroupTwo-$CI_COMMIT_REF_PROTECTED
         files:
           - CI/deps_versions.msvc.sh
       paths:
@@ -1121,10 +1280,8 @@ Windows_Compress_And_Upload_Symbols_MSBuild_RelWithDebInfo:
       artifacts: true
     - job: "Windows_MSBuild_RelWithDebInfo_GroupTwo"
       artifacts: true
-  # temporarily enabled while we're linking the above on the downloads page
   rules:
-    # run this for both pushes and schedules so 'latest successful pipeline for branch' always includes it
-    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"
 
 Windows_Merge_Artifacts_MSBuild_RelWithDebInfo:
   extends:
@@ -1134,10 +1291,8 @@ Windows_Merge_Artifacts_MSBuild_RelWithDebInfo:
       artifacts: true
     - job: "Windows_MSBuild_RelWithDebInfo_GroupTwo"
       artifacts: true
-  # temporarily enabled while we're linking the above on the downloads page
   rules:
-    # run this for both pushes and schedules so 'latest successful pipeline for branch' always includes it
-    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"
 
 Windows_MSBuild_CacheInit_RelWithDebInfo:
   # build components only, so this can be shared with both groups
@@ -1157,14 +1312,14 @@ Windows_MSBuild_CacheInit_RelWithDebInfo:
       - MSVC2022_64/deps/Qt
       policy: push
     - key:
-        prefix: msbuild-2022-RelWithDebInfo-GroupOne
+        prefix: msbuild-2022-RelWithDebInfo-GroupOne-$CI_COMMIT_REF_PROTECTED
         files:
           - CI/deps_versions.msvc.sh
       paths:
       - ccache
       policy: push
     - key:
-        prefix: msbuild-2022-RelWithDebInfo-GroupTwo
+        prefix: msbuild-2022-RelWithDebInfo-GroupTwo-$CI_COMMIT_REF_PROTECTED
         files:
           - CI/deps_versions.msvc.sh
       paths:

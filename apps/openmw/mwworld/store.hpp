@@ -445,8 +445,6 @@ namespace MWWorld
 
     public:
         Store() = default;
-
-        void setUp(const MWWorld::Store<ESM::GameSetting>& settings);
     };
 
     template <>
@@ -456,8 +454,6 @@ namespace MWWorld
 
     public:
         Store() = default;
-
-        void setUp(const MWWorld::Store<ESM::GameSetting>& settings);
     };
 
     template <>
@@ -470,29 +466,12 @@ namespace MWWorld
     };
 
     template <>
-    class Store<ESM::WeaponType> : public DynamicStore
+    class Store<ESM::WeaponType> : public TypedDynamicStore<ESM::WeaponType>
     {
-        std::map<int, ESM::WeaponType> mStatic;
-
     public:
-        typedef std::map<int, ESM::WeaponType>::const_iterator iterator;
-
-        Store();
-
-        const ESM::WeaponType* search(const int id) const;
-
-        // calls `search` and throws an exception if not found
-        const ESM::WeaponType* find(const int id) const;
-
-        RecordId load(ESM::ESMReader& esm) override { return RecordId({}, false); }
-
-        ESM::WeaponType* insert(const ESM::WeaponType& weaponType);
+        Store() = default;
 
         void setUp() override;
-
-        size_t getSize() const override;
-        iterator begin() const;
-        iterator end() const;
     };
 
     template <>
@@ -538,7 +517,7 @@ namespace MWWorld
     public:
         void preprocessReferences(const Store<ESM4::Cell>& cells)
         {
-            for (auto& [_, ref] : this->mStatic)
+            for (auto& [formId, ref] : this->mStatic)
             {
                 const ESM4::Cell* cell = cells.find(ref.mParent);
                 if (cell->isExterior() && (cell->mFlags & ESM4::Rec_Persistent))

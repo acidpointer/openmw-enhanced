@@ -20,6 +20,7 @@
 #include <components/occlusionculling/occludermesh.hpp>
 #include <components/sceneutil/enhancedsettings.hpp>
 #include <components/sceneutil/occlusionculling.hpp>
+#include <components/sceneutil/userdata.hpp>
 #include <components/terrain/terrainoccluder.hpp>
 #include "../mwworld/class.hpp"
 
@@ -54,19 +55,11 @@ namespace MWRender
             osg::ref_ptr<SceneOcclusionCallback> mController;
         };
 
-        std::string_view getModelPathForNode(osg::Node* node)
+        VFS::Path::Normalized getModelPathForNode(osg::Node* node)
         {
-            if (!node)
-                return {};
-
-            if (auto* udc = node->getUserDataContainer())
-            {
-                for (unsigned int i = 0; i < udc->getNumUserObjects(); ++i)
-                {
-                    if (auto* holder = dynamic_cast<PtrHolder*>(udc->getUserObject(i)))
-                        return holder->mPtr.getClass().getCorrectedModel(holder->mPtr);
-                }
-            }
+            if (node)
+                if (const auto* ptr = SceneUtil::findUserData<MWWorld::Ptr>(*node))
+                    return ptr->getClass().getCorrectedModel(*ptr);
             return {};
         }
 
@@ -701,7 +694,8 @@ namespace MWRender
         if (!nodePaths.empty())
             localToWorld = osg::computeLocalToWorld(nodePaths.front());
 
-        const std::string_view modelPath = getModelPathForNode(node);
+        const VFS::Path::Normalized model = getModelPathForNode(node);
+        const std::string_view modelPath = model.value();
         if (mStorage && mStorage->isOpen() && !modelPath.empty())
         {
             if (mStorage->get(modelPath, meshRes, OcclusionStorage::makeShrinkKey(mOccluderShrinkFactor), localMesh))

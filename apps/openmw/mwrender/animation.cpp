@@ -4,7 +4,6 @@
 #include <limits>
 
 #include <osg/BlendFunc>
-#include <osg/Material>
 #include <osg/Matrix>
 #include <osg/MatrixTransform>
 #include <osg/Switch>
@@ -108,27 +107,17 @@ namespace
     class DayNightCallback : public SceneUtil::NodeCallback<DayNightCallback, osg::Switch*>
     {
     public:
-        DayNightCallback()
-            : mCurrentState(0)
-        {
-        }
-
         void operator()(osg::Switch* node, osg::NodeVisitor* nv)
         {
             unsigned int state = MWBase::Environment::get().getWorld()->getNightDayMode();
             const unsigned int newState = node->getNumChildren() > state ? state : 0;
 
-            if (newState != mCurrentState)
-            {
-                mCurrentState = newState;
-                node->setSingleChildOn(mCurrentState);
-            }
+            const osg::Switch::ValueList& values = node->getValueList();
+            if (newState >= values.size() || !values[newState] || std::count(values.begin(), values.end(), true) != 1)
+                node->setSingleChildOn(newState);
 
             traverse(node, nv);
         }
-
-    private:
-        unsigned int mCurrentState;
     };
 
     class AddSwitchCallbacksVisitor : public osg::NodeVisitor
@@ -260,11 +249,11 @@ namespace
 
         void apply(osg::Node& node) override { traverse(node); }
 
-        void apply(osg::Group& group) override
+        void apply(osg::MatrixTransform& node) override
         {
-            traverse(group);
+            traverse(node);
 
-            osg::Callback* callback = group.getUpdateCallback();
+            osg::Callback* callback = node.getUpdateCallback();
             if (callback)
             {
                 // We should remove empty transformation nodes and finished callbacks here
@@ -272,14 +261,12 @@ namespace
                 if (vfxCallback)
                 {
                     if (vfxCallback->mFinished)
-                        mToRemove.emplace_back(group.asNode(), group.getParent(0));
+                        mToRemove.emplace_back(node.asNode(), node.getParent(0));
                     else
                         mHasMagicEffects = true;
                 }
             }
         }
-
-        void apply(osg::MatrixTransform& node) override { traverse(node); }
 
         void apply(osg::Geometry&) override {}
     };
@@ -304,11 +291,11 @@ namespace
 
         void apply(osg::Node& node) override { traverse(node); }
 
-        void apply(osg::Group& group) override
+        void apply(osg::MatrixTransform& node) override
         {
-            traverse(group);
+            traverse(node);
 
-            osg::Callback* callback = group.getUpdateCallback();
+            osg::Callback* callback = node.getUpdateCallback();
             if (callback)
             {
                 MWRender::UpdateVfxCallback* vfxCallback = dynamic_cast<MWRender::UpdateVfxCallback*>(callback);
@@ -316,14 +303,12 @@ namespace
                 {
                     bool toRemove = mEffectId == "" || vfxCallback->mParams.mEffectId == mEffectId;
                     if (toRemove)
-                        mToRemove.emplace_back(group.asNode(), group.getParent(0));
+                        mToRemove.emplace_back(node.asNode(), node.getParent(0));
                     else
                         mHasMagicEffects = true;
                 }
             }
         }
-
-        void apply(osg::MatrixTransform& node) override { traverse(node); }
 
         void apply(osg::Geometry&) override {}
 
@@ -349,9 +334,9 @@ namespace
 
         void apply(osg::Node& node) override { traverse(node); }
 
-        void apply(osg::Group& group) override
+        void apply(osg::MatrixTransform& node) override
         {
-            osg::Callback* callback = group.getUpdateCallback();
+            osg::Callback* callback = node.getUpdateCallback();
             if (callback)
             {
                 MWRender::UpdateVfxCallback* vfxCallback = dynamic_cast<MWRender::UpdateVfxCallback*>(callback);
@@ -363,10 +348,8 @@ namespace
                     }
                 }
             }
-            traverse(group);
+            traverse(node);
         }
-
-        void apply(osg::MatrixTransform& node) override { traverse(node); }
 
         void apply(osg::Geometry&) override {}
 
@@ -434,46 +417,45 @@ namespace MWRender
     class TransparencyUpdater : public SceneUtil::StateSetUpdater
     {
     public:
-        TransparencyUpdater(const float alpha)
-            : mAlpha(alpha)
+        TransparencyUpdater(float actorFade, float alpha)
+            : mActorFade(actorFade)
+            , mAlpha(alpha)
         {
         }
 
-        void setAlpha(const float alpha) { mAlpha = alpha; }
+        void setAlpha(float actorFade, float alpha)
+        {
+            mActorFade = actorFade;
+            mAlpha = alpha;
+        }
 
     protected:
         void setDefaults(osg::StateSet* stateset) override
         {
             osg::BlendFunc* blendfunc(new osg::BlendFunc);
-            stateset->setAttributeAndModes(blendfunc, osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+            stateset->setAttributeAndModes(blendfunc, osg::StateAttribute::ON);
 
             stateset->setRenderingHint(osg::StateSet::TRANSPARENT_BIN);
             stateset->setRenderBinMode(osg::StateSet::OVERRIDE_RENDERBIN_DETAILS);
 
-            // FIXME: overriding diffuse/ambient/emissive colors
-            osg::Material* material = new osg::Material;
-            material->setColorMode(osg::Material::OFF);
-            material->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4f(1, 1, 1, mAlpha));
-            material->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4f(1, 1, 1, 1));
-            stateset->setAttributeAndModes(material, osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
-            stateset->addUniform(
-                new osg::Uniform("colorMode", 0), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+            stateset->addUniform(new osg::Uniform("alpha", mAlpha));
+            stateset->addUniform(new osg::Uniform("actorFade", mActorFade));
         }
 
         void apply(osg::StateSet* stateset, osg::NodeVisitor* /*nv*/) override
         {
-            osg::Material* material
-                = static_cast<osg::Material*>(stateset->getAttribute(osg::StateAttribute::MATERIAL));
-            material->setAlpha(osg::Material::FRONT_AND_BACK, mAlpha);
+            stateset->getUniform("actorFade")->set(mActorFade);
+            stateset->getUniform("alpha")->set(mAlpha);
         }
 
     private:
+        float mActorFade;
         float mAlpha;
     };
 
     struct Animation::AnimSource
     {
-        osg::ref_ptr<const SceneUtil::KeyframeHolder> mKeyframes;
+        std::shared_ptr<const SceneUtil::KeyframeHolder> mKeyframes;
 
         typedef std::map<std::string, osg::ref_ptr<SceneUtil::KeyframeController>> ControllerMap;
 
@@ -481,7 +463,7 @@ namespace MWRender
 
         const SceneUtil::TextKeyMap& getTextKeys() const;
 
-        osg::ref_ptr<const SceneUtil::AnimBlendRules> mAnimBlendRules;
+        std::shared_ptr<const SceneUtil::AnimBlendRules> mAnimBlendRules;
     };
 
     void UpdateVfxCallback::operator()(osg::Node* node, osg::NodeVisitor* nv)
@@ -562,6 +544,7 @@ namespace MWRender
         , mBodyPitchRadians(0.f)
         , mHasMagicEffects(false)
         , mAlpha(1.f)
+        , mActorFade(1.f)
         , mPlayScriptedOnly(false)
         , mRequiresBoneMap(false)
     {
@@ -672,7 +655,7 @@ namespace MWRender
         if (!mResourceSystem->getVFS()->exists(kfname))
             return nullptr;
 
-        osg::ref_ptr<const SceneUtil::KeyframeHolder> keyframes = mResourceSystem->getKeyframeManager()->get(kfname);
+        std::shared_ptr<const SceneUtil::KeyframeHolder> keyframes = mResourceSystem->getKeyframeManager()->get(kfname);
 
         if (keyframes == nullptr || keyframes->mTextKeys.empty() || keyframes->mKeyframeControllers.empty())
             return nullptr;
@@ -754,7 +737,7 @@ namespace MWRender
             // globalBlendConfigPath is only used with actors! Objects have no default blending.
             constexpr VFS::Path::NormalizedView globalBlendConfigPath("animations/animation-config.yaml");
 
-            osg::ref_ptr<const SceneUtil::AnimBlendRules> blendRules;
+            std::shared_ptr<const SceneUtil::AnimBlendRules> blendRules;
             if (mPtr.getClass().isActor())
             {
                 blendRules
@@ -769,7 +752,7 @@ namespace MWRender
             }
 
             // At this point blendRules will either be nullptr or an AnimBlendRules instance with > 0 rules inside.
-            animsrc->mAnimBlendRules = blendRules;
+            animsrc->mAnimBlendRules = std::move(blendRules);
         }
 
         return animsrc;
@@ -858,6 +841,12 @@ namespace MWRender
         }
 
         return -1.f;
+    }
+
+    void Animation::getTextKeyMaps(std::vector<const SceneUtil::TextKeyMap*>& out) const
+    {
+        for (const auto& source : mAnimSources)
+            out.push_back(&source->getTextKeys());
     }
 
     void Animation::handleTextKey(AnimState& state, std::string_view groupname,
@@ -1076,7 +1065,7 @@ namespace MWRender
     inline osg::Callback* Animation::handleBlendTransform(const osg::ref_ptr<osg::Node>& node,
         osg::ref_ptr<SceneUtil::KeyframeController> keyframeController,
         std::map<osg::ref_ptr<osg::Node>, osg::ref_ptr<ControllerType>>& blendControllers,
-        const AnimBlendStateData& stateData, const osg::ref_ptr<const SceneUtil::AnimBlendRules>& blendRules,
+        const AnimBlendStateData& stateData, const std::shared_ptr<const SceneUtil::AnimBlendRules>& blendRules,
         const AnimState& active)
     {
         osg::ref_ptr<ControllerType> animController;
@@ -1700,7 +1689,7 @@ namespace MWRender
         bool exterior = mPtr.isInCell() && mPtr.getCell()->getCell()->isExterior();
 
         mExtraLightSource = SceneUtil::addLight(parent, esmLight, Mask_Lighting, exterior);
-        mExtraLightSource->setActorFade(mAlpha);
+        mExtraLightSource->setActorFade(mActorFade);
     }
 
     void Animation::addEffect(std::string_view model, std::string_view effectId, bool loop, std::string_view bonename,
@@ -1736,7 +1725,7 @@ namespace MWRender
             parentNode = found->second;
         }
 
-        osg::ref_ptr<SceneUtil::PositionAttitudeTransform> trans = new SceneUtil::PositionAttitudeTransform;
+        osg::ref_ptr<osg::MatrixTransform> trans = new osg::MatrixTransform;
 
         osg::Matrix finalTransform;
 
@@ -1762,9 +1751,7 @@ namespace MWRender
             finalTransform *= (*transform);
         }
 
-        trans->setScale(finalTransform.getScale());
-        trans->setAttitude(finalTransform.getRotate());
-        trans->setPosition(finalTransform.getTrans());
+        trans->setMatrix(finalTransform);
 
         parentNode->addChild(trans);
 
@@ -1775,6 +1762,7 @@ namespace MWRender
         {
             // Morrowind has a white ambient light attached to the root VFX node of the scenegraph
             SceneUtil::configureSunAmbientOverride(osg::Vec4f(1, 1, 1, 1), node->getOrCreateStateSet());
+            node->getOrCreateStateSet()->addUniform(new osg::Uniform("alpha", 1.f), osg::StateAttribute::ON);
         }
 
         mResourceSystem->getSceneManager()->setUpNormalsRTForStateSet(node->getOrCreateStateSet(), false);
@@ -1872,22 +1860,39 @@ namespace MWRender
             return found->second;
     }
 
-    void Animation::setAlpha(float alpha)
+    std::optional<osg::Matrixf> Animation::getNodeWorldTransform(std::string_view name) const
     {
-        if (alpha == mAlpha || !mObjectRoot)
+        const osg::Node* node = getNode(name);
+        if (node == nullptr)
+            return std::nullopt;
+        // Never empty: a node without parents still yields the path to itself
+        return osg::computeLocalToWorld(node->getParentalNodePaths()[0]);
+    }
+
+    std::optional<osg::Matrixf> Animation::getHeadWorldTransform() const
+    {
+        if (std::optional<osg::Matrixf> transform = getNodeWorldTransform("Head"))
+            return transform;
+        return getNodeWorldTransform("Bip01 Head");
+    }
+
+    void Animation::setAlpha(float actorFade, float alpha)
+    {
+        if ((alpha == mAlpha && actorFade == mActorFade) || !mObjectRoot)
             return;
         mAlpha = alpha;
+        mActorFade = actorFade;
 
         // TODO: we use it to fade actors away too, but it would be nice to have a dithering shader instead.
-        if (alpha != 1.f)
+        if (mAlpha != 1.f || mActorFade != 1.f)
         {
             if (mTransparencyUpdater == nullptr)
             {
-                mTransparencyUpdater = new TransparencyUpdater(alpha);
+                mTransparencyUpdater = new TransparencyUpdater(actorFade, alpha);
                 mObjectRoot->addCullCallback(mTransparencyUpdater);
             }
             else
-                mTransparencyUpdater->setAlpha(alpha);
+                mTransparencyUpdater->setAlpha(actorFade, alpha);
         }
         else
         {
@@ -1895,7 +1900,7 @@ namespace MWRender
             mTransparencyUpdater = nullptr;
         }
         if (mExtraLightSource)
-            mExtraLightSource->setActorFade(alpha);
+            mExtraLightSource->setActorFade(actorFade);
     }
 
     void Animation::setLightEffect(float effect)
@@ -1923,10 +1928,10 @@ namespace MWRender
                     mGlowLight = nullptr;
                 }
 
-                osg::ref_ptr<osg::Light> light(new osg::Light);
-                light->setDiffuse(osg::Vec4f(0, 0, 0, 0));
-                light->setSpecular(osg::Vec4f(0, 0, 0, 0));
-                light->setAmbient(osg::Vec4f(1.5f, 1.5f, 1.5f, 1.f));
+                SceneUtil::Light light;
+                light.setDiffuse(osg::Vec4f(0, 0, 0, 0));
+                light.setSpecular(osg::Vec4f(0, 0, 0, 0));
+                light.setAmbient(osg::Vec4f(1.5f, 1.5f, 1.5f, 1.f));
 
                 bool isExterior = mPtr.isInCell() && mPtr.getCell()->getCell()->isExterior();
                 SceneUtil::configureLight(light, radius, isExterior);
@@ -2144,8 +2149,9 @@ namespace MWRender
 
     // ------------------------------
 
-    PartHolder::PartHolder(osg::ref_ptr<osg::Node> node)
+    PartHolder::PartHolder(osg::ref_ptr<osg::Node> node, VFS::Path::NormalizedView model)
         : mNode(std::move(node))
+        , mModel(model)
     {
     }
 

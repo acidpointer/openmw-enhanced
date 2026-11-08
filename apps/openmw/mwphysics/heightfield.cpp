@@ -3,8 +3,6 @@
 
 #include <components/bullethelpers/heightfield.hpp>
 
-#include <osg/Object>
-
 #include <BulletCollision/CollisionDispatch/btCollisionObject.h>
 #include <BulletCollision/CollisionShapes/btHeightfieldTerrainShape.h>
 
@@ -53,8 +51,8 @@ namespace
 namespace MWPhysics
 {
     HeightField::HeightField(const float* heights, int x, int y, int size, int verts, float minH, float maxH,
-        const osg::Object* holdObject, PhysicsTaskScheduler* scheduler)
-        : mHoldObject(holdObject)
+        std::shared_ptr<const ESMTerrain::LandObject> holdObject, PhysicsTaskScheduler* scheduler)
+        : mHoldObject(std::move(holdObject))
 #if BT_BULLET_VERSION < 310
         , mHeights(makeHeights(heights, verts))
 #endif

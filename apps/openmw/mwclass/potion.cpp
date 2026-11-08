@@ -40,7 +40,7 @@ namespace MWClass
         }
     }
 
-    std::string_view Potion::getModel(const MWWorld::ConstPtr& ptr) const
+    VFS::Path::NormalizedView Potion::getModel(const MWWorld::ConstPtr& ptr) const
     {
         return getClassModel<ESM::Potion>(ptr);
     }
@@ -79,11 +79,11 @@ namespace MWClass
         return sound;
     }
 
-    const std::string& Potion::getInventoryIcon(const MWWorld::ConstPtr& ptr) const
+    VFS::Path::NormalizedView Potion::getInventoryIcon(const MWWorld::ConstPtr& ptr) const
     {
         const MWWorld::LiveCellRef<ESM::Potion>* ref = ptr.get<ESM::Potion>();
 
-        return ref->mBase->mIcon.getOriginal();
+        return ref->mBase->mIcon.getNormalized();
     }
 
     MWGui::ToolTipInfo Potion::getToolTipInfo(const MWWorld::ConstPtr& ptr, int count) const

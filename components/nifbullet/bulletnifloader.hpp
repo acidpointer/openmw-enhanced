@@ -3,12 +3,11 @@
 
 #include <cassert>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 
 #include <osg/BoundingBox>
-#include <osg/Referenced>
-#include <osg/ref_ptr>
 
 #include <BulletCollision/CollisionShapes/btCompoundShape.h>
 
@@ -45,7 +44,7 @@ namespace NifBullet
             abort();
         }
 
-        osg::ref_ptr<Resource::BulletShape> load(Nif::FileView file);
+        std::shared_ptr<Resource::BulletShape> load(Nif::FileView file);
 
     private:
         bool findBoundingBox(const Nif::NiAVObject& node);
@@ -67,7 +66,7 @@ namespace NifBullet
         std::unique_ptr<btCompoundShape, Resource::DeleteCollisionShape> mCompoundShape;
         std::unique_ptr<btCompoundShape, Resource::DeleteCollisionShape> mAvoidCompoundShape;
 
-        osg::ref_ptr<Resource::BulletShape> mShape;
+        std::shared_ptr<Resource::BulletShape> mShape;
     };
 
 }

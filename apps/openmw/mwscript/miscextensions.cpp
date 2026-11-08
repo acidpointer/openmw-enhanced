@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <sstream>
+#include <string_view>
 
 #include <components/compiler/extensions.hpp>
 #include <components/compiler/locals.hpp>
@@ -20,8 +21,6 @@
 
 #include <components/resource/resourcesystem.hpp>
 #include <components/resource/scenemanager.hpp>
-
-#include <components/sceneutil/positionattitudetransform.hpp>
 
 #include <components/esm3/loadacti.hpp>
 #include <components/esm3/loadalch.hpp>
@@ -47,7 +46,6 @@
 
 #include <components/files/conversion.hpp>
 #include <components/misc/strings/conversion.hpp>
-#include <components/sceneutil/util.hpp>
 #include <components/vfs/manager.hpp>
 
 #include "../mwbase/environment.hpp"
@@ -73,48 +71,13 @@
 #include "../mwmechanics/spellcasting.hpp"
 
 #include "../mwrender/animation.hpp"
+#include "../mwrender/texturereport.hpp"
 
 #include "interpretercontext.hpp"
 #include "ref.hpp"
 
 namespace
 {
-
-    struct TextureFetchVisitor : osg::NodeVisitor
-    {
-        std::vector<std::pair<std::string, std::string>> mTextures;
-
-        TextureFetchVisitor(osg::NodeVisitor::TraversalMode mode = TRAVERSE_ALL_CHILDREN)
-            : osg::NodeVisitor(mode)
-        {
-        }
-
-        void apply(osg::Node& node) override
-        {
-            const osg::StateSet* stateset = node.getStateSet();
-            if (stateset)
-            {
-                const osg::StateSet::TextureAttributeList& texAttributes = stateset->getTextureAttributeList();
-                for (unsigned i = 0; i < static_cast<unsigned>(texAttributes.size()); i++)
-                {
-                    const osg::StateAttribute* attr = stateset->getTextureAttribute(i, osg::StateAttribute::TEXTURE);
-                    if (!attr)
-                        continue;
-                    const osg::Texture* texture = attr->asTexture();
-                    if (!texture)
-                        continue;
-                    const osg::Image* image = texture->getImage(0);
-                    std::string fileName;
-                    if (image)
-                        fileName = image->getFileName();
-                    mTextures.emplace_back(SceneUtil::getTextureType(*stateset, *texture, i), fileName);
-                }
-            }
-
-            traverse(node);
-        }
-    };
-
     void addToLevList(ESM::LevelledListBase* list, const ESM::RefId& itemId, uint16_t level)
     {
         for (auto& levelItem : list->mList)
@@ -1498,52 +1461,7 @@ namespace MWScript
                         const std::string archive = vfs->getArchive(model);
                         if (!archive.empty())
                             msg << "(" << archive << ")" << std::endl;
-                        TextureFetchVisitor visitor;
-                        SceneUtil::PositionAttitudeTransform* baseNode = ptr.getRefData().getBaseNode();
-                        if (baseNode)
-                            baseNode->accept(visitor);
-                        // The instance might not have a physical model due to paging or scripting.
-                        // If this is the case, fall back to the template
-                        if (visitor.mTextures.empty())
-                        {
-                            Resource::SceneManager* sceneManager
-                                = MWBase::Environment::get().getResourceSystem()->getSceneManager();
-                            const_cast<osg::Node*>(sceneManager->getTemplate(model).get())->accept(visitor);
-                            msg << "Bound textures: [None]" << std::endl;
-                            if (!visitor.mTextures.empty())
-                                msg << "Model textures: ";
-                        }
-                        else
-                        {
-                            msg << "Bound textures: ";
-                        }
-                        if (!visitor.mTextures.empty())
-                        {
-                            msg << std::endl;
-                            std::string lastTextureSrc;
-                            for (auto& [textureName, fileName] : visitor.mTextures)
-                            {
-                                std::string textureSrc;
-                                if (!fileName.empty())
-                                    textureSrc = vfs->getArchive(fileName);
-
-                                if (lastTextureSrc.empty() || textureSrc != lastTextureSrc)
-                                {
-                                    lastTextureSrc = std::move(textureSrc);
-                                    if (lastTextureSrc.empty())
-                                        lastTextureSrc = "[No Source]";
-
-                                    msg << "  " << lastTextureSrc << std::endl;
-                                }
-                                msg << "    ";
-                                msg << (textureName.empty() ? "[Anonymous]: " : textureName) << ": ";
-                                msg << (fileName.empty() ? "[No File]" : fileName) << std::endl;
-                            }
-                        }
-                        else
-                        {
-                            msg << "[None]" << std::endl;
-                        }
+                        MWRender::reportTextures(msg, ptr, model);
                     }
                     if (!ptr.getClass().getScript(ptr).empty())
                         msg << "Script: " << ptr.getClass().getScript(ptr) << std::endl;

@@ -38,6 +38,9 @@ Properties
   * - visible
     - boolean (true)
     - Defines if the widget is visible
+  * - ignorePointerEvents
+    - boolean (false)
+    - Defines whether the widget participates in pointer events or pointer hit detection.
   * - propagateEvents
     - boolean (true)
     - Allows base widget events to propagate to the widget's parent.
@@ -49,6 +52,9 @@ Properties
     - boolean (true)
     - | Modulate `alpha` with parents `alpha`.
       | If the parent has `inheritAlpha` set to `true`, the value after modulating is passed to the child.
+  * - cursor
+    - `CursorResource <../openmw_ui.html##(CursorResource)>`_
+    - Sets the cursor to be displayed when hovering over this widget.
 
 Events
 ------

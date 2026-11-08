@@ -17,7 +17,6 @@ namespace osg
 {
     class Group;
     class Node;
-    class Material;
     class PositionAttitudeTransform;
     class Camera;
 }
@@ -36,6 +35,7 @@ namespace Resource
 namespace SceneUtil
 {
     class RTTNode;
+    class Material;
 }
 
 namespace MWRender
@@ -79,7 +79,7 @@ namespace MWRender
 
         float getPrecipitationAlpha() const;
 
-        void setStormParticleDirection(const osg::Vec3f& direction);
+        osg::Vec3f getStormParticleDirection() const { return mStormParticleDirection; }
 
         void setSunDirection(const osg::Vec3f& direction);
 
@@ -136,7 +136,6 @@ namespace MWRender
         osg::ref_ptr<osg::Node> mAtmosphereDay;
 
         osg::ref_ptr<osg::PositionAttitudeTransform> mAtmosphereNightNode;
-        float mAtmosphereNightRoll;
         osg::ref_ptr<AtmosphereNightUpdater> mAtmosphereNightUpdater;
 
         osg::ref_ptr<AtmosphereUpdater> mAtmosphereUpdater;
@@ -151,14 +150,8 @@ namespace MWRender
         osg::ref_ptr<RainCounter> mCounter;
         osg::ref_ptr<RainShooter> mRainShooter;
 
-        bool mPrecipitationOcclusion = false;
         std::unique_ptr<PrecipitationOccluder> mPrecipitationOccluder;
 
-        bool mCreated;
-
-        bool mIsStorm;
-
-        bool mTimescaleClouds;
         float mCloudAnimationTimer;
 
         // particle system rotation is independent of cloud rotation internally
@@ -167,8 +160,10 @@ namespace MWRender
         osg::Vec3f mNextStormDirection;
 
         // remember some settings so we don't have to apply them again if they didn't change
-        std::string mClouds;
-        std::string mNextClouds;
+        VFS::Path::Normalized mClouds;
+        VFS::Path::Normalized mNextClouds;
+        VFS::Path::Normalized mCurrentParticleEffect;
+        VFS::Path::Normalized mRainEffect;
         float mCloudBlendFactor;
         float mCloudSpeed;
         float mStarsOpacity;
@@ -176,29 +171,30 @@ namespace MWRender
         osg::Vec4f mSkyColour;
         osg::Vec4f mFogColour;
 
-        VFS::Path::Normalized mCurrentParticleEffect;
-
-        std::string mRainEffect;
         float mRainSpeed;
         float mRainDiameter;
         float mRainMinHeight;
         float mRainMaxHeight;
         float mRainEntranceSpeed;
         int mRainMaxRaindrops;
-        bool mRainRipplesEnabled;
-        bool mSnowRipplesEnabled;
         float mWindSpeed;
         float mBaseWindSpeed;
 
-        bool mEnabled;
-        bool mSunglareEnabled;
-
         float mPrecipitationAlpha;
-        bool mDirtyParticlesEffect;
 
         osg::Vec4f mMoonScriptColor;
 
         osg::ref_ptr<SceneUtil::RTTNode> mSkyRTT;
+
+        bool mPrecipitationOcclusion = false;
+        bool mParticleOcclusion = false;
+        bool mCreated = false;
+        bool mIsStorm = false;
+        bool mTimescaleClouds;
+        bool mRipplesEnabled = false;
+        bool mEnabled = true;
+        bool mSunglareEnabled = true;
+        bool mDirtyParticlesEffect = false;
     };
 }
 

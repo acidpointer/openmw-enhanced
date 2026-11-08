@@ -10,10 +10,7 @@
 #include <memory>
 #include <vector>
 
-#include <osg/ref_ptr>
-
 #include "../mwbase/windowmanager.hpp"
-#include "../mwrender/localmap.hpp"
 
 #include <components/misc/guarded.hpp>
 #include <components/myguiplatform/myguiplatform.hpp>
@@ -45,6 +42,11 @@ namespace MyGUI
     class Window;
     class UString;
     class ImageBox;
+}
+
+namespace MWRender
+{
+    class LocalMap;
 }
 
 namespace MWWorld
@@ -128,7 +130,7 @@ namespace MWGui
         typedef std::vector<Faction> FactionList;
 
         WindowManager(SDL_Window* window, osgViewer::Viewer* viewer, osg::Group* guiRoot,
-            Resource::ResourceSystem* resourceSystem, SceneUtil::WorkQueue* workQueue,
+            Resource::ResourceSystem* resourceSystem, const std::shared_ptr<SceneUtil::WorkQueue>& workQueue,
             const std::filesystem::path& logpath, bool consoleOnlyScripts, Translation::Storage& translationDataStorage,
             ToUTF8::FromType encoding, bool exportFonts, const std::string& versionDescription,
             Files::ConfigurationManager& cfgMgr);
@@ -316,6 +318,11 @@ namespace MWGui
         void showSoulgemDialog(MWWorld::Ptr item) override;
 
         void changePointer(const std::string& name) override;
+        void createLuaCursor(const std::string& name, const std::string& path, int width, int height, int hotspotX,
+            int hotspotY, double rotation) override;
+        void removeLuaCursor(const std::string& name) override;
+        void setLuaCursorOverride(const std::string& name) override;
+        std::string getCurrentCursorName() const override;
 
         void setEnemy(const MWWorld::Ptr& enemy) override;
 
@@ -327,6 +334,7 @@ namespace MWGui
 
         /// Call when mouse cursor or buttons are used.
         void setCursorActive(bool active) override;
+        void setCursorInteractionEnabled(bool enabled) override;
 
         /// Clear all savegame-specific data
         void clear() override;
@@ -417,7 +425,7 @@ namespace MWGui
 
         const MWWorld::ESMStore* mStore;
         Resource::ResourceSystem* mResourceSystem;
-        osg::ref_ptr<SceneUtil::WorkQueue> mWorkQueue;
+        std::shared_ptr<SceneUtil::WorkQueue> mWorkQueue;
 
         std::unique_ptr<MyGUIPlatform::Platform> mGuiPlatform;
         osgViewer::Viewer* mViewer;
@@ -490,6 +498,7 @@ namespace MWGui
         bool mHudEnabled;
         bool mCursorVisible;
         bool mCursorActive;
+        bool mCursorInteractionEnabled;
 
         int mPlayerBounty;
 
@@ -524,6 +533,8 @@ namespace MWGui
         void reapplyActiveControllerWindow();
 
         std::unique_ptr<SDLUtil::SDLCursorManager> mCursorManager;
+        std::string mLuaCursorOverride;
+        std::string mMyGuiCursor;
 
         std::vector<std::unique_ptr<Layout>> mGarbageDialogs;
         void cleanupGarbage();

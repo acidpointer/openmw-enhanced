@@ -4,6 +4,8 @@
 #include "rotationflags.hpp"
 
 #include <deque>
+#include <map>
+#include <optional>
 #include <set>
 #include <span>
 #include <string_view>
@@ -17,6 +19,8 @@
 #include "../mwworld/ptr.hpp"
 #include "../mwworld/spellcaststate.hpp"
 
+#include "../mwmechanics/movingtarget.hpp"
+
 #include "../mwrender/rendermode.hpp"
 
 namespace osg
@@ -25,8 +29,11 @@ namespace osg
     class Vec4f;
     class Matrixf;
     class Quat;
-    class Image;
-    class Stats;
+}
+
+namespace Misc
+{
+    class FrameStats;
 }
 
 namespace Loading
@@ -57,6 +64,7 @@ namespace ESM
     struct TimeStamp;
     class RefId;
     struct ExteriorCellLocation;
+    enum class GameFormat;
 }
 
 namespace MWPhysics
@@ -95,6 +103,8 @@ namespace MWWorld
     class Cell;
     class DateTimeManager;
     class Weather;
+    class WeatherStore;
+    struct Moon;
 
     typedef std::vector<std::pair<MWWorld::Ptr, MWMechanics::Movement>> PtrMovementList;
 }
@@ -152,13 +162,15 @@ namespace MWBase
         virtual MWWorld::ESMStore& getStore() = 0;
         virtual const MWWorld::ESMStore& getStore() const = 0;
 
-        virtual const std::vector<int>& getESMVersions() const = 0;
+        virtual const std::vector<ESM::GameFormat>& getGameFormats() const = 0;
 
         virtual MWWorld::LocalScripts& getLocalScripts() = 0;
 
         virtual bool isCellExterior() const = 0;
 
         virtual bool isCellQuasiExterior() const = 0;
+
+        virtual const std::set<MWWorld::CellStore*, std::less<>>& getActiveCells() const = 0;
 
         virtual void getDoorMarkers(MWWorld::CellStore& cell, std::vector<DoorMarker>& out) = 0;
         ///< get a list of teleport door markers for a given cell, to be displayed on the local map
@@ -213,19 +225,13 @@ namespace MWBase
         virtual bool toggleSky() = 0;
         ///< \return Resulting mode
 
-        virtual void changeWeather(const ESM::RefId& region, const unsigned int id) = 0;
+        virtual void changeWeather(ESM::RefId region, ESM::RefId id) = 0;
 
-        virtual void changeWeather(const ESM::RefId& region, const ESM::RefId& id) = 0;
-
-        virtual const std::vector<MWWorld::Weather>& getAllWeather() const = 0;
+        virtual MWWorld::WeatherStore& getAllWeather() const = 0;
 
         virtual int getCurrentWeatherScriptId() const = 0;
 
-        virtual const MWWorld::Weather& getCurrentWeather() const = 0;
-
-        virtual const MWWorld::Weather* getWeather(size_t index) const = 0;
-
-        virtual const MWWorld::Weather* getWeather(const ESM::RefId& id) const = 0;
+        virtual const MWWorld::Weather* getCurrentWeather() const = 0;
 
         virtual int getNextWeatherScriptId() const = 0;
 
@@ -239,10 +245,12 @@ namespace MWBase
 
         virtual int getSecundaPhase() const = 0;
 
+        virtual std::vector<MWWorld::Moon> getCurrentMoons() const = 0;
+
         virtual void setMoonColour(bool red) = 0;
 
-        virtual void modRegion(const ESM::RefId& regionid, std::span<const uint8_t> chances) = 0;
-        virtual std::span<const uint8_t> getRegionWeatherChances(const ESM::RefId& regionid) const = 0;
+        virtual void modRegion(ESM::RefId regionid, const std::map<ESM::RefId, uint8_t>& chances) = 0;
+        virtual const std::map<ESM::RefId, uint8_t>& getRegionWeatherChances(ESM::RefId regionid) const = 0;
 
         virtual void changeToInteriorCell(
             std::string_view cellName, const ESM::Position& position, bool adjustPlayerPos, bool changeEvent = true)
@@ -259,6 +267,9 @@ namespace MWBase
         ///< Return pointer to the object the player is looking at, if it is within activation range
 
         virtual float getDistanceToFocusObject() = 0;
+
+        virtual const MWPhysics::RayCastingResult& getFocusRay() const = 0;
+        ///< Result of the last focus object lookup
 
         virtual float getMaxActivationDistance() const = 0;
 
@@ -435,7 +446,8 @@ namespace MWBase
         virtual void reattachPlayerCamera() = 0;
 
         /// \todo this does not belong here
-        virtual void screenshot(osg::Image* image, int w, int h) = 0;
+        /// Take a screenshot of w*h, not including the GUI, encoded as JPEG. Empty on failure.
+        virtual std::vector<char> screenshot(int w, int h) = 0;
 
         /// Find default position inside exterior cell specified by name
         /// \return empty RefId if exterior with given name not exists, the cell's RefId otherwise
@@ -474,10 +486,11 @@ namespace MWBase
         virtual void castSpell(const MWWorld::Ptr& actor, bool scriptedSpell = false) = 0;
 
         virtual void launchMagicBolt(const ESM::RefId& spellId, const MWWorld::Ptr& caster,
-            const osg::Vec3f& fallbackDirection, ESM::RefNum item)
+            const osg::Vec3f& fallbackDirection, ESM::RefNum item,
+            const std::optional<MWMechanics::MovingTarget>& movingTarget)
             = 0;
         virtual void launchProjectile(MWWorld::Ptr& actor, MWWorld::Ptr& projectile, const osg::Vec3f& worldPos,
-            const osg::Quat& orient, MWWorld::Ptr& bow, float speed, float attackStrength)
+            const osg::Quat& orient, MWWorld::Ptr& bow, float speed, float attackStrength, float attackWindUp)
             = 0;
         virtual void updateProjectilesCasters() = 0;
 
@@ -591,7 +604,7 @@ namespace MWBase
 
         virtual bool isAreaOccupiedByOtherActor(const MWWorld::ConstPtr& actor, const osg::Vec3f& position) const = 0;
 
-        virtual void reportStats(unsigned int frameNumber, osg::Stats& stats) const = 0;
+        virtual void reportStats(unsigned int frameNumber, Misc::FrameStats& stats) const = 0;
 
         virtual std::vector<MWWorld::Ptr> getAll(const ESM::RefId& id) = 0;
 

@@ -22,6 +22,7 @@
 #include "stepper.hpp"
 #include "trace.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace MWPhysics
@@ -389,9 +390,10 @@ namespace MWPhysics
                 {
                     isOnGround = true;
                     isOnSlope = !isWalkableSlope(tracer.mPlaneNormal);
-                    actor.mStandingOn = tracer.mHitObject;
+                    if (!actor.mFlying)
+                        actor.mStandingOn = tracer.mHitObject;
 
-                    if (actor.mStandingOn->getBroadphaseHandle()->m_collisionFilterGroup == CollisionType_Water)
+                    if (tracer.mHitObject->getBroadphaseHandle()->m_collisionFilterGroup == CollisionType_Water)
                         actor.mWalkingOnWater = true;
                     if (!actor.mFlying && !isOnSlope)
                     {
@@ -429,15 +431,17 @@ namespace MWPhysics
             actor.mInertia = osg::Vec3f(0.f, 0.f, 0.f);
         else
         {
-            actor.mInertia.z() -= time * Constants::GravityConst * Constants::UnitsPerMeter;
+            actor.mInertia.z() -= time * Constants::GravityUnits;
             if (actor.mInertia.z() < 0)
                 actor.mInertia.z() *= actor.mSlowFall;
+            actor.mInertia.z() = std::max(actor.mInertia.z(), Constants::MaxFallSpeed);
             if (actor.mSlowFall < 1.f)
             {
                 actor.mInertia.x() *= actor.mSlowFall;
                 actor.mInertia.y() *= actor.mSlowFall;
             }
         }
+
         actor.mIsOnGround = isOnGround;
         actor.mIsOnSlope = isOnSlope;
 

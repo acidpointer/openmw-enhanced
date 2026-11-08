@@ -56,7 +56,7 @@ void ESM4::Static::load(ESM4::Reader& reader)
             case ESM::fourCC("MODT"):
             {
                 // version is only availabe in TES5 (seems to be 27 or 28?)
-                // if (reader.esmVersion() == ESM::VER_094 || reader.esmVersion() == ESM::VER_170)
+                // if (format == ESM::GameFormat::TES5)
                 // std::cout << "STAT MODT ver: " << std::hex << reader.hdr().record.version << std::endl;
 
                 // for TES4 these are just a sequence of bytes
@@ -89,8 +89,8 @@ void ESM4::Static::load(ESM4::Reader& reader)
             case ESM::fourCC("MODF"): // Model data end
             case ESM::fourCC("OBND"):
             case ESM::fourCC("DNAM"):
-            case ESM::fourCC("BRUS"): // FONV
-            case ESM::fourCC("RNAM"): // FONV
+            case ESM::fourCC("BRUS"): // FNV
+            case ESM::fourCC("RNAM"): // FNV
             case ESM::fourCC("FTYP"): // FO4
             case ESM::fourCC("NVNM"): // FO4
             case ESM::fourCC("PRPS"): // FO4

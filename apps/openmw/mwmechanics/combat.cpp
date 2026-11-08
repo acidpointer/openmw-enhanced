@@ -222,7 +222,7 @@ namespace MWMechanics
     }
 
     void projectileHit(const MWWorld::Ptr& attacker, const MWWorld::Ptr& victim, MWWorld::Ptr weapon,
-        const MWWorld::Ptr& projectile, const osg::Vec3f& hitPosition, float attackStrength)
+        const MWWorld::Ptr& projectile, const osg::Vec3f& hitPosition, float attackStrength, float attackWindUp)
     {
         MWBase::World* world = MWBase::Environment::get().getWorld();
         const MWWorld::Store<ESM::GameSetting>& gmst = world->getStore().get<ESM::GameSetting>();
@@ -244,7 +244,8 @@ namespace MWMechanics
             if (Misc::Rng::roll0to99(world->getPrng()) >= getHitChance(attacker, victim, skillValue))
             {
                 MWBase::Environment::get().getLuaManager()->onHit(attacker, victim, weapon, projectile, 0,
-                    attackStrength, damage, false, hitPosition, false, MWMechanics::DamageSourceType::Ranged);
+                    attackStrength, attackWindUp, damage, false, hitPosition, false,
+                    MWMechanics::DamageSourceType::Ranged);
                 MWMechanics::reduceWeaponCondition(damage, false, weapon, attacker);
                 return;
             }
@@ -293,17 +294,22 @@ namespace MWMechanics
 
         if (validVictim)
         {
+            applyElementalShields(attacker, victim);
             // Non-enchanted arrows shot at enemies have a chance to turn up in their inventory
             if (victim != getPlayer() && !appliedEnchantment)
             {
                 static const float fProjectileThrownStoreChance
                     = gmst.find("fProjectileThrownStoreChance")->mValue.getFloat();
                 if (Misc::Rng::rollProbability(world->getPrng()) < fProjectileThrownStoreChance / 100.f)
-                    victim.getClass().getContainerStore(victim).add(projectile, 1);
+                {
+                    // On point-blank hits the projectile is the attacker's live ammo stack -
+                    // adding it directly would duplicate its RefNum into the victim's inventory
+                    victim.getClass().getContainerStore(victim).add(projectile.getCellRef().getRefId(), 1);
+                }
             }
 
             MWBase::Environment::get().getLuaManager()->onHit(attacker, victim, weapon, projectile, 0, attackStrength,
-                damage, true, hitPosition, true, MWMechanics::DamageSourceType::Ranged);
+                attackWindUp, damage, true, hitPosition, true, MWMechanics::DamageSourceType::Ranged);
         }
     }
 

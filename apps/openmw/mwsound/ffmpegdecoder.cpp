@@ -1,6 +1,7 @@
 #include "ffmpegdecoder.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -15,6 +16,8 @@
 #include <libavutil/channel_layout.h>
 #endif
 
+#include "headcache.hpp"
+
 namespace MWSound
 {
     void AVIOContextDeleter::operator()(AVIOContext* ptr) const
@@ -22,11 +25,7 @@ namespace MWSound
         if (ptr->buffer != nullptr)
             av_freep(&ptr->buffer);
 
-#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(57, 80, 100)
         avio_context_free(&ptr);
-#else
-        av_free(ptr);
-#endif
     }
 
     void AVFormatContextDeleter::operator()(AVFormatContext* ptr) const
@@ -48,14 +47,19 @@ namespace MWSound
     {
         try
         {
-            std::istream& stream = *static_cast<FFmpegDecoder*>(userData)->mDataStream;
+            FFmpegDecoder& self = *static_cast<FFmpegDecoder*>(userData);
+            std::istream& stream = *self.mDataStream;
             stream.clear();
+            const std::streamoff pos = stream.tellg();
             stream.read((char*)buf, bufSize);
             std::streamsize count = stream.gcount();
             if (count == 0)
                 return AVERROR_EOF;
             if (count > std::numeric_limits<int>::max())
                 return AVERROR_BUG;
+            for (const auto& [offset, value] : self.mPatchedBytes)
+                if (offset >= pos && offset < pos + count)
+                    buf[offset - pos] = static_cast<uint8_t>(value);
             return static_cast<int>(count);
         }
         catch (std::exception&)
@@ -76,7 +80,8 @@ namespace MWSound
 
     int64_t FFmpegDecoder::seek(void* userData, int64_t offset, int whence)
     {
-        std::istream& stream = *static_cast<FFmpegDecoder*>(userData)->mDataStream;
+        FFmpegDecoder& self = *static_cast<FFmpegDecoder*>(userData);
+        std::istream& stream = *self.mDataStream;
 
         whence &= ~AVSEEK_FORCE;
 
@@ -88,11 +93,11 @@ namespace MWSound
             stream.seekg(0, std::ios_base::end);
             size_t size = stream.tellg();
             stream.seekg(prev, std::ios_base::beg);
-            return size;
+            return size - self.mStreamBase;
         }
 
         if (whence == SEEK_SET)
-            stream.seekg(offset, std::ios_base::beg);
+            stream.seekg(offset + self.mStreamBase, std::ios_base::beg);
         else if (whence == SEEK_CUR)
             stream.seekg(offset, std::ios_base::cur);
         else if (whence == SEEK_END)
@@ -100,7 +105,7 @@ namespace MWSound
         else
             return -1;
 
-        return stream.tellg();
+        return std::streamoff(stream.tellg()) - self.mStreamBase;
     }
 
     /* Used by getAV*Data to search for more compressed data, and buffer it in the
@@ -227,42 +232,214 @@ namespace MWSound
         return dec;
     }
 
-    void FFmpegDecoder::open(VFS::Path::NormalizedView fname)
+    namespace
     {
-        close();
-        mDataStream = mResourceMgr->get(fname);
+        AVStream** findAudioStream(AVFormatContext& ctx)
+        {
+            for (unsigned j = 0; j < ctx.nb_streams; j++)
+                if (ctx.streams[j]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+                    return &ctx.streams[j];
+            return nullptr;
+        }
 
-        AVIOContextPtr ioCtx(avio_alloc_context(nullptr, 0, 0, this, readPacket, writePacket, seek));
+        bool hasCompleteAudioParameters(const AVStream& stream)
+        {
+            const AVCodecParameters& par = *stream.codecpar;
+#if OPENMW_FFMPEG_5_OR_GREATER
+            const int channels = par.ch_layout.nb_channels;
+#else
+            const int channels = par.channels;
+#endif
+            return par.codec_id != AV_CODEC_ID_NONE && par.sample_rate > 0 && channels > 0;
+        }
+
+        const AVInputFormat* guessFormat(VFS::Path::NormalizedView fname)
+        {
+            const auto ext = fname.extension();
+            if (ext == "wav")
+                return av_find_input_format("wav");
+            if (ext == "mp3")
+                return av_find_input_format("mp3");
+            if (ext == "ogg" || ext == "opus")
+                return av_find_input_format("ogg");
+            if (ext == "flac")
+                return av_find_input_format("flac");
+            return nullptr;
+        }
+    }
+
+    bool hasAudioExtension(VFS::Path::NormalizedView fname)
+    {
+        const auto ext = fname.extension();
+        return ext == "mp3" || ext == "ogg" || ext == "wav" || ext == "flac" || ext == "opus";
+    }
+
+    bool FFmpegDecoder::openContext(const char* name, const AVInputFormat* fmt, bool limitProbe, AVIOContextPtr& ioCtx,
+        AVFormatContextPtr& formatCtx, AVStream**& stream)
+    {
+        // A real IO buffer is required: with a named input format the demuxer
+        // reads through it directly, and a zero-size buffer fails the open
+        // (the probed path tolerates it, which hid this).
+        constexpr int ioBufferSize = 8192;
+        unsigned char* ioBuffer = static_cast<unsigned char*>(av_malloc(ioBufferSize));
+        if (ioBuffer == nullptr)
+            throw std::runtime_error("Failed to allocate AVIO buffer");
+        ioCtx.reset(avio_alloc_context(ioBuffer, ioBufferSize, 0, this, readPacket, writePacket, seek));
         if (ioCtx == nullptr)
+        {
+            av_freep(&ioBuffer);
             throw std::runtime_error("Failed to allocate AVIO context");
+        }
 
-        AVFormatContext* formatCtx = avformat_alloc_context();
-        if (formatCtx == nullptr)
+        AVFormatContext* ctx = avformat_alloc_context();
+        if (ctx == nullptr)
             throw std::runtime_error("Failed to allocate context");
 
-        formatCtx->pb = ioCtx.get();
-
-        // avformat_open_input frees user supplied AVFormatContext on failure
-        if (avformat_open_input(&formatCtx, fname.value().data(), nullptr, nullptr) != 0)
-            throw std::runtime_error("Failed to open input");
-
-        AVFormatContextPtr formatCtxPtr(std::exchange(formatCtx, nullptr));
-
-        if (avformat_find_stream_info(formatCtxPtr.get(), nullptr) < 0)
-            throw std::runtime_error("Failed to find stream info");
-
-        AVStream** stream = nullptr;
-        for (size_t j = 0; j < formatCtxPtr->nb_streams; j++)
+        ctx->pb = ioCtx.get();
+        if (limitProbe)
         {
-            if (formatCtxPtr->streams[j]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+            ctx->probesize = 65536;
+            // Microseconds of media; must cover a few frames so formats that
+            // fill parameters from a decoded frame (mp3) complete under the cap.
+            ctx->max_analyze_duration = 200000;
+        }
+
+        // avformat_open_input frees the user supplied AVFormatContext on failure
+#if OPENMW_FFMPEG_CONST_INPUTFORMAT
+        if (avformat_open_input(&ctx, name, fmt, nullptr) != 0)
+#else
+        // FFmpeg 4 returns non-const input formats.
+        if (avformat_open_input(&ctx, name, const_cast<AVInputFormat*>(fmt), nullptr) != 0)
+#endif
+            return false;
+
+        formatCtx.reset(std::exchange(ctx, nullptr));
+
+        stream = findAudioStream(*formatCtx);
+
+        // The demuxers for Morrowind's formats fill the codec parameters from the
+        // file header during avformat_open_input, so skip avformat_find_stream_info:
+        // it scans packets across the whole file for duration and bitrate estimates
+        // that nothing here reads, costing several milliseconds per wav on the
+        // thread that starts the sound (#4880).
+        if (stream == nullptr || !hasCompleteAudioParameters(**stream))
+        {
+            if (avformat_find_stream_info(formatCtx.get(), nullptr) < 0)
+                return false;
+            stream = findAudioStream(*formatCtx);
+        }
+
+        return stream != nullptr;
+    }
+
+    void FFmpegDecoder::applyArtShims()
+    {
+        mStreamBase = 0;
+        mPatchedBytes.clear();
+
+        std::istream& stream = *mDataStream;
+        stream.seekg(0, std::ios_base::end);
+        const std::streamoff fileSize = stream.tellg();
+        stream.seekg(0);
+
+        unsigned char header[10];
+        stream.read(reinterpret_cast<char*>(header), sizeof(header));
+        if (stream.gcount() == sizeof(header))
+        {
+            if (std::memcmp(header, "ID3", 3) == 0)
             {
-                stream = &formatCtxPtr->streams[j];
-                break;
+                // 10-byte header with a syncsafe 28-bit tag size, identical in
+                // 2.2, 2.3 and 2.4; the version only matters inside the tag,
+                // which is skipped whole. A footer adds another 10 bytes, and
+                // its flag bit is 2.4's alone: 2.2 and 2.3 leave that bit
+                // undefined. Starting the window past the tag means the
+                // demuxer never reads it (cover art included).
+                const std::streamoff tagSize = (std::streamoff(header[6] & 0x7f) << 21)
+                    | (std::streamoff(header[7] & 0x7f) << 14) | (std::streamoff(header[8] & 0x7f) << 7)
+                    | std::streamoff(header[9] & 0x7f);
+                const bool hasFooter = header[3] >= 4 && (header[5] & 0x10) != 0;
+                const std::streamoff base = 10 + tagSize + (hasFooter ? 10 : 0);
+                if (base < fileSize)
+                    mStreamBase = base;
+            }
+            else if (std::memcmp(header, "fLaC", 4) == 0)
+            {
+                // Metadata blocks: 4-byte headers (is-last bit, 7-bit type,
+                // 24-bit length), no checksum over them. Serving PICTURE
+                // headers with the type relabelled to PADDING makes the
+                // demuxer seek over the art instead of reading it. Only the
+                // served bytes change; the file is never written.
+                constexpr unsigned char picture = 6;
+                constexpr unsigned char padding = 1;
+                std::streamoff pos = 4;
+                stream.seekg(pos);
+                unsigned char block[4];
+                while (pos < fileSize)
+                {
+                    stream.read(reinterpret_cast<char*>(block), sizeof(block));
+                    if (stream.gcount() != sizeof(block))
+                        break;
+                    if ((block[0] & 0x7f) == picture)
+                        mPatchedBytes.emplace_back(pos, static_cast<char>((block[0] & 0x80) | padding));
+                    if (block[0] & 0x80)
+                        break;
+                    pos += 4
+                        + ((std::streamoff(block[1]) << 16) | (std::streamoff(block[2]) << 8)
+                            | std::streamoff(block[3]));
+                    stream.seekg(pos);
+                }
             }
         }
 
-        if (stream == nullptr)
-            throw std::runtime_error("No audio streams");
+        stream.clear();
+        stream.seekg(mStreamBase);
+    }
+
+    void FFmpegDecoder::open(VFS::Path::NormalizedView fname)
+    {
+        close();
+        std::shared_ptr<const HeadBuffer> buffer;
+        if (mHeadCache != nullptr)
+            buffer = mHeadCache->lookup(fname);
+
+        const bool record = mHeadCache != nullptr && buffer == nullptr && mRecordHead;
+        if (buffer != nullptr)
+            mDataStream = makeHeadStream(std::move(buffer), *mResourceMgr);
+        else if (record)
+            mDataStream = makeRecordingStream(mResourceMgr->get(fname));
+        else
+            mDataStream = mResourceMgr->get(fname);
+        applyArtShims();
+
+        AVIOContextPtr ioCtx;
+        AVFormatContextPtr formatCtxPtr;
+        AVStream** stream = nullptr;
+
+        // Naming the demuxer from the extension lets avformat_open_input skip
+        // content probing, and the probe caps bound the scan for formats whose
+        // header leaves parameters incomplete (mp3 gets sample rate and channel
+        // count from the first decoded frame). Mislabelled files fail this
+        // attempt and take the probed path below.
+        bool opened = false;
+        if (const AVInputFormat* fmt = guessFormat(fname))
+        {
+            // Lenient demuxers (mp3) can accept mislabelled data and produce a
+            // stream with empty parameters; that counts as a failed attempt too.
+            opened = openContext(fname.value().data(), fmt, true, ioCtx, formatCtxPtr, stream)
+                && hasCompleteAudioParameters(**stream);
+            if (!opened)
+            {
+                mDataStream->clear();
+                mDataStream->seekg(mStreamBase);
+            }
+        }
+
+        if (!opened && !openContext(fname.value().data(), nullptr, false, ioCtx, formatCtxPtr, stream))
+            throw std::runtime_error("Failed to open input");
+
+        // Opening is done, so the bytes it read are exactly the prefix the next open of this file needs.
+        if (record)
+            mHeadCache->insert(fname, *mDataStream);
 
         const AVCodec* codec = avcodec_find_decoder((*stream)->codecpar->codec_id);
         if (codec == nullptr)
@@ -273,11 +450,6 @@ namespace MWSound
             throw std::runtime_error("Failed to allocate codec context");
 
         avcodec_parameters_to_context(codecCtx, (*stream)->codecpar);
-
-// This is not needed anymore above FFMpeg version 4.0
-#if LIBAVCODEC_VERSION_INT < 3805796
-        av_codec_set_pkt_timebase(avctx, (*stream)->time_base);
-#endif
 
         AVCodecContextPtr codecCtxPtr(std::exchange(codecCtx, nullptr));
 
@@ -330,16 +502,13 @@ namespace MWSound
         mFormatCtx.reset();
         mIoCtx.reset();
         mDataStream.reset();
+        mStreamBase = 0;
+        mPatchedBytes.clear();
     }
 
     std::string FFmpegDecoder::getName()
     {
-// In the FFMpeg 4.0 a "filename" field was replaced by "url"
-#if LIBAVCODEC_VERSION_INT < 3805796
-        return mFormatCtx->filename;
-#else
         return mFormatCtx->url;
-#endif
     }
 
     void FFmpegDecoder::getInfo(int* samplerate, ChannelConfig* chans, SampleType* type)
@@ -501,7 +670,7 @@ namespace MWSound
         return static_cast<std::size_t>(mNextPts * mCodecCtx->sample_rate) - delay;
     }
 
-    FFmpegDecoder::FFmpegDecoder(const VFS::Manager* vfs)
+    FFmpegDecoder::FFmpegDecoder(const VFS::Manager* vfs, HeadCache* headCache, bool recordHead)
         : SoundDecoder(vfs)
         , mStream(nullptr)
         , mFrameSize(0)
@@ -517,16 +686,14 @@ namespace MWSound
         , mDataBuf(nullptr)
         , mFrameData(nullptr)
         , mDataBufLen(0)
+        , mHeadCache(headCache)
+        , mRecordHead(recordHead)
     {
         memset(&mPacket, 0, sizeof(mPacket));
 
         /* We need to make sure ffmpeg is initialized. Optionally silence warning
          * output from the lib */
         [[maybe_unused]] static const bool doneInit = [] {
-// This is not needed anymore above FFMpeg version 4.0
-#if LIBAVCODEC_VERSION_INT < 3805796
-            av_register_all();
-#endif
             av_log_set_level(AV_LOG_ERROR);
             return true;
         }();

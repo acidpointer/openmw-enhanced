@@ -77,6 +77,8 @@ namespace MWLua
         selfAPI["controls"] = sol::readonly_property([](SelfObject& self) { return &self.mControls; });
         selfAPI["isActive"] = [](SelfObject& self) -> bool { return self.mIsActive; };
         selfAPI["enableAI"] = [](SelfObject& self, bool v) { self.mControls.mDisableAI = !v; };
+        selfAPI["saveState"]
+            = sol::readonly_property([](const SelfObject& self) { return self.ptr().getRefData().hasChanged(); });
         selfAPI["ATTACK_TYPE"]
             = LuaUtil::makeStrictReadOnly(LuaUtil::tableFromPairs<std::string_view, MWMechanics::AttackType>(lua,
                 { { "NoAttack", MWMechanics::AttackType::NoAttack }, { "Any", MWMechanics::AttackType::Any },
@@ -167,14 +169,22 @@ namespace MWLua
             MWMechanics::AiSequence& ai = ptr.getClass().getCreatureStats(ptr).getAiSequence();
 
             ai.erasePackagesIf([&](auto& entry) {
-                bool keep = LuaUtil::call(callback, entry).template get<bool>();
+                auto result = LuaUtil::call(callback, entry);
+                if (result.get_type() == sol::type::nil || result.return_count() == 0)
+                    return false;
+
+                bool keep = result.template get<bool>();
                 return !keep;
             });
         };
         selfAPI["_startAiCombat"] = [](SelfObject& self, const LObject& target, bool cancelOther) {
+            const MWWorld::Ptr& targetPtr = target.ptr();
+            if (!targetPtr.getClass().isActor())
+                throw std::runtime_error("Combat target must be an actor");
+
             const MWWorld::Ptr& ptr = self.ptr();
             MWMechanics::AiSequence& ai = ptr.getClass().getCreatureStats(ptr).getAiSequence();
-            ai.stack(MWMechanics::AiCombat(target.ptr()), ptr, cancelOther);
+            ai.stack(MWMechanics::AiCombat(targetPtr), ptr, cancelOther);
         };
         selfAPI["_startAiPursue"] = [](SelfObject& self, const LObject& target, bool cancelOther) {
             const MWWorld::Ptr& ptr = self.ptr();

@@ -1,5 +1,6 @@
 #include "nifloader.hpp"
 
+#include <algorithm>
 #include <mutex>
 #include <string_view>
 
@@ -9,7 +10,6 @@
 #include <osg/Matrixf>
 #include <osg/Sequence>
 #include <osg/Switch>
-#include <osg/TexMat>
 #include <osg/ValueObject>
 
 #include <yaml-cpp/yaml.h>
@@ -30,13 +30,13 @@
 #include <osgParticle/BoxPlacer>
 #include <osgParticle/ConstantRateCounter>
 #include <osgParticle/ModularProgram>
+#include <osgParticle/Operator>
 #include <osgParticle/ParticleSystem>
 #include <osgParticle/ParticleSystemUpdater>
 
 #include <osg/AlphaFunc>
 #include <osg/BlendFunc>
 #include <osg/FrontFace>
-#include <osg/Material>
 #include <osg/PolygonMode>
 #include <osg/PolygonOffset>
 #include <osg/Stencil>
@@ -53,12 +53,17 @@
 #include <components/nif/texture.hpp>
 #include <components/sceneutil/depth.hpp>
 #include <components/sceneutil/extradata.hpp>
+#include <components/sceneutil/fog.hpp>
+#include <components/sceneutil/material.hpp>
 #include <components/sceneutil/morphgeometry.hpp>
 #include <components/sceneutil/riggeometry.hpp>
 #include <components/sceneutil/skeleton.hpp>
+#include <components/sceneutil/texmat.hpp>
 #include <components/sceneutil/texturetype.hpp>
+#include <components/sceneutil/userdata.hpp>
+#include <components/sceneutil/visitor.hpp>
 
-#include "fog.hpp"
+#include "autotransform.hpp"
 #include "matrixtransform.hpp"
 #include "particle.hpp"
 
@@ -78,6 +83,70 @@ namespace
         }
 
         void apply(osg::Drawable& node) override { traverse(node); }
+    };
+
+    struct RemoveLodOverlapVisitor : public osg::NodeVisitor
+    {
+        RemoveLodOverlapVisitor()
+            : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+        {
+        }
+
+        void apply(osg::LOD& lod) override
+        {
+            traverse(lod);
+
+            // NiLODNode only uses the last child with a compatible range, osg::LOD uses all of them
+            // We must remove overlaps
+            std::vector<std::vector<Nif::NiLODNode::LODRange>> ranges;
+            for (unsigned int i = 0; i < lod.getNumRanges(); ++i)
+            {
+                Nif::NiLODNode::LODRange newRange{ lod.getMinRange(i), lod.getMaxRange(i) };
+                for (std::vector<Nif::NiLODNode::LODRange>& rangeVec : ranges)
+                {
+                    std::vector<Nif::NiLODNode::LODRange> newRangeVec;
+                    newRangeVec.reserve(rangeVec.size());
+
+                    for (const Nif::NiLODNode::LODRange& existing : rangeVec)
+                    {
+                        if (existing.mMinRange >= newRange.mMinRange && existing.mMaxRange <= newRange.mMaxRange)
+                            continue;
+
+                        if (existing.mMinRange >= newRange.mMinRange && existing.mMinRange < newRange.mMaxRange)
+                            newRangeVec.push_back({ newRange.mMaxRange, existing.mMaxRange });
+                        else if (existing.mMaxRange > newRange.mMinRange && existing.mMaxRange <= newRange.mMaxRange)
+                            newRangeVec.push_back({ existing.mMinRange, newRange.mMinRange });
+                        else if (existing.mMinRange < newRange.mMinRange && existing.mMaxRange > newRange.mMaxRange)
+                        {
+                            newRangeVec.push_back({ existing.mMinRange, newRange.mMinRange });
+                            newRangeVec.push_back({ newRange.mMaxRange, existing.mMaxRange });
+                        }
+                        else
+                            newRangeVec.push_back(existing);
+                    }
+                    rangeVec = std::move(newRangeVec);
+                }
+                ranges.push_back({ newRange });
+            }
+
+            std::vector<osg::ref_ptr<osg::Node>> originalChildren;
+            originalChildren.reserve(lod.getNumChildren());
+            for (unsigned int i = 0; i < lod.getNumChildren(); ++i)
+                originalChildren.push_back(lod.getChild(i));
+
+            lod.removeChildren(0, lod.getNumChildren());
+
+            unsigned int originalChildIndex = 0;
+            for (const auto& rangeVec : ranges)
+            {
+                for (const auto& range : rangeVec)
+                {
+                    if (range.mMinRange < range.mMaxRange && originalChildIndex < originalChildren.size())
+                        lod.addChild(originalChildren[originalChildIndex], range.mMinRange, range.mMaxRange);
+                }
+                originalChildIndex++;
+            }
+        }
     };
 
     void getAllNiNodes(const Nif::NiAVObject* node, std::vector<int>& outIndices)
@@ -144,44 +213,6 @@ namespace
         }
     }
 
-    // NodeCallback used to have a node always oriented towards the camera. The node can have translation and scale
-    // set just like a regular MatrixTransform, but the rotation set will be overridden in order to face the camera.
-    class BillboardCallback : public SceneUtil::NodeCallback<BillboardCallback, osg::Node*, osgUtil::CullVisitor*>
-    {
-    public:
-        BillboardCallback() {}
-        BillboardCallback(const BillboardCallback& copy, const osg::CopyOp& copyop)
-            : SceneUtil::NodeCallback<BillboardCallback, osg::Node*, osgUtil::CullVisitor*>(copy, copyop)
-        {
-        }
-
-        META_Object(NifOsg, BillboardCallback)
-
-        void operator()(osg::Node* node, osgUtil::CullVisitor* cv)
-        {
-            osg::Matrix modelView = *cv->getModelViewMatrix();
-
-            // attempt to preserve scale
-            double mag[3];
-            for (int i = 0; i < 3; ++i)
-            {
-                mag[i] = std::sqrt(modelView(0, i) * modelView(0, i) + modelView(1, i) * modelView(1, i)
-                    + modelView(2, i) * modelView(2, i));
-            }
-
-            modelView.setRotate(osg::Quat());
-            modelView(0, 0) = mag[0];
-            modelView(1, 1) = mag[1];
-            modelView(2, 2) = mag[2];
-
-            cv->pushModelViewMatrix(new osg::RefMatrix(modelView), osg::Transform::RELATIVE_RF);
-
-            traverse(node, cv);
-
-            cv->popModelViewMatrix();
-        }
-    };
-
     void extractTextKeys(const Nif::NiTextKeyExtraData* tk, SceneUtil::TextKeyMap& textkeys)
     {
         for (const Nif::NiTextKeyExtraData::TextKey& key : tk->mList)
@@ -223,6 +254,15 @@ namespace
                 SceneUtil::setupDistortion(*node, config);
             }
         }
+    }
+
+    // A program skips its first cull traversal, having no previous time to take a dt from. Age-only affectors need no
+    // dt, so run them here. Their beginOperate must not need a node path, as there is no traversal yet.
+    void applyToSavedParticles(osgParticle::ModularProgram& program, osgParticle::Operator& affector)
+    {
+        affector.beginOperate(&program);
+        affector.operateParticles(program.getParticleSystem(), 0.0);
+        affector.endOperate();
     }
 }
 
@@ -303,6 +343,9 @@ namespace NifOsg
 
         // This is used to queue emitters that weren't attached to their node yet.
         std::vector<std::pair<unsigned int, osg::ref_ptr<Emitter>>> mEmitterQueue;
+
+        // This is used to queue look-at controllers whose target nodes may not have been created yet.
+        mutable std::vector<std::pair<unsigned int, osg::ref_ptr<LookAtController>>> mLookAtQueue;
 
         void loadKf(Nif::FileView nif, SceneUtil::KeyframeHolder& target) const
         {
@@ -412,14 +455,14 @@ namespace NifOsg
             if (roots.empty())
                 throw Nif::Exception("Found no root nodes", nif.getFilename());
 
-            osg::ref_ptr<SceneUtil::TextKeyMapHolder> textkeys(new SceneUtil::TextKeyMapHolder);
+            SceneUtil::TextKeyMap textkeys;
 
             osg::ref_ptr<osg::Group> created(new osg::Group);
             created->setDataVariance(osg::Object::STATIC);
             for (const Nif::NiAVObject* root : roots)
             {
-                auto node = handleNode(
-                    root, nullptr, nullptr, { .mNifVersion = nif.getVersion(), .mTextKeys = &textkeys->mTextKeys });
+                auto node
+                    = handleNode(root, nullptr, nullptr, { .mNifVersion = nif.getVersion(), .mTextKeys = &textkeys });
                 created->addChild(node);
             }
             if (mHasNightDayLabel)
@@ -429,6 +472,12 @@ namespace NifOsg
 
             // Attach particle emitters to their nodes which should all be loaded by now.
             handleQueuedParticleEmitters(created, nif);
+
+            // Resolve look-at controller targets now that all nodes are loaded.
+            handleQueuedLookAtControllers(created, nif);
+
+            RemoveLodOverlapVisitor removeLodOverlaps;
+            created->accept(removeLodOverlaps);
 
             if (nif.getUseSkinning())
             {
@@ -442,8 +491,8 @@ namespace NifOsg
                 created = skel;
             }
 
-            if (!textkeys->mTextKeys.empty())
-                created->getOrCreateUserDataContainer()->addUserObject(textkeys);
+            if (!textkeys.empty())
+                SceneUtil::addUserData(*created, std::move(textkeys));
 
             created->setUserValue(Misc::OsgUserValues::sFileHash, nif.getHash());
 
@@ -628,27 +677,39 @@ namespace NifOsg
         static osg::ref_ptr<osg::Group> createNode(const Nif::NiAVObject* nifNode)
         {
             osg::ref_ptr<osg::Group> node;
-            osg::Object::DataVariance dataVariance = osg::Object::UNSPECIFIED;
 
-            switch (nifNode->mRecordType)
+            osg::Object::DataVariance dataVariance = nifNode->mIsBone ? osg::Object::DYNAMIC : osg::Object::STATIC;
+
+            if (nifNode->mRecordType == Nif::RC_NiBillboardNode)
             {
-                case Nif::RC_NiBillboardNode:
-                    dataVariance = osg::Object::DYNAMIC;
-                    break;
-                default:
-                    // The Root node can be created as a Group if no transformation is required.
-                    // This takes advantage of the fact root nodes can't have additional controllers
-                    // loaded from an external .kf file (original engine just throws "can't find node" errors if you
-                    // try).
-                    if (nifNode->mParents.empty() && nifNode->mController.empty() && nifNode->mTransform.isIdentity())
-                        node = new osg::Group;
+                auto billboard = static_cast<const Nif::NiBillboardNode*>(nifNode);
+                using Mode = Nif::NiBillboardNode::BillboardMode;
 
-                    dataVariance = nifNode->mIsBone ? osg::Object::DYNAMIC : osg::Object::STATIC;
+                if (billboard->mMode == Mode::AlwaysFaceCamera)
+                    node = new NifOsg::AutoTransform(billboard->mTransform, AutoTransform::Mode::AlwaysFaceCamera);
+                else if (billboard->mMode == Mode::RotateAboutUp || billboard->mMode == Mode::BSRotateAboutUp)
+                    node = new NifOsg::AutoTransform(billboard->mTransform, AutoTransform::Mode::RotateAboutUp);
+                else if (billboard->mMode == Mode::RigidFaceCamera)
+                    node = new NifOsg::AutoTransform(billboard->mTransform, AutoTransform::Mode::RigidFaceCamera);
+                else
+                {
+                    Log(Debug::Warning) << "Unhandled billboard mode " << static_cast<int>(billboard->mMode)
+                                        << " in record " << nifNode->mRecordIndex;
+                    node = new NifOsg::AutoTransform(billboard->mTransform);
+                }
 
-                    break;
+                dataVariance = osg::Object::DYNAMIC;
             }
-            if (!node)
-                node = new NifOsg::MatrixTransform(nifNode->mTransform);
+            else
+            {
+                // The Root node can be created as a Group if no transformation is required.
+                // This takes advantage of the fact root nodes can't have additional controllers
+                // loaded from an external .kf file (original engine just throws "can't find node" errors if you try).
+                if (nifNode->mParents.empty() && nifNode->mController.empty() && nifNode->mTransform.isIdentity())
+                    node = new osg::Group;
+                else
+                    node = new NifOsg::MatrixTransform(nifNode->mTransform);
+            }
 
             node->setDataVariance(dataVariance);
 
@@ -662,11 +723,6 @@ namespace NifOsg
                 return nullptr;
 
             osg::ref_ptr<osg::Group> node = createNode(nifNode);
-
-            if (nifNode->mRecordType == Nif::RC_NiBillboardNode)
-            {
-                node->addCullCallback(new BillboardCallback);
-            }
 
             node->setName(nifNode->mName);
 
@@ -1011,6 +1067,19 @@ namespace NifOsg
                     node->addUpdateCallback(callback);
                     isAnimated = true;
                 }
+                else if (ctrl->mRecordType == Nif::RC_NiLookAtController)
+                {
+                    const auto lookatctrl = static_cast<const Nif::NiLookAtController*>(ctrl.getPtr());
+                    if (lookatctrl->mLookAt.empty())
+                        continue;
+
+                    osg::ref_ptr<LookAtController> callback(new LookAtController(*lookatctrl));
+                    setupController(lookatctrl, callback, animflags);
+                    node->addUpdateCallback(callback);
+                    isAnimated = true;
+
+                    mLookAtQueue.emplace_back(lookatctrl->mLookAt->mRecordIndex, callback);
+                }
                 else if (ctrl->mRecordType == Nif::RC_NiGeomMorpherController
                     || ctrl->mRecordType == Nif::RC_NiParticleSystemController
                     || ctrl->mRecordType == Nif::RC_NiBSPArrayController || ctrl->mRecordType == Nif::RC_NiUVController)
@@ -1024,7 +1093,7 @@ namespace NifOsg
         }
 
         void handleMaterialControllers(const Nif::NiProperty* materialProperty,
-            SceneUtil::CompositeStateSetUpdater* composite, int animflags, const osg::Material* baseMaterial) const
+            SceneUtil::CompositeStateSetUpdater* composite, int animflags, SceneUtil::Material* baseMaterial) const
         {
             for (Nif::NiTimeControllerPtr ctrl = materialProperty->mController; !ctrl.empty(); ctrl = ctrl->mNext)
             {
@@ -1043,7 +1112,11 @@ namespace NifOsg
                             << " in " << mFilename << ": " << alphactrl->mInterpolator->mRecordName;
                         continue;
                     }
-                    osg::ref_ptr<AlphaController> osgctrl = new AlphaController(alphactrl, baseMaterial);
+                    // AlphaControllers hand off opacity control via dedicated uniforms, not through overriding diffuse
+                    osg::Vec4f opaqueDiffuse = baseMaterial->getDiffuse();
+                    opaqueDiffuse.a() = 1.f;
+                    baseMaterial->setDiffuse(opaqueDiffuse);
+                    osg::ref_ptr<AlphaController> osgctrl = new AlphaController(alphactrl);
                     setupController(alphactrl, osgctrl, animflags);
                     composite->addController(osgctrl);
                 }
@@ -1093,10 +1166,10 @@ namespace NifOsg
             auto texUnit = static_cast<unsigned int>(boundTextures.size());
             if (stateset)
             {
-                stateset->setTextureAttributeAndModes(texUnit, texture2d, osg::StateAttribute::ON);
+                stateset->setTextureAttribute(texUnit, texture2d, osg::StateAttribute::ON);
                 osg::ref_ptr<SceneUtil::TextureType> textureType = new SceneUtil::TextureType(name);
                 textureType = shareAttribute(textureType);
-                stateset->setTextureAttributeAndModes(texUnit, textureType, osg::StateAttribute::ON);
+                stateset->setTextureAttribute(texUnit, textureType, osg::StateAttribute::ON);
             }
             boundTextures.emplace_back(uvSet);
             return texture2d;
@@ -1120,8 +1193,6 @@ namespace NifOsg
         {
             if (!boundTextures.empty())
             {
-                for (unsigned int i = 0; i < boundTextures.size(); ++i)
-                    stateset->setTextureMode(i, GL_TEXTURE_2D, osg::StateAttribute::OFF);
                 boundTextures.clear();
             }
         }
@@ -1191,7 +1262,9 @@ namespace NifOsg
                 if (modifier->mRecordType == Nif::RC_NiParticleGrowFade)
                 {
                     const Nif::NiParticleGrowFade* gf = static_cast<const Nif::NiParticleGrowFade*>(modifier.getPtr());
-                    program->addOperator(new GrowFadeAffector(gf->mGrowTime, gf->mFadeTime));
+                    osg::ref_ptr<GrowFadeAffector> affector = new GrowFadeAffector(gf->mGrowTime, gf->mFadeTime);
+                    program->addOperator(affector);
+                    applyToSavedParticles(*program, *affector);
                 }
                 else if (modifier->mRecordType == Nif::RC_NiGravity)
                 {
@@ -1217,7 +1290,9 @@ namespace NifOsg
                     if (cl->mData.empty())
                         continue;
                     const Nif::NiColorData* clrdata = cl->mData.getPtr();
-                    program->addOperator(new ParticleColorAffector(clrdata));
+                    osg::ref_ptr<ParticleColorAffector> affector = new ParticleColorAffector(clrdata);
+                    program->addOperator(affector);
+                    applyToSavedParticles(*program, *affector);
                 }
                 else if (modifier->mRecordType == Nif::RC_NiParticleRotation)
                 {
@@ -1373,6 +1448,26 @@ namespace NifOsg
             mEmitterQueue.clear();
         }
 
+        void handleQueuedLookAtControllers(osg::Group* rootNode, Nif::FileView nif)
+        {
+            for (const auto& [recordIndex, controller] : mLookAtQueue)
+            {
+                FindGroupByRecordIndex findTargetNode(recordIndex);
+                rootNode->accept(findTargetNode);
+                osg::Group* targetNode = findTargetNode.mFound;
+                if (!targetNode)
+                {
+                    Log(Debug::Warning) << "NIFFile Warning: Failed to find look-at target node (node record index "
+                                        << recordIndex << "). File: " << nif.getFilename();
+                    continue;
+                }
+
+                controller->setTarget(targetNode);
+                targetNode->setDataVariance(osg::Object::DYNAMIC);
+            }
+            mLookAtQueue.clear();
+        }
+
         void handleParticleSystem(const Nif::NiAVObject* nifNode, const Nif::Parent* parent, osg::Group* parentNode,
             SceneUtil::CompositeStateSetUpdater* composite, int animflags)
         {
@@ -1433,17 +1528,17 @@ namespace NifOsg
                 {
                     partsys->setFrozen(true);
                 }
-
-                // Due to odd code in the ParticleSystemUpdater, particle systems will not be updated in the first frame
-                // So do that update manually
-                osg::NodeVisitor nv;
-                partsys->update(0.0, nv);
             }
 
             // modifiers should be attached *after* the emitter in the scene graph for correct update order
             // attach to same node as the ParticleSystem, we need osgParticle Operators to get the correct
             // localToWorldMatrix for transforming to particle space
             handleParticlePrograms(partctrl->mModifier, partctrl->mCollider, parentNode, partsys.get(), rf);
+
+            // ParticleSystemUpdater skips its first cull traversal too, leaving saved particles at size and alpha 0.
+            // Runs after the programs, since it computes them from the ranges the affectors set.
+            osg::NodeVisitor nv;
+            partsys->update(0.0, nv);
 
             std::vector<const Nif::NiProperty*> drawableProps;
             collectDrawableProperties(nifNode, parent, drawableProps);
@@ -1583,9 +1678,9 @@ namespace NifOsg
                     osg::Array::BIND_PER_VERTEX);
             }
 
-            // osg::Material properties are handled here for two reasons:
+            // SceneUtil::Material properties are handled here for two reasons:
             // - if there are no vertex colors, we need to disable colorMode.
-            // - there are 3 "overlapping" nif properties that all affect the osg::Material, handling them
+            // - there are 3 "overlapping" nif properties that all affect the SceneUtil::Material, handling them
             //   above the actual renderable would be tedious.
             std::vector<const Nif::NiProperty*> drawableProps;
             collectDrawableProperties(nifNode, parent, drawableProps);
@@ -1638,6 +1733,18 @@ namespace NifOsg
                     rig->setRootBone(rootBone->mName);
 
                 drawable = rig;
+
+                // FO3 and FNV body parts 100-299 are dismemberment caps.
+                if (skin->mRecordType == Nif::RC_BSDismemberSkinInstance
+                    && mBethVersion <= Nif::NIFFile::BethVersion::BETHVER_FO3)
+                {
+                    const auto& parts = static_cast<const Nif::BSDismemberSkinInstance*>(skin)->mParts;
+                    const bool isCap = !parts.empty() && std::all_of(parts.begin(), parts.end(), [](const auto& part) {
+                        return part.mType >= 100 && part.mType < 300;
+                    });
+                    if (isCap) // TODO: Handle actual dismemberment.
+                        drawable->setNodeMask(Loader::getHiddenNodeMask());
+                }
             }
 
             for (Nif::NiTimeControllerPtr ctrl = nifNode->mController; !ctrl.empty(); ctrl = ctrl->mNext)
@@ -1697,7 +1804,8 @@ namespace NifOsg
             osg::ref_ptr<osg::Drawable> drawable = geometry;
 
             // Some input geometry may not be used as is so it needs to be converted.
-            // Normals, tangents and bitangents use a special normal map-like format not equivalent to snorm8 or unorm8
+            // Normals, tangents and bitangents use a special normal map-like format not equivalent to snorm8 or
+            // unorm8
             auto normbyteToFloat = [](uint8_t value) { return value / 255.f * 2.f - 1.f; };
             // Vertices and UV sets may be half-precision.
             // OSG doesn't have a way to pass half-precision data at the moment.
@@ -1802,6 +1910,20 @@ namespace NifOsg
                     rig->setRootBone(rootBone->mName);
 
                 drawable = rig;
+
+                // FO4 subsegment user slots 100-102 are dismemberment caps.
+                if (nifNode->mRecordType == Nif::RC_BSSubIndexTriShape
+                    && mBethVersion == Nif::NIFFile::BethVersion::BETHVER_FO4)
+                {
+                    const Nif::BSSubIndexTriShape& bsSubTriShape
+                        = static_cast<const Nif::BSSubIndexTriShape&>(*nifNode);
+                    const auto& records = bsSubTriShape.mSegmentation.mSubSegmentData.mDataRecords;
+                    const bool isCap = std::any_of(records.begin(), records.end(),
+                        [](const auto& r) { return r.mUserSlotID >= 100 && r.mUserSlotID <= 102; });
+
+                    if (isCap) // TODO: Handle actual dismemberment.
+                        drawable->setNodeMask(Loader::getHiddenNodeMask());
+                }
             }
 
             std::vector<const Nif::NiProperty*> drawableProps;
@@ -2290,9 +2412,9 @@ namespace NifOsg
         }
 
         void handleShaderMaterialDrawableProperties(const Bgsm::MaterialFile* shaderMat,
-            osg::ref_ptr<osg::Material> mat, osg::Node& node, bool& hasSortAlpha) const
+            osg::ref_ptr<SceneUtil::Material> mat, osg::Node& node, bool& hasSortAlpha) const
         {
-            mat->setAlpha(osg::Material::FRONT_AND_BACK, shaderMat->mTransparency);
+            mat->setAlpha(shaderMat->mTransparency);
             handleAlphaTesting(shaderMat->mAlphaTest, osg::AlphaFunc::GREATER, shaderMat->mAlphaTestThreshold, node);
             handleAlphaBlending(shaderMat->mAlphaBlend, shaderMat->mSourceBlendMode, shaderMat->mDestinationBlendMode,
                 true, hasSortAlpha, node);
@@ -2300,13 +2422,13 @@ namespace NifOsg
             if (shaderMat->mShaderType == Bgsm::ShaderType::Lighting)
             {
                 auto bgsm = static_cast<const Bgsm::BGSMFile*>(shaderMat);
-                mat->setEmission(osg::Material::FRONT_AND_BACK, osg::Vec4f(bgsm->mEmittanceColor, 1.f));
-                mat->setSpecular(osg::Material::FRONT_AND_BACK, osg::Vec4f(bgsm->mSpecularColor, 1.f));
+                mat->setEmission(osg::Vec4f(bgsm->mEmittanceColor, 1.f));
+                mat->setSpecular(osg::Vec4f(bgsm->mSpecularColor, 1.f));
             }
             else if (shaderMat->mShaderType == Bgsm::ShaderType::Effect)
             {
                 auto bgem = static_cast<const Bgsm::BGEMFile*>(shaderMat);
-                mat->setEmission(osg::Material::FRONT_AND_BACK, osg::Vec4f(bgem->mEmittanceColor, 1.f));
+                mat->setEmission(osg::Vec4f(bgem->mEmittanceColor, 1.f));
                 if (bgem->mSoft && Loader::getSoftEffectEnabled())
                     SceneUtil::setupSoftEffect(
                         node, { .mSize = bgem->mSoftDepth, .mFalloffDepth = bgem->mSoftDepth, .mFalloff = true });
@@ -2467,8 +2589,8 @@ namespace NifOsg
                     handleDepthFlags(stateset, zprop->depthTest(), zprop->depthWrite());
                     break;
                 }
-                // OSG groups the material properties that NIFs have separate, so we have to parse them all again when
-                // one changed
+                // OSG groups the material properties that NIFs have separate, so we have to parse them all again
+                // when one changed
                 case Nif::RC_NiMaterialProperty:
                 case Nif::RC_NiVertexColorProperty:
                 case Nif::RC_NiSpecularProperty:
@@ -2571,7 +2693,6 @@ namespace NifOsg
                         attachExternalTexture("diffuseMap", VFS::Path::toNormalized(texprop->mSourceTexture),
                             texprop->wrapS(), texprop->wrapT(), uvSet, stateset, boundTextures);
                         {
-                            osg::ref_ptr<osg::TexMat> texMat(new osg::TexMat);
                             // This handles 20.2.0.7 UV settings like 4.0.0.2 UV settings (see NifOsg::UVController)
                             // TODO: verify
                             osg::Vec3f uvOrigin(0.5f, 0.5f, 0.f);
@@ -2583,8 +2704,7 @@ namespace NifOsg
                             mat.preMultTranslate(-uvOrigin);
                             mat.setTrans(mat.getTrans() + uvTrans);
 
-                            texMat->setMatrix(mat);
-                            stateset->setTextureAttributeAndModes(texUnit, texMat, osg::StateAttribute::ON);
+                            SceneUtil::setupTexMatForStateSet(*stateset, texUnit, mat);
                         }
                     }
                     bool useFalloff = texprop->useFalloff();
@@ -2604,24 +2724,13 @@ namespace NifOsg
                     // Vertex alpha mode appears to be broken
                     if (!fogprop->vertexAlpha() && fogprop->enabled())
                     {
-                        osg::ref_ptr<NifOsg::Fog> fog = new NifOsg::Fog;
-                        fog->setMode(osg::Fog::LINEAR);
-                        fog->setColor(osg::Vec4f(fogprop->mColour, 1.f));
-                        fog->setDepth(fogprop->mFogDepth);
-                        fog = shareAttribute(fog);
-                        stateset->setAttributeAndModes(fog, osg::StateAttribute::ON);
-                        // Intentionally ignoring radial fog flag
-                        // We don't really want to override the global setting
+                        SceneUtil::setFogColor(*stateset, osg::Vec4f(fogprop->mColour, 1.f));
+                        SceneUtil::setUnderwaterFogColor(*stateset, osg::Vec4f(fogprop->mColour, 1.f));
+                        SceneUtil::setFogDepth(*stateset, fogprop->mFogDepth);
                     }
                     else
                     {
-                        osg::ref_ptr<osg::Fog> fog = new osg::Fog;
-                        // Shaders don't respect glDisable(GL_FOG)
-                        fog->setMode(osg::Fog::LINEAR);
-                        fog->setStart(10000000);
-                        fog->setEnd(10000000);
-                        fog = shareAttribute(fog);
-                        stateset->setAttributeAndModes(fog, osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE);
+                        SceneUtil::disableFog(*stateset);
                     }
                     break;
                 }
@@ -2646,8 +2755,8 @@ namespace NifOsg
             }
         };
 
-        // global sharing of State Attributes will reduce the number of GL calls as the osg::State will check by pointer
-        // to see if state is the same
+        // global sharing of State Attributes will reduce the number of GL calls as the osg::State will check by
+        // pointer to see if state is the same
         template <class Attribute>
         static Attribute* shareAttribute(const osg::ref_ptr<Attribute>& attr)
         {
@@ -2666,12 +2775,13 @@ namespace NifOsg
         {
             // Specular lighting is enabled by default, but there's a quirk...
             bool specEnabled = true;
-            osg::ref_ptr<osg::Material> mat(new osg::Material);
-            mat->setColorMode(hasVertexColors ? osg::Material::AMBIENT_AND_DIFFUSE : osg::Material::OFF);
+            osg::ref_ptr<SceneUtil::Material> mat(new SceneUtil::Material);
+            mat->setVertexColorMode(
+                hasVertexColors ? SceneUtil::VertexColorModes::AmbientAndDiffuse : SceneUtil::VertexColorModes::None);
 
             // NIF material defaults don't match OpenGL defaults
-            mat->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4f(1, 1, 1, 1));
-            mat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4f(1, 1, 1, 1));
+            mat->setDiffuse(osg::Vec4f(1, 1, 1, 1));
+            mat->setAmbient(osg::Vec4f(1, 1, 1, 1));
 
             bool hasMatCtrl = false;
             bool hasSortAlpha = false;
@@ -2680,8 +2790,6 @@ namespace NifOsg
             auto setBinTraversal = [](osg::StateSet* ss) { ss->setRenderBinDetails(2, "TraversalOrderBin"); };
 
             auto lightmode = Nif::NiVertexColorProperty::LightMode::LightMode_EmiAmbDif;
-            float emissiveMult = 1.f;
-            float specStrength = 1.f;
 
             for (const Nif::NiProperty* property : properties)
             {
@@ -2699,16 +2807,13 @@ namespace NifOsg
                     {
                         const Nif::NiMaterialProperty* matprop = static_cast<const Nif::NiMaterialProperty*>(property);
 
-                        mat->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4f(matprop->mDiffuse, matprop->mAlpha));
-                        mat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4f(matprop->mAmbient, 1.f));
-                        mat->setEmission(osg::Material::FRONT_AND_BACK, osg::Vec4f(matprop->mEmissive, 1.f));
-                        emissiveMult = matprop->mEmissiveMult;
+                        mat->setDiffuse(osg::Vec4f(matprop->mDiffuse, matprop->mAlpha));
+                        mat->setAmbient(osg::Vec4f(matprop->mAmbient, 1.f));
+                        mat->setEmission(osg::Vec4f(matprop->mEmissive, 1.f));
+                        mat->setEmissiveMultiplier(matprop->mEmissiveMult);
 
-                        mat->setSpecular(osg::Material::FRONT_AND_BACK, osg::Vec4f(matprop->mSpecular, 1.f));
-                        // NIFs may provide specular exponents way above OpenGL's limit.
-                        // They can't be used properly, but we don't need OSG to constantly harass us about it.
-                        float glossiness = std::clamp(matprop->mGlossiness, 0.f, 128.f);
-                        mat->setShininess(osg::Material::FRONT_AND_BACK, glossiness);
+                        mat->setSpecular(osg::Vec4f(matprop->mSpecular, 1.f));
+                        mat->setShininess(matprop->mGlossiness);
 
                         if (!matprop->mController.empty())
                         {
@@ -2728,12 +2833,12 @@ namespace NifOsg
                         {
                             case VertexMode::VertMode_SrcIgnore:
                             {
-                                mat->setColorMode(osg::Material::OFF);
+                                mat->setVertexColorMode(SceneUtil::VertexColorModes::None);
                                 break;
                             }
                             case VertexMode::VertMode_SrcEmissive:
                             {
-                                mat->setColorMode(osg::Material::EMISSION);
+                                mat->setVertexColorMode(SceneUtil::VertexColorModes::Emission);
                                 break;
                             }
                             case VertexMode::VertMode_SrcAmbDif:
@@ -2744,13 +2849,13 @@ namespace NifOsg
                                 {
                                     case LightMode::LightMode_Emissive:
                                     {
-                                        mat->setColorMode(osg::Material::OFF);
+                                        mat->setVertexColorMode(SceneUtil::VertexColorModes::None);
                                         break;
                                     }
                                     case LightMode::LightMode_EmiAmbDif:
                                     default:
                                     {
-                                        mat->setColorMode(osg::Material::AMBIENT_AND_DIFFUSE);
+                                        mat->setVertexColorMode(SceneUtil::VertexColorModes::AmbientAndDiffuse);
                                         break;
                                     }
                                 }
@@ -2786,18 +2891,17 @@ namespace NifOsg
                             {
                                 auto bgsm = static_cast<const Bgsm::BGSMFile*>(shaderMat.get());
                                 specEnabled = false; // bgsm->mSpecularEnabled; TODO: PBR specular lighting
-                                specStrength = 1.f; // bgsm->mSpecularMult;
-                                emissiveMult = bgsm->mEmittanceMult;
+                                mat->setSpecularStrength(1.f); // bgsm->mSpecularMult;
+                                mat->setEmissiveMultiplier(bgsm->mEmittanceMult);
                             }
                             break;
                         }
-                        mat->setAlpha(osg::Material::FRONT_AND_BACK, shaderprop->mAlpha);
-                        mat->setEmission(osg::Material::FRONT_AND_BACK, osg::Vec4f(shaderprop->mEmissive, 1.f));
-                        mat->setSpecular(osg::Material::FRONT_AND_BACK, osg::Vec4f(shaderprop->mSpecular, 1.f));
-                        float glossiness = std::clamp(shaderprop->mGlossiness, 0.f, 128.f);
-                        mat->setShininess(osg::Material::FRONT_AND_BACK, glossiness);
-                        emissiveMult = shaderprop->mEmissiveMult;
-                        specStrength = shaderprop->mSpecStrength;
+                        mat->setAlpha(shaderprop->mAlpha);
+                        mat->setEmission(osg::Vec4f(shaderprop->mEmissive, 1.f));
+                        mat->setSpecular(osg::Vec4f(shaderprop->mSpecular, 1.f));
+                        mat->setShininess(shaderprop->mGlossiness);
+                        mat->setEmissiveMultiplier(shaderprop->mEmissiveMult);
+                        mat->setSpecularStrength(shaderprop->mSpecStrength);
                         specEnabled = shaderprop->specular();
                         handleDecal(shaderprop->decal(), hasSortAlpha, *node);
                         break;
@@ -2829,56 +2933,47 @@ namespace NifOsg
             // While NetImmerse and Gamebryo support specular lighting, Morrowind has its support disabled.
             if (mVersion <= Nif::NIFFile::VER_MW || !specEnabled)
             {
-                mat->setSpecular(osg::Material::FRONT_AND_BACK, osg::Vec4f(0.f, 0.f, 0.f, 0.f));
-                mat->setShininess(osg::Material::FRONT_AND_BACK, 0.f);
-                specStrength = 1.f;
+                mat->setSpecular(osg::Vec4f(0.f, 0.f, 0.f, 0.f));
+                mat->setShininess(0.f);
+                mat->setSpecularStrength(1.f);
             }
 
             if (lightmode == Nif::NiVertexColorProperty::LightMode::LightMode_Emissive)
             {
-                osg::Vec4f diffuse = mat->getDiffuse(osg::Material::FRONT_AND_BACK);
+                osg::Vec4f diffuse = mat->getDiffuse();
                 diffuse = osg::Vec4f(0, 0, 0, diffuse.a());
-                mat->setDiffuse(osg::Material::FRONT_AND_BACK, diffuse);
-                mat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4f());
+                mat->setDiffuse(diffuse);
+                mat->setAmbient(osg::Vec4f());
             }
 
             // If we're told to use vertex colors but there are none to use, use a default color instead.
             if (!hasVertexColors)
             {
-                switch (mat->getColorMode())
+                switch (mat->getVertexColorMode())
                 {
-                    case osg::Material::AMBIENT:
-                        mat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4f(1, 1, 1, 1));
+                    case SceneUtil::VertexColorModes::Ambient:
+                        mat->setAmbient(osg::Vec4f(1, 1, 1, 1));
                         break;
-                    case osg::Material::AMBIENT_AND_DIFFUSE:
-                        mat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4f(1, 1, 1, 1));
-                        mat->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4f(1, 1, 1, 1));
+                    case SceneUtil::VertexColorModes::AmbientAndDiffuse:
+                        mat->setAmbient(osg::Vec4f(1, 1, 1, 1));
+                        mat->setDiffuse(osg::Vec4f(1, 1, 1, 1));
                         break;
-                    case osg::Material::EMISSION:
-                        mat->setEmission(osg::Material::FRONT_AND_BACK, osg::Vec4f(1, 1, 1, 1));
+                    case SceneUtil::VertexColorModes::Emission:
+                        mat->setEmission(osg::Vec4f(1, 1, 1, 1));
                         break;
                     default:
                         break;
                 }
-                mat->setColorMode(osg::Material::OFF);
+                mat->setVertexColorMode(SceneUtil::VertexColorModes::None);
             }
 
-            if (hasMatCtrl || mat->getColorMode() != osg::Material::OFF
-                || mat->getEmission(osg::Material::FRONT_AND_BACK) != osg::Vec4f(0, 0, 0, 1)
-                || mat->getDiffuse(osg::Material::FRONT_AND_BACK) != osg::Vec4f(1, 1, 1, 1)
-                || mat->getAmbient(osg::Material::FRONT_AND_BACK) != osg::Vec4f(1, 1, 1, 1)
-                || mat->getShininess(osg::Material::FRONT_AND_BACK) != 0
-                || mat->getSpecular(osg::Material::FRONT_AND_BACK) != osg::Vec4f(0.f, 0.f, 0.f, 0.f))
+            static const SceneUtil::Material defaultMat{};
+
+            if (hasMatCtrl || *mat != defaultMat)
             {
                 mat = shareAttribute(mat);
                 node->getOrCreateStateSet()->setAttributeAndModes(mat, osg::StateAttribute::ON);
             }
-
-            if (emissiveMult != 1.f)
-                node->getOrCreateStateSet()->addUniform(new osg::Uniform("emissiveMult", emissiveMult));
-
-            if (specStrength != 1.f)
-                node->getOrCreateStateSet()->addUniform(new osg::Uniform("specStrength", specStrength));
 
             if (!mPushedSorter)
             {

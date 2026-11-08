@@ -7,10 +7,15 @@
 #include <components/debug/debuglog.hpp>
 #include <components/settings/values.hpp>
 
-#include <cassert>
-
 namespace MWLua
 {
+    namespace
+    {
+        // Step size (roughly KBytes of GC work) per background-loop lua_gc call.
+        // Small enough that finishGc() never waits long for the step in flight.
+        constexpr int sGcStepSize = 10;
+    }
+
     Worker::Worker(LuaManager& manager)
         : mManager(manager)
     {
@@ -28,18 +33,18 @@ namespace MWLua
         }
     }
 
-    void Worker::allowUpdate(osg::Timer_t frameStart, unsigned frameNumber, osg::Stats& stats)
+    void Worker::allowUpdate(Misc::FrameClock::time_point statsEpoch, unsigned frameNumber, Misc::FrameStats& stats)
     {
         if (!mThread)
             return;
         {
             std::lock_guard<std::mutex> lk(mMutex);
-            mUpdateRequest = UpdateRequest{ .mFrameStart = frameStart, .mFrameNumber = frameNumber, .mStats = &stats };
+            mUpdateRequest = UpdateRequest{ .mStatsEpoch = statsEpoch, .mFrameNumber = frameNumber, .mStats = &stats };
         }
         mCV.notify_one();
     }
 
-    void Worker::finishUpdate(osg::Timer_t frameStart, unsigned frameNumber, osg::Stats& stats)
+    void Worker::finishUpdate(Misc::FrameClock::time_point statsEpoch, unsigned frameNumber, Misc::FrameStats& stats)
     {
         if (mThread)
         {
@@ -47,7 +52,33 @@ namespace MWLua
             mCV.wait(lk, [&] { return !mUpdateRequest.has_value(); });
         }
         else
-            update(frameStart, frameNumber, stats);
+            update(statsEpoch, frameNumber, stats);
+    }
+
+    void Worker::gc()
+    {
+        const int steps = Settings::lua().mGcStepsPerFrame;
+        if (steps <= 0)
+            return;
+        if (!mThread)
+        {
+            mManager.gcStep(steps);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lk(mMutex);
+            mGcRequest = true;
+        }
+        mCV.notify_one();
+    }
+
+    void Worker::finishGc()
+    {
+        if (!mThread)
+            return;
+        std::unique_lock<std::mutex> lk(mMutex);
+        mGcRequest = false;
+        mCV.wait(lk, [&] { return !mGcInProgress; });
     }
 
     void Worker::join()
@@ -63,10 +94,9 @@ namespace MWLua
         }
     }
 
-    void Worker::update(osg::Timer_t frameStart, unsigned frameNumber, osg::Stats& stats)
+    void Worker::update(Misc::FrameClock::time_point statsEpoch, unsigned frameNumber, Misc::FrameStats& stats)
     {
-        const osg::Timer* const timer = osg::Timer::instance();
-        OMW::ScopedProfile<OMW::UserStatsType::Lua> profile(frameStart, frameNumber, *timer, stats);
+        OMW::ScopedProfile<OMW::UserStatsType::Lua> profile(statsEpoch, frameNumber, stats);
 
         mManager.update();
     }
@@ -76,15 +106,41 @@ namespace MWLua
         while (true)
         {
             std::unique_lock<std::mutex> lk(mMutex);
-            mCV.wait(lk, [&] { return mUpdateRequest.has_value() || mJoinRequest; });
+            mCV.wait(lk, [&] { return mUpdateRequest.has_value() || mGcRequest || mJoinRequest; });
             if (mJoinRequest)
                 break;
 
-            assert(mUpdateRequest.has_value());
+            if (!mUpdateRequest.has_value())
+            {
+                // GC step with the lock dropped: finishGc() can post its stop request
+                // while the step runs. The mutex guards only the flags.
+                mGcInProgress = true;
+                lk.unlock();
+                bool cycleFinished = false;
+                try
+                {
+                    cycleFinished = mManager.gcStep(sGcStepSize);
+                }
+                catch (const std::exception& e)
+                {
+                    Log(Debug::Error) << "Failed to run Lua GC step: " << e.what();
+                    cycleFinished = true;
+                }
+                lk.lock();
+                mGcInProgress = false;
+                if (cycleFinished)
+                    mGcRequest = false;
+                if (!mGcRequest)
+                {
+                    lk.unlock();
+                    mCV.notify_one();
+                }
+                continue;
+            }
 
             try
             {
-                update(mUpdateRequest->mFrameStart, mUpdateRequest->mFrameNumber, *mUpdateRequest->mStats);
+                update(mUpdateRequest->mStatsEpoch, mUpdateRequest->mFrameNumber, *mUpdateRequest->mStats);
             }
             catch (const std::exception& e)
             {

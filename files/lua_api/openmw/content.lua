@@ -19,6 +19,29 @@
 -- @usage
 -- content.activators.records.MyActivator = { mwscript = 'float', model = 'meshes/w/w_chitin_arrow.nif', name = 'Quest marker' }
 
+--- @{#ApparatusContent}: Apparatus manipulation.
+-- @field [parent=#content] #ApparatusContent apparatuses
+
+--- @{openmw.types#ApparatusTYPE}: Apparatus types
+-- @field [parent=#ApparatusContent] openmw.types#ApparatusTYPE TYPE
+
+---
+-- A mutable list of all @{openmw.types#ApparatusRecord}s. Record IDs are immutable.
+-- @field [parent=#ApparatusContent] #list<openmw.types#ApparatusRecord> records
+-- @usage
+-- content.apparatuses.records.MyAlembic = { name = 'Industrial Alembic', model = 'meshes/a/alembic.nif', icon = 'icons/a/alembic.dds', type = content.apparatuses.TYPE.Alembic, quality = 2.5, weight = 4, value = 300 }
+-- @usage
+-- content.apparatuses.records.BetterAlembic = { template = content.apparatuses.records.MyAlembic, quality = 10 }
+
+--- @{#AttributeContent}: Attribute manipulation.
+-- @field [parent=#content] #AttributeContent attributes
+
+---
+-- A mutable list of all @{openmw.core#AttributeRecord}s.
+-- @field [parent=#AttributeContent] #list<openmw.core#AttributeRecord> records
+-- @usage
+-- content.attributes.records.MyAttribute = { name = 'Toddhood', description = 'n% of the power to reach Bethesda.', werewolfValue = 100 }
+
 --- @{#BookContent}: Book manipulation.
 -- @field [parent=#content] #BookContent books
 
@@ -27,6 +50,15 @@
 -- @field [parent=#BookContent] #list<openmw.types#BookRecord> records
 -- @usage
 -- content.books.records.MyBook = { template = content.books.records['bk_lustyargonianmaid'], text = content.books.records['bk_BoethiahPillowBook'].text }
+
+--- @{#ClassContent}: Class manipulation.
+-- @field [parent=#content] #ClassContent classes
+
+---
+-- A mutable list of all @{openmw.types#ClassRecord}s.
+-- @field [parent=#ClassContent] #list<openmw.types#ClassRecord> records
+-- @usage
+-- content.classes.records.MyClass = { name = 'Nightbonk', template = content.classes.records['Nightblade'], majorSkills = { 'BluntWeapon', 'Mysticism', 'Illusion', 'Alteration', 'Sneak' } }
 
 --- @{#DoorContent}: Door manipulation.
 -- @field [parent=#content] #DoorContent doors
@@ -48,6 +80,15 @@
 -- @field [parent=#EnchantmentContent] #list<openmw.core#Enchantment> records
 -- @usage
 -- content.enchantments.records.MyEnchantment = { type = content.enchantments.TYPE.CastOnUse, charge = 1, cost = 1, effects = { { id = 'FortifySkill', affectedSkill = 'enchant', duration = 5, magnitudeMin = 50, magnitudeMax = 100 } } }
+
+--- @{#FactionContent}: Faction manipulation.
+-- @field [parent=#content] #FactionContent factions
+
+---
+-- A mutable list of all @{openmw.core#FactionRecord}s.
+-- @field [parent=#FactionContent] #list<openmw.core#FactionRecord> records
+-- @usage
+-- content.factions.records.MyFaction = { name = 'Peons', hidden = false, reactions = { Hlaalu = -1, Telvanni = 1 }, attributes = { 'Luck', 'Willpower' }, skills = { 'Destruction', 'HeavyArmor' }, ranks = { { name = 'Peon' }, { name = 'Minion', attributeValues = { 50, 50 }, primarySkillValue = 100 } } }
 
 --- @{#GMSTContent}: GMST manipulation.
 -- @field [parent=#content] #GMSTContent gameSettings
@@ -81,6 +122,24 @@
 -- @field [parent=#IngredientContent] #list<openmw.types#IngredientRecord> records
 -- @usage
 -- content.ingredients.records.MyIngredient = { template = content.ingredients.records['ingred_ectoplasm_01'], name = 'Soylent', effects = { { id = 'vampirism' } } }
+
+--- @{#LevCreatureContent}: Levelled creature manipulation.
+-- @field [parent=#content] #LevCreatureContent levelledCreatures
+
+---
+-- A mutable list of all @{openmw.types#CreatureLevelledListRecord}s.
+-- @field [parent=#LevCreatureContent] #list<openmw.types#CreatureLevelledListRecord> records
+-- @usage
+-- content.levelledCreatures.records.MyLevCreature = { calculateFromAllLevels = true, chanceNone = 0.5, creatures = { { id = 'scrib', level = 1 }, { id = 'fargoth', level = 2 } } }
+
+--- @{#LevItemContent}: Levelled item manipulation.
+-- @field [parent=#content] #LevItemContent levelledItems
+
+---
+-- A mutable list of all @{openmw.types#ItemLevelledListRecord}s.
+-- @field [parent=#LevItemContent] #list<openmw.types#ItemLevelledListRecord> records
+-- @usage
+-- content.levelledItems.records.MyLevItem = { calculateForEach = true, calculateFromAllLevels = true, items = { { id = 'keening', level = 1 }, { id = 'sunder', level = 1 } } }
 
 --- @{#LightContent}: Light manipulation.
 -- @field [parent=#content] #LightContent lights
@@ -136,6 +195,15 @@
 -- @usage
 -- content.probes.records.MyProbe = { template = content.probes.records['probe_bent'], quality = 5, name = 'Alien Probe' }
 
+--- @{#RaceContent}: Race manipulation.
+-- @field [parent=#content] #RaceContent races
+
+---
+-- A mutable list of all @{openmw.types#RaceRecord}s.
+-- @field [parent=#RaceContent] #list<openmw.types#RaceRecord> records
+-- @usage
+-- content.races.records.MyRace = { template = content.races.records['wood elf'], name = 'Sheep Elf', height = { male = 2, female = 2 }, weight = { male = 2, female = 2 } }
+
 --- @{#RepairContent}: Repair item manipulation.
 -- @field [parent=#content] #RepairContent repairs
 
@@ -144,6 +212,15 @@
 -- @field [parent=#RepairContent] #list<openmw.types#RepairRecord> records
 -- @usage
 -- content.repairs.records.MyRepair = { template = content.repairs.records['hammer_repair'], name = 'Hammer Time' }
+
+--- @{#SkillContent}: Skill manipulation.
+-- @field [parent=#content] #SkillContent skills
+
+---
+-- A mutable list of all @{openmw.core#SkillRecord}s.
+-- @field [parent=#SkillContent] #list<openmw.core#SkillRecord> records
+-- @usage
+-- content.skills.records.MySkill = { name = 'C++', werewolfValue = 0, attribute = 'MyAttribute', specialization = 'magic' }
 
 --- @{#SpellContent}: Spell manipulation.
 -- @field [parent=#content] #SpellContent spells
@@ -174,5 +251,14 @@
 -- @field [parent=#SoundContent] #list<openmw.core#SoundRecord> records
 -- @usage
 -- content.sounds.records.MySound = { template = content.sounds.records['MournDayAmb'], fileName = 'sound/fx/funny.wav' }
+
+--- @{#WeatherContent}: Weather manipulation.
+-- @field [parent=#content] #WeatherContent weathers
+
+---
+-- A mutable list of all @{openmw.core#WeatherRecord}s.
+-- @field [parent=#WeatherContent] #list<openmw.core#WeatherRecord> records
+-- @usage
+-- content.weathers.records.MyWeather = { template = content.weathers.records['snow'], particleEffect = 'meshes/fire_small.nif' }
 
 return nil

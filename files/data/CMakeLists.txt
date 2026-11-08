@@ -136,17 +136,21 @@ set(BUILTIN_DATA_FILES
     scripts/omw/console/local.lua
     scripts/omw/console/player.lua
     scripts/omw/console/menu.lua
-    scripts/omw/combat/interface.lua
+    scripts/omw/combat/interface_global.lua
+    scripts/omw/combat/interface_local.lua
     scripts/omw/mechanics/actorcontroller.lua
     scripts/omw/mechanics/animationcontroller.lua
     scripts/omw/mechanics/globalcontroller.lua
     scripts/omw/mechanics/playercontroller.lua
+    scripts/omw/mechanics/projectiles.lua
     scripts/omw/settings/menu.lua
     scripts/omw/music/actor.lua
     scripts/omw/settings/player.lua
     scripts/omw/settings/global.lua
     scripts/omw/settings/common.lua
     scripts/omw/settings/renderers.lua
+    scripts/omw/spellcasting/interface_global.lua
+    scripts/omw/spellcasting/interface_local.lua
     scripts/omw/mwui/constants.lua
     scripts/omw/mwui/borders.lua
     scripts/omw/mwui/filters.lua
@@ -159,6 +163,7 @@ set(BUILTIN_DATA_FILES
     scripts/omw/ui.lua
     scripts/omw/usehandlers.lua
     scripts/omw/worldeventhandlers.lua
+    scripts/omw/input/button.lua
     scripts/omw/input/settings.lua
     scripts/omw/input/playercontrols.lua
     scripts/omw/input/actionbindings.lua

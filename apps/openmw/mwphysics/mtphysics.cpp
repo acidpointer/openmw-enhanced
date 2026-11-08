@@ -10,9 +10,8 @@
 
 #include <BulletCollision/BroadphaseCollision/btDbvtBroadphase.h>
 #include <BulletCollision/CollisionShapes/btCollisionShape.h>
+#include <LinearMath/btIDebugDraw.h>
 #include <LinearMath/btThreads.h>
-
-#include <osg/Stats>
 
 #include "components/debug/debuglog.hpp"
 #include "components/misc/convert.hpp"
@@ -21,8 +20,6 @@
 
 #include "../mwmechanics/actorutil.hpp"
 #include "../mwmechanics/creaturestats.hpp"
-
-#include "../mwrender/bulletdebugdraw.hpp"
 
 #include "../mwworld/class.hpp"
 
@@ -399,13 +396,11 @@ namespace MWPhysics
         std::mutex mHasJobMutex;
     };
 
-    PhysicsTaskScheduler::PhysicsTaskScheduler(
-        float physicsDt, btCollisionWorld* collisionWorld, MWRender::DebugDrawer* debugDrawer)
+    PhysicsTaskScheduler::PhysicsTaskScheduler(float physicsDt, btCollisionWorld* collisionWorld)
         : mDefaultPhysicsDt(physicsDt)
         , mPhysicsDt(physicsDt)
         , mTimeAccum(0.f)
         , mCollisionWorld(collisionWorld)
-        , mDebugDrawer(debugDrawer)
         , mLockingPolicy(detectLockingPolicy())
         , mNumThreads(getNumThreads(mLockingPolicy))
         , mNumJobs(0)
@@ -415,15 +410,10 @@ namespace MWPhysics
         , mNextJob(0)
         , mNextLOS(0)
         , mFrameNumber(0)
-        , mTimer(osg::Timer::instance())
         , mPrevStepCount(1)
         , mBudget(physicsDt)
         , mAsyncBudget(0.0f)
         , mBudgetCursor(0)
-        , mAsyncStartTime(0)
-        , mTimeBegin(0)
-        , mTimeEnd(0)
-        , mFrameStart(0)
         , mWorkersSync(mNumThreads >= 1 ? std::make_unique<WorkersSync>() : nullptr)
     {
         if (mNumThreads >= 1)
@@ -505,25 +495,25 @@ namespace MWPhysics
     }
 
     void PhysicsTaskScheduler::applyQueuedMovements(float& timeAccum, std::vector<Simulation>& simulations,
-        osg::Timer_t frameStart, unsigned int frameNumber, osg::Stats& stats)
+        Misc::FrameClock::time_point statsEpoch, unsigned int frameNumber, Misc::FrameStats& stats)
     {
         assert(mSimulations != &simulations);
 
         waitForWorkers();
-        prepareWork(timeAccum, simulations, frameStart, frameNumber, stats);
+        prepareWork(timeAccum, simulations, statsEpoch, frameNumber, stats);
         if (mWorkersSync != nullptr)
             mWorkersSync->wakeUpWorkers();
     }
 
     void PhysicsTaskScheduler::prepareWork(float& timeAccum, std::vector<Simulation>& simulations,
-        osg::Timer_t frameStart, unsigned int frameNumber, osg::Stats& stats)
+        Misc::FrameClock::time_point statsEpoch, unsigned int frameNumber, Misc::FrameStats& stats)
     {
         // This function run in the main thread.
         // While the mSimulationMutex is held, background physics threads can't run.
 
         MaybeExclusiveLock lock(mSimulationMutex, mLockingPolicy);
 
-        auto timeStart = mTimer->tick();
+        auto timeStart = Misc::FrameClock::now();
 
         // start by finishing previous background computation
         if (mNumThreads != 0)
@@ -531,8 +521,8 @@ namespace MWPhysics
             syncWithMainThread();
 
             if (mAdvanceSimulation)
-                mAsyncBudget.update(mTimer->delta_s(mAsyncStartTime, mTimeEnd), mPrevStepCount, mBudgetCursor);
-            updateStats(frameStart, frameNumber, stats);
+                mAsyncBudget.update(Misc::secondsBetween(mAsyncStartTime, mTimeEnd), mPrevStepCount, mBudgetCursor);
+            updateStats(statsEpoch, frameNumber, stats);
         }
 
         auto [numSteps, newDelta] = calculateStepConfig(timeAccum);
@@ -565,13 +555,13 @@ namespace MWPhysics
             doSimulation();
             syncWithMainThread();
             if (mAdvanceSimulation)
-                mBudget.update(mTimer->delta_s(timeStart, mTimer->tick()), numSteps, mBudgetCursor);
+                mBudget.update(Misc::secondsBetween(timeStart, Misc::FrameClock::now()), numSteps, mBudgetCursor);
             return;
         }
 
-        mAsyncStartTime = mTimer->tick();
+        mAsyncStartTime = Misc::FrameClock::now();
         if (mAdvanceSimulation)
-            mBudget.update(mTimer->delta_s(timeStart, mTimer->tick()), 1, mBudgetCursor);
+            mBudget.update(Misc::secondsBetween(timeStart, Misc::FrameClock::now()), 1, mBudgetCursor);
     }
 
     void PhysicsTaskScheduler::resetSimulation(const ActorMap& actors)
@@ -768,6 +758,9 @@ namespace MWPhysics
         btVector3 pos2 = Misc::Convert::toBullet(
             actor2->getCollisionObjectPosition() + osg::Vec3f(0, 0, actor2->getHalfExtents().z() * 0.9f));
 
+        if ((pos2 - pos1).fuzzyZero())
+            return true;
+
         btCollisionWorld::ClosestRayResultCallback resultCallback(pos1, pos2);
         resultCallback.m_collisionFilterGroup = CollisionType_AnyPhysical;
         resultCallback.m_collisionFilterMask = CollisionType_World | CollisionType_HeightMap | CollisionType_Door;
@@ -796,25 +789,29 @@ namespace MWPhysics
         mPostSimBarrier->wait([this] { afterPostSim(); });
     }
 
-    void PhysicsTaskScheduler::updateStats(osg::Timer_t frameStart, unsigned int frameNumber, osg::Stats& stats)
+    void PhysicsTaskScheduler::updateStats(
+        Misc::FrameClock::time_point statsEpoch, unsigned int frameNumber, Misc::FrameStats& stats)
     {
         if (!stats.collectStats("engine"))
             return;
         if (mFrameNumber == frameNumber - 1)
         {
-            stats.setAttribute(mFrameNumber, "physicsworker_time_begin", mTimer->delta_s(mFrameStart, mTimeBegin));
-            stats.setAttribute(mFrameNumber, "physicsworker_time_taken", mTimer->delta_s(mTimeBegin, mTimeEnd));
-            stats.setAttribute(mFrameNumber, "physicsworker_time_end", mTimer->delta_s(mFrameStart, mTimeEnd));
+            stats.setAttribute(mFrameNumber, "physicsworker_time_begin", Misc::secondsBetween(mStatsEpoch, mTimeBegin));
+            stats.setAttribute(mFrameNumber, "physicsworker_time_taken", Misc::secondsBetween(mTimeBegin, mTimeEnd));
+            stats.setAttribute(mFrameNumber, "physicsworker_time_end", Misc::secondsBetween(mStatsEpoch, mTimeEnd));
         }
-        mFrameStart = frameStart;
-        mTimeBegin = mTimer->tick();
+        mStatsEpoch = statsEpoch;
+        mTimeBegin = Misc::FrameClock::now();
         mFrameNumber = frameNumber;
     }
 
     void PhysicsTaskScheduler::debugDraw()
     {
         MaybeSharedLock lock(mCollisionWorldMutex, mLockingPolicy);
-        mDebugDrawer->step();
+        btIDebugDraw* debugDrawer = mCollisionWorld->getDebugDrawer();
+        debugDrawer->clearLines();
+        mCollisionWorld->debugDrawWorld();
+        debugDrawer->flushLines();
     }
 
     void* PhysicsTaskScheduler::getUserPointer(const btCollisionObject* object) const
@@ -867,7 +864,7 @@ namespace MWPhysics
                 std::remove_if(mLOSCache.begin(), mLOSCache.end(), [](const LOSRequest& req) { return req.mStale; }),
                 mLOSCache.end());
         }
-        mTimeEnd = mTimer->tick();
+        mTimeEnd = Misc::FrameClock::now();
         if (mWorkersSync != nullptr)
             mWorkersSync->workIsDone();
     }

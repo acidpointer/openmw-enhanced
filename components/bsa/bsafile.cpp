@@ -66,7 +66,7 @@ BSAFile::Hash getHash(const std::string& name)
         temp = (((unsigned)(name[i])) << (off & 0x1F));
         sum ^= temp;
         n = temp & 0x1F;
-        sum = (sum << (32 - n)) | (sum >> n); // binary "rotate right"
+        sum = std::rotr(sum, n); // binary "rotate right"
         off += 8;
     }
     hash.mHigh = sum;
@@ -226,7 +226,7 @@ void Bsa::BSAFile::writeHeader()
 
     uint32_t head[3];
     head[0] = 0x100;
-    auto fileDataOffset = mFiles.empty() ? 12 : mFiles.front().mOffset;
+    uint64_t fileDataOffset = mFiles.empty() ? 12 : mFiles.front().mOffset;
     head[1] = static_cast<uint32_t>(fileDataOffset - 12 - 8 * mFiles.size());
 
     output.seekp(0, std::ios_base::end);
@@ -246,7 +246,7 @@ void Bsa::BSAFile::writeHeader()
     {
         auto& f = mFiles[i];
         offsets[i * 2] = f.mFileSize;
-        offsets[i * 2 + 1] = f.mOffset - fileDataOffset;
+        offsets[i * 2 + 1] = static_cast<uint32_t>(f.mOffset - fileDataOffset);
         offsets[2 * filenum + i] = f.mNameOffset;
         hashes[i] = f.mHash;
     }
@@ -312,7 +312,7 @@ void Bsa::BSAFile::addFile(const std::string& filename, std::istream& file)
     newFile.mHash = getHash(filename);
 
     if (mFiles.empty())
-        newFile.mOffset = static_cast<uint32_t>(newStartOfDataBuffer);
+        newFile.mOffset = static_cast<uint64_t>(newStartOfDataBuffer);
     else
     {
         std::vector<char> buffer;
@@ -325,7 +325,7 @@ void Bsa::BSAFile::addFile(const std::string& filename, std::istream& file)
             stream.read(buffer.data(), firstFile.mFileSize);
 
             stream.seekp(0, std::ios::end);
-            firstFile.mOffset = static_cast<uint32_t>(stream.tellp());
+            firstFile.mOffset = static_cast<uint64_t>(stream.tellp());
 
             stream.write(buffer.data(), firstFile.mFileSize);
 
@@ -333,7 +333,7 @@ void Bsa::BSAFile::addFile(const std::string& filename, std::istream& file)
             std::rotate(mFiles.begin(), mFiles.begin() + 1, mFiles.end());
         }
         stream.seekp(0, std::ios::end);
-        newFile.mOffset = static_cast<uint32_t>(stream.tellp());
+        newFile.mOffset = static_cast<uint64_t>(stream.tellp());
     }
 
     newFile.mNameOffset = static_cast<uint32_t>(mStringBuf.size());

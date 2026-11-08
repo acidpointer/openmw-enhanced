@@ -5,11 +5,11 @@
 #include <components/sceneutil/occlusionculling.hpp>
 
 #include <string_view>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
 #include <osg/LOD>
-#include <osg/Material>
 #include <osg/MatrixTransform>
 #include <osg/Sequence>
 #include <osg/Switch>
@@ -18,6 +18,7 @@
 #include <osgParticle/ParticleSystemUpdater>
 #include <osgUtil/IncrementalCompileOperation>
 
+#include <components/esm/path.hpp>
 #include <components/esm3/esmreader.hpp>
 #include <components/esm3/loadacti.hpp>
 #include <components/esm3/loadcell.hpp>
@@ -34,14 +35,18 @@
 #include <components/misc/pathhelpers.hpp>
 #include <components/misc/resourcehelpers.hpp>
 #include <components/misc/rng.hpp>
+#include <components/nifosg/autotransform.hpp>
 #include <components/resource/scenemanager.hpp>
 #include <components/sceneutil/enhancedsettings.hpp>
 #include <components/sceneutil/lightmanager.hpp>
+#include <components/sceneutil/material.hpp>
 #include <components/sceneutil/morphgeometry.hpp>
 #include <components/sceneutil/optimizer.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
 #include <components/sceneutil/riggeometry.hpp>
 #include <components/sceneutil/riggeometryosgaextension.hpp>
+#include <components/sceneutil/templateref.hpp>
+#include <components/sceneutil/userdata.hpp>
 #include <components/sceneutil/util.hpp>
 #include <components/settings/values.hpp>
 #include <components/vfs/manager.hpp>
@@ -103,10 +108,9 @@ namespace MWRender
         template <typename Record>
         VFS::Path::Normalized getEsm4Model(const Record& record)
         {
-            if (MWClass::ESM4Impl::isMarkerModel(record->mModel))
+            if (MWClass::ESM4Impl::isMarkerModel(record->mModel.getOriginal()))
                 return {};
-            else
-                return record->mModel;
+            return record->mModel.getNormalized();
         }
 
         VFS::Path::Normalized getModel(int type, ESM::RefId id, const MWWorld::ESMStore& store)
@@ -193,12 +197,9 @@ namespace MWRender
         class CopyOp : public osg::CopyOp
         {
         public:
-            bool mOptimizeBillboards = true;
             bool mActiveGrid = false;
             LODRange mDistances = { 0.f, 0.f };
-            osg::Vec3f mViewVector;
             osg::Node::NodeMask mCopyMask = ~0u;
-            mutable std::vector<const osg::Node*> mNodePath;
 
             CopyOp(bool activeGrid, osg::Node::NodeMask copyMask)
                 : mActiveGrid(activeGrid)
@@ -272,7 +273,24 @@ namespace MWRender
                     return n;
                 }
 
-                mNodePath.push_back(node);
+                if (!mActiveGrid)
+                {
+                    if (const auto* autoTransform = dynamic_cast<const NifOsg::AutoTransform*>(node))
+                    {
+                        osg::MatrixTransform* n = new osg::MatrixTransform();
+                        n->setMatrix(autoTransform->computeMatrix(nullptr));
+
+                        for (unsigned int i = 0; i < autoTransform->getNumChildren(); ++i)
+                            if (osg::Node* clonedChild = operator()(autoTransform->getChild(i)))
+                                n->addChild(clonedChild);
+
+                        n->setDataVariance(osg::Object::STATIC);
+
+                        handleCallbacks(node, n);
+
+                        return n;
+                    }
+                }
 
                 osg::Node* cloned = static_cast<osg::Node*>(node->clone(*this));
                 if (!mActiveGrid)
@@ -280,28 +298,16 @@ namespace MWRender
                 cloned->setUserDataContainer(nullptr);
                 cloned->setName("");
 
-                mNodePath.pop_back();
-
                 handleCallbacks(node, cloned);
 
                 return cloned;
             }
+
             void handleCallbacks(const osg::Node* node, osg::Node* cloned) const
             {
                 for (const osg::Callback* callback = node->getCullCallback(); callback != nullptr;
                      callback = callback->getNestedCallback())
                 {
-                    if (callback->className() == std::string_view("BillboardCallback"))
-                    {
-                        if (mOptimizeBillboards)
-                        {
-                            handleBillboard(cloned);
-                            continue;
-                        }
-                        else
-                            cloned->setDataVariance(osg::Object::DYNAMIC);
-                    }
-
                     if (node->getCullCallback()->getNestedCallback())
                     {
                         osg::Callback* clonedCallback = osg::clone(callback, osg::CopyOp::SHALLOW_COPY);
@@ -311,45 +317,6 @@ namespace MWRender
                     else
                         cloned->addCullCallback(const_cast<osg::Callback*>(callback));
                 }
-            }
-            void handleBillboard(osg::Node* node) const
-            {
-                osg::Transform* transform = node->asTransform();
-                if (!transform)
-                    return;
-                osg::MatrixTransform* matrixTransform = transform->asMatrixTransform();
-                if (!matrixTransform)
-                    return;
-
-                osg::Matrix worldToLocal = osg::Matrix::identity();
-                for (auto pathNode : mNodePath)
-                    if (const osg::Transform* t = pathNode->asTransform())
-                        t->computeWorldToLocalMatrix(worldToLocal, nullptr);
-                worldToLocal = osg::Matrix::orthoNormal(worldToLocal);
-
-                osg::Matrix billboardMatrix;
-                osg::Vec3f viewVector = -(mViewVector + worldToLocal.getTrans());
-                viewVector.normalize();
-                osg::Vec3f right = viewVector ^ osg::Vec3f(0, 0, 1);
-                right.normalize();
-                osg::Vec3f up = right ^ viewVector;
-                up.normalize();
-                billboardMatrix.makeLookAt(osg::Vec3f(0, 0, 0), viewVector, up);
-                billboardMatrix.invert(billboardMatrix);
-
-                const osg::Matrix& oldMatrix = matrixTransform->getMatrix();
-                float mag[3]; // attempt to preserve scale
-                for (int i = 0; i < 3; ++i)
-                    mag[i] = static_cast<float>(std::sqrt(oldMatrix(0, i) * oldMatrix(0, i)
-                        + oldMatrix(1, i) * oldMatrix(1, i) + oldMatrix(2, i) * oldMatrix(2, i)));
-                osg::Matrix newMatrix;
-                worldToLocal.setTrans(0, 0, 0);
-                newMatrix *= worldToLocal;
-                newMatrix.preMult(billboardMatrix);
-                newMatrix.preMultScale(osg::Vec3f(mag[0], mag[1], mag[2]));
-                newMatrix.setTrans(oldMatrix.getTrans());
-
-                matrixTransform->setMatrix(newMatrix);
             }
             osg::Drawable* operator()(const osg::Drawable* drawable) const override
             {
@@ -378,18 +345,6 @@ namespace MWRender
                     return const_cast<osg::Drawable*>(drawable);
             }
             osg::Callback* operator()(const osg::Callback* callback) const override { return nullptr; }
-        };
-
-        class RefnumSet : public osg::Object
-        {
-        public:
-            RefnumSet() {}
-            RefnumSet(const RefnumSet& copy, const osg::CopyOp&)
-                : mRefnums(copy.mRefnums)
-            {
-            }
-            META_Object(MWRender, RefnumSet)
-            std::vector<ESM::RefNum> mRefnums;
         };
 
         class AnalyzeVisitor : public osg::NodeVisitor
@@ -484,21 +439,19 @@ namespace MWRender
             }
             void apply(osg::Drawable& node) override
             {
-                osg::ref_ptr<osg::Material> m(new osg::Material);
+                osg::ref_ptr<SceneUtil::Material> m(new SceneUtil::Material);
                 osg::Vec4f color(
                     Misc::Rng::rollProbability(), Misc::Rng::rollProbability(), Misc::Rng::rollProbability(), 0.f);
                 color.normalize();
-                m->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4f(0.1f, 0.1f, 0.1f, 1.f));
-                m->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4f(0.1f, 0.1f, 0.1f, 1.f));
-                m->setColorMode(osg::Material::OFF);
-                m->setEmission(osg::Material::FRONT_AND_BACK, osg::Vec4f(color));
+                m->setDiffuse(osg::Vec4f(0.1f, 0.1f, 0.1f, 1.f));
+                m->setAmbient(osg::Vec4f(0.1f, 0.1f, 0.1f, 1.f));
+                m->setEmission(osg::Vec4f(color));
+                m->setVertexColorMode(SceneUtil::VertexColorModes::None);
                 osg::ref_ptr<osg::StateSet> stateset = node.getStateSet()
                     ? osg::clone(node.getStateSet(), osg::CopyOp::SHALLOW_COPY)
                     : new osg::StateSet;
                 stateset->setAttribute(m);
-                stateset->addUniform(new osg::Uniform("colorMode", 0));
-                stateset->addUniform(new osg::Uniform("emissiveMult", 1.f));
-                stateset->addUniform(new osg::Uniform("specStrength", 1.f));
+                m->updateStateSet(stateset);
                 node.setStateSet(stateset);
             }
         };
@@ -514,17 +467,17 @@ namespace MWRender
             ESM::RefNum mRefnum;
             void apply(osg::Geometry& node) override
             {
-                osg::ref_ptr<RefnumMarker> marker(new RefnumMarker);
-                marker->mRefnum = mRefnum;
+                RefnumMarker marker;
+                marker.mRefnum = mRefnum;
                 if (osg::Array* array = node.getVertexArray())
-                    marker->mNumVertices = array->getNumElements();
-                node.getOrCreateUserDataContainer()->addUserObject(marker);
+                    marker.mNumVertices = array->getNumElements();
+                SceneUtil::addUserData(node, marker);
             }
         };
     }
 
     ObjectPaging::ObjectPaging(Resource::SceneManager* sceneManager, ESM::RefId worldspace)
-        : GenericResourceManager<ChunkId>(nullptr, Settings::cells().mCacheExpiryDelay)
+        : Resource::NodeResourceManager<ChunkId>(nullptr, Settings::cells().mCacheExpiryDelay)
         , Terrain::QuadTreeWorld::ChunkManager(worldspace)
         , mSceneManager(sceneManager)
         , mActiveGrid(Settings::terrain().mObjectPagingActiveGrid)
@@ -735,7 +688,7 @@ namespace MWRender
         };
         typedef std::map<osg::ref_ptr<const osg::Node>, InstanceList> NodeMap;
         NodeMap nodes;
-        const osg::ref_ptr<RefnumSet> refnumSet = activeGrid ? new RefnumSet : nullptr;
+        std::vector<ESM::RefNum> refnums;
 
         // Mask_UpdateVisitor is used in such cases in NIF loader:
         // 1. For collision nodes, which is not supposed to be rendered.
@@ -747,6 +700,8 @@ namespace MWRender
         const float smallestDistanceToChunk = (size > 1 / 8.f) ? (size * cellSize) : 0.f;
         const float higherDistanceToChunk
             = activeGrid ? ((size < 1) ? 5 : 3) * cellSize * size + 1 : smallestDistanceToChunk + 1;
+        const LODRange lodDistances = activeGrid ? LODRange{ 0.f, std::numeric_limits<float>::max() }
+                                                 : LODRange{ smallestDistanceToChunk, higherDistanceToChunk };
 
         AnalyzeVisitor analyzeVisitor(copyMask);
         const float minSize = mMinSizeMergeFactor ? mMinSize * mMinSizeMergeFactor : mMinSize;
@@ -804,7 +759,7 @@ namespace MWRender
                 else
                     model = mLODNameCache
                                 .emplace_hint(found, std::move(key),
-                                    Misc::ResourceHelpers::getLODMeshName(world.getESMVersions()[refNum.mContentFile],
+                                    Misc::ResourceHelpers::getLODMeshName(world.getGameFormats()[refNum.mContentFile],
                                         model, *mSceneManager->getVFS(), lod))
                                 ->second;
             }
@@ -820,7 +775,7 @@ namespace MWRender
                         && dynamic_cast<const osgAnimation::BasicAnimationManager*>(cnode->getUpdateCallback())))
                     continue;
                 else
-                    refnumSet->mRefnums.push_back(refNum);
+                    refnums.push_back(refNum);
             }
 
             {
@@ -841,7 +796,7 @@ namespace MWRender
             if (emplaced.second)
             {
                 emplaced.first->second.mModel = model;
-                analyzeVisitor.mDistances = LODRange{ smallestDistanceToChunk, higherDistanceToChunk } / ref.mScale;
+                analyzeVisitor.mDistances = lodDistances / ref.mScale;
                 const osg::Node* const nodePtr = emplaced.first->first.get();
                 // const-trickery required because there is no const version of NodeVisitor
                 const_cast<osg::Node*>(nodePtr)->accept(analyzeVisitor);
@@ -857,7 +812,7 @@ namespace MWRender
             = osg::Vec3f(center.x(), center.y(), 0) * static_cast<float>(getCellSize(mWorldspace));
         osg::ref_ptr<osg::Group> group = new osg::Group;
         osg::ref_ptr<osg::Group> mergeGroup = new osg::Group;
-        osg::ref_ptr<Resource::TemplateMultiRef> templateRefs = new Resource::TemplateMultiRef;
+        std::vector<osg::ref_ptr<const osg::Node>> templateRefs;
         osgUtil::StateToCompile stateToCompile(0, nullptr);
         CopyOp copyop(activeGrid, copyMask);
 
@@ -932,17 +887,13 @@ namespace MWRender
                 // DO NOT COPY AND PASTE THIS CODE. Cloning osg::Geometry without also cloning its contained Arrays is
                 // generally unsafe. In this specific case the operation is safe under the following two assumptions:
                 // - When Arrays are removed or replaced in the cloned geometry, the original Arrays in their place must
-                // outlive the cloned geometry regardless. (ensured by TemplateMultiRef)
+                // outlive the cloned geometry regardless. (ensured by the templateRefs vector below)
                 // - Arrays that we add or replace in the cloned geometry must be explicitely forbidden from reusing
                 // BufferObjects of the original geometry. (ensured by needvbo() in optimizer.cpp)
                 copyop.setCopyFlags(merge ? osg::CopyOp::DEEP_COPY_NODES | osg::CopyOp::DEEP_COPY_DRAWABLES
                                           : osg::CopyOp::DEEP_COPY_NODES);
-                copyop.mOptimizeBillboards = (size > 1 / 4.f);
-                copyop.mNodePath.push_back(trans);
-                copyop.mDistances = LODRange{ smallestDistanceToChunk, higherDistanceToChunk } / ref.mScale;
-                copyop.mViewVector = (viewPoint - worldCenter);
+                copyop.mDistances = lodDistances / ref.mScale;
                 copyop.copy(cnode, trans);
-                copyop.mNodePath.pop_back();
 
                 // Build occluder mesh for building-sized objects
                 if (buildOccluders)
@@ -1001,9 +952,9 @@ namespace MWRender
                     }
                     else
                     {
-                        osg::ref_ptr<RefnumMarker> marker = new RefnumMarker;
-                        marker->mRefnum = ref.mRefNum;
-                        trans->getOrCreateUserDataContainer()->addUserObject(marker);
+                        RefnumMarker marker;
+                        marker.mRefnum = ref.mRefNum;
+                        SceneUtil::addUserData(*trans, marker);
                     }
                 }
 
@@ -1015,7 +966,7 @@ namespace MWRender
             {
                 // add a ref to the original template to help verify the safety of shallow cloning operations
                 // in addition, we hint to the cache that it's still being used and should be kept in cache
-                templateRefs->addRef(cnode);
+                templateRefs.emplace_back(cnode);
 
                 if (pair.second.mNeedCompile)
                 {
@@ -1068,20 +1019,19 @@ namespace MWRender
 
         group->getBound();
         group->setNodeMask(Mask_Static);
-        osg::UserDataContainer* udc = group->getOrCreateUserDataContainer();
         if (activeGrid)
         {
-            std::sort(refnumSet->mRefnums.begin(), refnumSet->mRefnums.end());
-            refnumSet->mRefnums.erase(
-                std::unique(refnumSet->mRefnums.begin(), refnumSet->mRefnums.end()), refnumSet->mRefnums.end());
-            udc->addUserObject(refnumSet);
+            std::sort(refnums.begin(), refnums.end());
+            refnums.erase(std::unique(refnums.begin(), refnums.end()), refnums.end());
+            SceneUtil::addUserData(*group, std::move(refnums));
             group->addCullCallback(new SceneUtil::LightListCallback);
         }
-        udc->addUserObject(templateRefs);
+        for (const auto& ref : templateRefs)
+            SceneUtil::addTemplateRef(*group, ref.get());
         if (pagedOccluderData && !pagedOccluderData->mOccluderMeshes.empty())
         {
             pagedOccluderData->buildSpatialBins();
-            udc->addUserObject(pagedOccluderData);
+            group->getOrCreateUserDataContainer()->addUserObject(pagedOccluderData);
             if (mOcclusionCuller)
             {
                 float maxDist = SceneUtil::Enhanced::occlusionOccluderMaxDistance();
@@ -1229,14 +1179,8 @@ namespace MWRender
                 if (!activeGrid)
                     return;
 
-                osg::UserDataContainer* udc = obj->getUserDataContainer();
-                if (udc && udc->getNumUserObjects())
-                {
-                    RefnumSet* refnums = dynamic_cast<RefnumSet*>(udc->getUserObject(0));
-                    if (!refnums)
-                        return;
-                    mOutput.insert(mOutput.end(), refnums->mRefnums.begin(), refnums->mRefnums.end());
-                }
+                if (const auto* refnums = SceneUtil::findUserData<std::vector<ESM::RefNum>>(*obj))
+                    mOutput.insert(mOutput.end(), refnums->begin(), refnums->end());
             }
             osg::Vec4i mActiveGrid;
             std::vector<ESM::RefNum>& mOutput;

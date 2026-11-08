@@ -1,6 +1,10 @@
 #ifndef LAUNCHERSETTINGS_HPP
 #define LAUNCHERSETTINGS_HPP
 
+#include <QList>
+#include <QMap>
+#include <QPair>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 
@@ -16,10 +20,16 @@ namespace Config
     {
     public:
         static constexpr char sLauncherConfigFileName[] = "launcher.cfg";
+        static constexpr char sLauncherConfigBackupFileName[] = "launcher-wd.dat";
+
+        /// Keys of a section this version does not use, in file order, written back as read
+        using UnknownKeys = QList<QPair<QString, QString>>;
 
         struct Settings
         {
             QString mLanguage;
+            bool mWatchdog = false;
+            UnknownKeys mUnknown;
         };
 
         struct MainWindow
@@ -34,6 +44,7 @@ namespace Config
         {
             bool mFirstRun = true;
             MainWindow mMainWindow;
+            UnknownKeys mUnknown;
         };
 
         struct Profile
@@ -41,21 +52,24 @@ namespace Config
             QStringList mArchives;
             QStringList mData;
             QStringList mContent;
+            QStringList mUserFilesInOrder;
         };
 
         struct Profiles
         {
             QString mCurrentProfile;
             std::map<QString, Profile> mValues;
+            UnknownKeys mUnknown;
         };
 
         struct Importer
         {
             bool mImportContentSetup = true;
             bool mImportFontSetup = true;
+            UnknownKeys mUnknown;
         };
 
-        void readFile(QTextStream& stream);
+        void readFile(QTextStream& stream, bool missingOnly = false);
 
         void clear();
 
@@ -69,15 +83,16 @@ namespace Config
 
         /// Create a Content List (or replace if it already exists)
         void setContentList(const QString& contentListName, const QStringList& dirNames,
-            const QStringList& archiveNames, const QStringList& fileNames);
+            const QStringList& archiveNames, const QStringList& fileNames, const QStringList& userFilesInOrder);
 
-        void removeContentList(const QString& value) { mProfiles.mValues.erase(value); }
+        void removeContentList(const QString& value);
 
         void setCurrentContentListName(const QString& value) { mProfiles.mCurrentProfile = value; }
 
         QString getCurrentContentListName() const { return mProfiles.mCurrentProfile; }
 
         QStringList getDataDirectoryList(const QString& contentListName) const;
+        QStringList getUserFilesInOrder(const QString& contentListName) const;
         QStringList getArchiveList(const QString& contentListName) const;
         QStringList getContentListFiles(const QString& contentListName) const;
 
@@ -88,6 +103,8 @@ namespace Config
         QString getLanguage() const { return mSettings.mLanguage; }
 
         void setLanguage(const QString& value) { mSettings.mLanguage = value; }
+
+        bool getWatchdog() const { return mSettings.mWatchdog; }
 
         MainWindow getMainWindow() const { return mGeneral.mMainWindow; }
 
@@ -106,6 +123,9 @@ namespace Config
         Profiles mProfiles;
         General mGeneral;
         Importer mImporter;
+        QSet<QString> mReadKeys;
+        /// Sections this version does not know at all, in name order, written back as read
+        QMap<QString, UnknownKeys> mUnknownSections;
 
         bool setValue(const QString& sectionPrefix, const QString& key, const QString& value);
 

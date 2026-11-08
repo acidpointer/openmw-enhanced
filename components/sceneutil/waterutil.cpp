@@ -2,8 +2,9 @@
 
 #include <osg/Depth>
 #include <osg/Geometry>
-#include <osg/Material>
 #include <osg/StateSet>
+
+#include <components/sceneutil/material.hpp>
 
 #include "depth.hpp"
 
@@ -69,21 +70,23 @@ namespace SceneUtil
     {
         osg::ref_ptr<osg::StateSet> stateset(new osg::StateSet);
 
-        osg::ref_ptr<osg::Material> material(new osg::Material);
-        material->setEmission(osg::Material::FRONT_AND_BACK, osg::Vec4f(0.f, 0.f, 0.f, 1.f));
-        material->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4f(1.f, 1.f, 1.f, alpha));
-        material->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4f(1.f, 1.f, 1.f, 1.f));
-        material->setColorMode(osg::Material::OFF);
+        osg::ref_ptr<SceneUtil::Material> material(new SceneUtil::Material);
+        material->setEmission(osg::Vec4f(0.f, 0.f, 0.f, 1.f));
+        material->setDiffuse(osg::Vec4f(1.f, 1.f, 1.f, alpha));
+        material->setAmbient(osg::Vec4f(1.f, 1.f, 1.f, 1.f));
+        material->setVertexColorMode(SceneUtil::VertexColorModes::None);
         stateset->setAttributeAndModes(material, osg::StateAttribute::ON);
 
         stateset->setMode(GL_BLEND, osg::StateAttribute::ON);
         stateset->setMode(GL_CULL_FACE, osg::StateAttribute::OFF);
 
-        osg::ref_ptr<osg::Depth> depth = new SceneUtil::AutoDepth;
+        // LESS keeps water clamped to the far plane from drawing over the sky.
+        osg::ref_ptr<osg::Depth> depth = new SceneUtil::AutoDepth(osg::Depth::LESS);
         depth->setWriteMask(false);
         stateset->setAttributeAndModes(depth, osg::StateAttribute::ON);
 
-        stateset->setRenderBinDetails(renderBin, "RenderBin");
+        stateset->addUniform(new osg::Uniform("waterSurface", true));
+        stateset->setRenderBinDetails(renderBin, "DepthSortedBin");
 
         return stateset;
     }

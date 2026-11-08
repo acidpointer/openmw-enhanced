@@ -13,27 +13,14 @@
 
 #include <osg/BoundingBox>
 #include <osg/Quat>
-#include <osg/Timer>
-#include <osg/ref_ptr>
 
+#include <components/misc/framestats.hpp>
 #include <components/vfs/pathutil.hpp>
 
 #include "../mwworld/ptr.hpp"
 
 #include "collisiontype.hpp"
 #include "raycasting.hpp"
-
-namespace osg
-{
-    class Group;
-    class Object;
-    class Stats;
-}
-
-namespace MWRender
-{
-    class DebugDrawer;
-}
 
 namespace Resource
 {
@@ -42,12 +29,18 @@ namespace Resource
 }
 
 class btCollisionWorld;
+class btIDebugDraw;
 class btBroadphaseInterface;
 class btDefaultCollisionConfiguration;
 class btCollisionDispatcher;
 class btCollisionObject;
 class btCollisionShape;
 class btVector3;
+
+namespace ESMTerrain
+{
+    class LandObject;
+}
 
 namespace MWPhysics
 {
@@ -152,7 +145,7 @@ namespace MWPhysics
     class PhysicsSystem : public RayCastingInterface
     {
     public:
-        PhysicsSystem(Resource::ResourceSystem* resourceSystem, osg::ref_ptr<osg::Group> parentNode);
+        PhysicsSystem(Resource::ResourceSystem* resourceSystem, std::unique_ptr<btIDebugDraw> debugDrawer);
         virtual ~PhysicsSystem();
 
         Resource::BulletShapeManager* getShapeManager();
@@ -187,7 +180,7 @@ namespace MWPhysics
         void updatePosition(const MWWorld::Ptr& ptr);
 
         void addHeightField(const float* heights, int x, int y, int size, int verts, float minH, float maxH,
-            const osg::Object* holdObject);
+            std::shared_ptr<const ESMTerrain::LandObject> holdObject);
 
         void removeHeightField(int x, int y);
 
@@ -196,8 +189,8 @@ namespace MWPhysics
         bool toggleCollisionMode();
 
         /// Determine new position based on all queued movements, then clear the list.
-        void stepSimulation(
-            float dt, bool skipSimulation, osg::Timer_t frameStart, unsigned int frameNumber, osg::Stats& stats);
+        void stepSimulation(float dt, bool skipSimulation, Misc::FrameClock::time_point statsEpoch,
+            unsigned int frameNumber, Misc::FrameStats& stats);
 
         /// Apply new positions to actors
         void moveActors();
@@ -240,6 +233,9 @@ namespace MWPhysics
         /// @note The collision shape's origin is in its center, so the position returned can be described as center of
         /// the actor collision box in world space.
         osg::Vec3f getCollisionObjectPosition(const MWWorld::ConstPtr& actor) const;
+
+        /// Get the configured duration of a single physics step in seconds.
+        float getPhysicsDt() const { return mPhysicsDt; }
 
         /// Get bounding box in world space of the given object.
         osg::BoundingBox getBoundingBox(const MWWorld::ConstPtr& object) const;
@@ -284,7 +280,7 @@ namespace MWPhysics
         bool isAreaOccupiedByOtherActor(
             const MWWorld::LiveCellRefBase* actor, const osg::Vec3f& position, float radius) const;
 
-        void reportStats(unsigned int frameNumber, osg::Stats& stats) const;
+        void reportStats(unsigned int frameNumber, Misc::FrameStats& stats) const;
         void reportCollision(const btVector3& position, const btVector3& normal);
 
         float mPhysicsDt;
@@ -328,9 +324,7 @@ namespace MWPhysics
         std::unique_ptr<btCollisionObject> mWaterCollisionObject;
         std::unique_ptr<btCollisionShape> mWaterCollisionShape;
 
-        std::unique_ptr<MWRender::DebugDrawer> mDebugDrawer;
-
-        osg::ref_ptr<osg::Group> mParentNode;
+        std::unique_ptr<btIDebugDraw> mDebugDrawer;
 
         std::size_t mSimulationsCounter = 0;
         std::array<std::vector<Simulation>, 2> mSimulations;

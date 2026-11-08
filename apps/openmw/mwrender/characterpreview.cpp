@@ -5,7 +5,6 @@
 #include <osg/BlendFunc>
 #include <osg/Camera>
 #include <osg/Fog>
-#include <osg/Material>
 #include <osg/PositionAttitudeTransform>
 #include <osg/Texture2D>
 #include <osg/ValueObject>
@@ -14,10 +13,13 @@
 
 #include <components/debug/debuglog.hpp>
 #include <components/fallback/fallback.hpp>
+#include <components/myguiplatform/myguitexture.hpp>
 #include <components/resource/resourcesystem.hpp>
 #include <components/resource/scenemanager.hpp>
 #include <components/sceneutil/depth.hpp>
+#include <components/sceneutil/fog.hpp>
 #include <components/sceneutil/lightmanager.hpp>
+#include <components/sceneutil/material.hpp>
 #include <components/sceneutil/nodecallback.hpp>
 #include <components/sceneutil/rtt.hpp>
 #include <components/sceneutil/shadow.hpp>
@@ -134,8 +136,6 @@ namespace MWRender
                         newStateSet = new osg::StateSet(*stateset, osg::CopyOp::SHALLOW_COPY);
                         node.setStateSet(newStateSet);
                     }
-                    // Disable noBlendAlphaEnv
-                    newStateSet->setTextureMode(7, GL_TEXTURE_2D, osg::StateAttribute::OFF);
                     newStateSet->setDefine("FORCE_OPAQUE", "0", osg::StateAttribute::ON);
                 }
             }
@@ -239,21 +239,13 @@ namespace MWRender
         stateset->setDefine("FORCE_OPAQUE", "1", osg::StateAttribute::ON);
         stateset->setMode(GL_NORMALIZE, osg::StateAttribute::ON);
         stateset->setMode(GL_CULL_FACE, osg::StateAttribute::ON);
-        osg::ref_ptr<osg::Material> defaultMat(new osg::Material);
-        defaultMat->setColorMode(osg::Material::OFF);
-        defaultMat->setAmbient(osg::Material::FRONT_AND_BACK, osg::Vec4f(1, 1, 1, 1));
-        defaultMat->setDiffuse(osg::Material::FRONT_AND_BACK, osg::Vec4f(1, 1, 1, 1));
-        defaultMat->setSpecular(osg::Material::FRONT_AND_BACK, osg::Vec4f(0.f, 0.f, 0.f, 0.f));
+        osg::ref_ptr<SceneUtil::Material> defaultMat(new SceneUtil::Material);
+        defaultMat->updateStateSet(stateset);
         stateset->setAttribute(defaultMat);
 
         SceneUtil::ShadowManager::instance().disableShadowsForStateSet(*stateset);
 
-        // assign large value to effectively turn off fog
-        // shaders don't respect glDisable(GL_FOG)
-        osg::ref_ptr<osg::Fog> fog(new osg::Fog);
-        fog->setStart(10000000);
-        fog->setEnd(10000000);
-        stateset->setAttributeAndModes(fog, osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE);
+        SceneUtil::disableFog(*stateset, osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
 
         // TODO: Clean up this mess of loose uniforms that shaders depend on.
         // turn off sky blending
@@ -262,8 +254,8 @@ namespace MWRender
         stateset->addUniform(new osg::Uniform("skyBlendingStart", 8000000.0f));
         stateset->addUniform(
             new osg::Uniform("screenRes", osg::Vec2f{ static_cast<float>(sizeX), static_cast<float>(sizeY) }));
-
-        stateset->addUniform(new osg::Uniform("emissiveMult", 1.f));
+        stateset->addUniform(new osg::Uniform("alpha", 1.f));
+        stateset->addUniform(new osg::Uniform("actorFade", 1.f));
 
         osg::ref_ptr<osg::Texture2D> dummyTexture = new osg::Texture2D();
         dummyTexture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
@@ -273,9 +265,9 @@ namespace MWRender
         // This might clash with a shadow map, so make sure it doesn't cast shadows
         dummyTexture->setShadowComparison(true);
         dummyTexture->setShadowCompareFunc(osg::Texture::ShadowCompareFunc::ALWAYS);
-        stateset->setTextureAttributeAndModes(7, dummyTexture, osg::StateAttribute::ON);
+        stateset->setTextureAttribute(7, dummyTexture, osg::StateAttribute::ON);
 
-        osg::ref_ptr<osg::Light> light = new osg::Light;
+        auto light = std::make_shared<SceneUtil::Light>();
         float diffuseR = Fallback::Map::getFloat("Inventory_DirectionalDiffuseR");
         float diffuseG = Fallback::Map::getFloat("Inventory_DirectionalDiffuseG");
         float diffuseB = Fallback::Map::getFloat("Inventory_DirectionalDiffuseB");
@@ -294,7 +286,7 @@ namespace MWRender
         light->setConstantAttenuation(1.f);
         light->setLinearAttenuation(0.f);
         light->setQuadraticAttenuation(0.f);
-        lightManager->setSunlight(light);
+        lightManager->setSunlight(std::move(light));
 
         mRTTNode->addChild(lightManager);
 
@@ -335,16 +327,17 @@ namespace MWRender
         setBlendMode();
     }
 
-    osg::ref_ptr<osg::Texture2D> CharacterPreview::getTexture()
+    std::unique_ptr<MyGUI::ITexture> CharacterPreview::makeGuiTexture()
     {
-        return static_cast<osg::Texture2D*>(mRTTNode->getColorTexture(nullptr));
+        return std::make_unique<MyGUIPlatform::OSGTexture>(
+            static_cast<osg::Texture2D*>(mRTTNode->getColorTexture(nullptr)), mTextureStateSet);
     }
 
     void CharacterPreview::rebuild()
     {
         mAnimation = nullptr;
 
-        mAnimation = new NpcAnimation(mCharacter, mNode, mResourceSystem, true,
+        mAnimation = std::make_unique<NpcAnimation>(mCharacter, mNode, mResourceSystem, true,
             (renderHeadOnly() ? NpcAnimation::VM_HeadOnly : NpcAnimation::VM_Normal));
 
         onSetup();
@@ -399,7 +392,7 @@ namespace MWRender
             if (iter->getType() == ESM::Weapon::sRecordId)
             {
                 MWWorld::LiveCellRef<ESM::Weapon>* ref = iter->get<ESM::Weapon>();
-                int type = ref->mBase->mData.mType;
+                const ESM::RefId type = ref->mBase->mData.mType;
                 const ESM::WeaponType* weaponInfo = MWMechanics::getWeaponType(type);
                 showCarriedLeft = !(weaponInfo->mFlags & ESM::WeaponType::TwoHanded);
 
@@ -412,9 +405,9 @@ namespace MWRender
                 else
                 {
                     static const std::string oneHandFallback
-                        = "inventory" + MWMechanics::getWeaponType(ESM::Weapon::LongBladeOneHand)->mLongGroup;
+                        = "inventory" + MWMechanics::getWeaponType(ESM::WeaponType::LongBladeOneHand)->mLongGroup;
                     static const std::string twoHandFallback
-                        = "inventory" + MWMechanics::getWeaponType(ESM::Weapon::LongBladeTwoHand)->mLongGroup;
+                        = "inventory" + MWMechanics::getWeaponType(ESM::WeaponType::LongBladeTwoHand)->mLongGroup;
 
                     // For real two-handed melee weapons use 2h swords animations as fallback, otherwise use the 1h ones
                     if (weaponInfo->mFlags & ESM::WeaponType::TwoHanded
