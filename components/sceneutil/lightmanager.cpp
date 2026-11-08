@@ -502,7 +502,19 @@ namespace SceneUtil
             mPPLightBuffer->clear(frameNum);
 
         mLights.clear();
-        mLightsInViewSpace.clear();
+        // Keep storage for live cameras, but invalidate all animated-light data.
+        // This avoids rebuilding vector capacity and tree storage every frame.
+        for (auto it = mLightsInViewSpace.begin(); it != mLightsInViewSpace.end();)
+        {
+            if (!it->first.valid())
+                it = mLightsInViewSpace.erase(it);
+            else
+            {
+                it->second.mValid = false;
+                it->second.mIndexBuilt = false;
+                ++it;
+            }
+        }
         mLightListStateSets.clear();
     }
 
@@ -530,12 +542,16 @@ namespace SceneUtil
     osg::ref_ptr<osg::StateSet> LightManager::getLightListStateSet(
         const LightList& lightList, size_t frameNum, const osg::RefMatrix* viewMatrix)
     {
-        std::vector<int> lightIds;
+        mLightListKey.first = viewMatrix;
+        auto& lightIds = mLightListKey.second;
+        lightIds.clear();
         lightIds.reserve(lightList.size());
         for (const LightSourceViewBound* light : lightList)
             lightIds.push_back(light->mLightSource->getId());
 
-        auto [found, inserted] = mLightListStateSets.try_emplace(std::make_pair(viewMatrix, std::move(lightIds)));
+        // Reuse key storage on a hit. try_emplace copies the lvalue key only
+        // when inserting, so cached StateSets keep independent immutable keys.
+        auto [found, inserted] = mLightListStateSets.try_emplace(mLightListKey);
         if (!inserted)
             return found->second;
 
@@ -565,16 +581,15 @@ namespace SceneUtil
     }
 
     const std::vector<LightManager::LightSourceViewBound>& LightManager::getLightsInViewSpace(
-        osgUtil::CullVisitor* cv, const osg::RefMatrix* viewMatrix, size_t frameNum)
+        osgUtil::CullVisitor* cv, const osg::RefMatrix* viewMatrix, size_t frameNum, const LightBoundsIndex** index)
     {
         osg::Camera* camera = cv->getCurrentCamera();
 
         osg::observer_ptr<osg::Camera> camPtr(camera);
-        auto it = mLightsInViewSpace.find(camPtr);
-
-        if (it == mLightsInViewSpace.end())
+        auto it = mLightsInViewSpace.try_emplace(camPtr).first;
+        if (!it->second.mValid)
         {
-            it = mLightsInViewSpace.insert(std::make_pair(camPtr, LightSourceViewBoundCollection())).first;
+            it->second.mLights.clear();
 
             for (const auto& transform : mLights)
             {
@@ -602,7 +617,7 @@ namespace SceneUtil
                 LightSourceViewBound l;
                 l.mLightSource = transform.mLightSource;
                 l.mViewBound = viewBound;
-                it->second.push_back(l);
+                it->second.mLights.push_back(l);
             }
 
             const bool fillPPBuffer = mPPLightBuffer && it->first->getName() == Constants::SceneCamera;
@@ -615,10 +630,10 @@ namespace SceneUtil
                         < right.mViewBound.center().length2() - right.mViewBound.radius2();
                 };
 
-                std::sort(it->second.begin(), it->second.end(), sorter);
+                std::sort(it->second.mLights.begin(), it->second.mLights.end(), sorter);
 
                 osg::CullingSet& cullingSet = cv->getModelViewCullingStack().front();
-                for (auto& bound : it->second)
+                for (auto& bound : it->second.mLights)
                 {
                     const auto* light = bound.mLightSource->getLight(frameNum);
                     const float radius = bound.mLightSource->getRadius() * mPointLightRadiusMultiplier;
@@ -634,9 +649,27 @@ namespace SceneUtil
                         getPPLightsBuffer()->setLight(frameNum, light, radius);
                 }
             }
+            it->second.mValid = true;
         }
 
-        return it->second;
+        if (index)
+        {
+            auto& view = it->second;
+            *index = nullptr;
+            // Small lists are cheaper to scan. Build once per cached camera/frame
+            // only when per-object lighting requests the broad phase.
+            if (view.mLights.size() >= 32 && !mClusteredLighting)
+            {
+                if (!view.mIndexBuilt)
+                {
+                    view.mIndex.build(view.mLights,
+                        [](const LightSourceViewBound& light) -> const auto& { return light.mViewBound; });
+                    view.mIndexBuilt = true;
+                }
+                *index = &view.mIndex;
+            }
+        }
+        return it->second.mLights;
     }
 
     osg::ref_ptr<osg::Uniform> LightManager::generateLightBufferUniform()
@@ -709,6 +742,13 @@ namespace SceneUtil
         {
             mLastFrameNumber = cv->getTraversalNumber();
 
+            const LightBoundsIndex* index = nullptr;
+            const std::vector<LightManager::LightSourceViewBound>& lights
+                = mLightManager->getLightsInViewSpace(cv, viewMatrix, mLastFrameNumber, &index);
+            mLightList.clear();
+            if (lights.empty())
+                return false;
+
             // Get the node bounds in view space
             // NB: do not node->getBound() * modelView, that would apply the node's transformation twice
             osg::BoundingSphere nodeBound;
@@ -723,25 +763,31 @@ namespace SceneUtil
 
             transformBoundingSphere(*cv->getModelViewMatrix(), nodeBound);
 
-            const std::vector<LightManager::LightSourceViewBound>& lights
-                = mLightManager->getLightsInViewSpace(cv, viewMatrix, mLastFrameNumber);
-
-            mLightList.clear();
-            for (const LightManager::LightSourceViewBound& light : lights)
-            {
-                if (mIgnoredLightSources.contains(light.mLightSource))
-                    continue;
-
-                if (light.mViewBound.intersects(nodeBound))
+            const auto appendLight = [&](const LightManager::LightSourceViewBound& light) {
+                if (!mIgnoredLightSources.contains(light.mLightSource) && light.mViewBound.intersects(nodeBound))
                     mLightList.push_back(&light);
+            };
+            const std::size_t candidateBudget = std::min(lights.size() / 2, std::size_t{ 64 });
+            if (index && index->queryCandidates(nodeBound, mLightCandidates, candidateBudget))
+            {
+                // Keep the legacy candidate order, including for equal-priority
+                // lights and the StateSet cache. BVH traversal order is unrelated.
+                std::sort(mLightCandidates.begin(), mLightCandidates.end());
+                for (std::size_t candidate : mLightCandidates)
+                    appendLight(lights[candidate]);
             }
+            else
+                for (const auto& light : lights)
+                    appendLight(light);
 
             const size_t maxLights = mLightManager->getMaxLights();
 
             if (mLightList.size() > maxLights)
             {
                 // Sort by proximity to object: prefer closer lights with larger radius
-                std::sort(mLightList.begin(), mLightList.end(),
+                // Only the closest maxLights entries are consumed. Preserve their
+                // proximity order without sorting the candidates that will be discarded.
+                std::partial_sort(mLightList.begin(), mLightList.begin() + maxLights, mLightList.end(),
                     [&](const SceneUtil::LightManager::LightSourceViewBound* left,
                         const SceneUtil::LightManager::LightSourceViewBound* right) {
                         const float leftDist = (nodeBound.center() - left->mViewBound.center()).length2();

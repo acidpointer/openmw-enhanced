@@ -1,5 +1,7 @@
 #include "waterawaretransparentbin.hpp"
 
+#include <algorithm>
+
 #include <osg/BoundingBox>
 #include <osg/ClipPlane>
 #include <osg/Plane>
@@ -64,6 +66,17 @@ namespace MWRender
         mWaterLeaves.clear();
         mAboveWaterLeaves.clear();
         mStraddlingLeaves.clear();
+        mCameraUnderwater = false;
+
+        // Most indoor and land-only views have no water drawable in this bin.
+        // Do not transform every transparent object's bounds just to discard the
+        // partition and draw the original list in that case.
+        const osg::Drawable* waterDrawable = mWater ? mWater->getDrawable() : nullptr;
+        if (!waterDrawable
+            || std::none_of(_renderLeafList.begin(), _renderLeafList.end(), [waterDrawable](const auto* leaf) {
+                   return leaf && leaf->_drawable.get() == waterDrawable && leaf->_modelview;
+               }))
+            return;
 
         const osg::Matrixd inverseView = osg::Matrixd::inverse(*getStage()->getInitialViewMatrix());
         const double waterHeight = mWater->getHeight();
@@ -76,7 +89,7 @@ namespace MWRender
             if (!leaf || !leaf->_drawable || !leaf->_modelview)
                 continue;
 
-            if (leaf->_drawable == mWater->getDrawable())
+            if (leaf->_drawable.get() == waterDrawable)
                 mWaterLeaves.push_back(leaf);
             else
             {
@@ -89,14 +102,6 @@ namespace MWRender
                 else
                     mStraddlingLeaves.push_back(leaf);
             }
-        }
-
-        if (mWaterLeaves.empty())
-        {
-            mCameraUnderwater = false;
-            mUnderwaterLeaves.clear();
-            mStraddlingLeaves.clear();
-            mAboveWaterLeaves = _renderLeafList;
         }
     }
 

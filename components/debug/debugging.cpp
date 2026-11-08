@@ -492,6 +492,12 @@ namespace Debug
             ret = 1;
         }
 
+        // Retire application callbacks while their GUI/static storage is still
+        // alive. Late stream/library teardown must not reenter the log viewer.
+        std::cout.flush();
+        std::cerr.flush();
+        setLogListener({});
+
         // Restore cout and cerr
         std::cout.rdbuf(rawStdout->rdbuf());
         std::cerr.rdbuf(rawStderr->rdbuf());

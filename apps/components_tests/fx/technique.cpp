@@ -1,6 +1,9 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <fstream>
+#include <iterator>
+
 #include <components/files/configurationmanager.hpp>
 #include <components/fx/technique.hpp>
 #include <components/resource/imagemanager.hpp>
@@ -151,17 +154,17 @@ namespace
 
         TechniqueTest()
             : mVFS(TestingOpenMW::createTestVFS({
-                { techniquePropertiesPath, &techniqueProperties },
-                { rendertargetPropertiesPath, &rendertargetProperties },
-                { uniformPropertiesPath, &uniformProperties },
-                { missingSamplerSourcePath, &missingSamplerSource },
-                { repeatedSharedBlockPath, &repeatedSharedBlock },
-                { invalidNumberInfPath, &invalidNumberInf },
-                { invalidNumberNegativeInfPath, &invalidNumberNegativeInf },
-                { invalidNumberUnsignedLongPath, &invalidNumberUnsignedLong },
-                { invalidNumberHexFloatPath, &invalidNumberHexFloat },
-                { invalidNumberDoublePath, &invalidNumberDouble },
-            }))
+                  { techniquePropertiesPath, &techniqueProperties },
+                  { rendertargetPropertiesPath, &rendertargetProperties },
+                  { uniformPropertiesPath, &uniformProperties },
+                  { missingSamplerSourcePath, &missingSamplerSource },
+                  { repeatedSharedBlockPath, &repeatedSharedBlock },
+                  { invalidNumberInfPath, &invalidNumberInf },
+                  { invalidNumberNegativeInfPath, &invalidNumberNegativeInf },
+                  { invalidNumberUnsignedLongPath, &invalidNumberUnsignedLong },
+                  { invalidNumberHexFloatPath, &invalidNumberHexFloat },
+                  { invalidNumberDoublePath, &invalidNumberDouble },
+              }))
             , mImageManager(mVFS.get(), 0)
         {
         }
@@ -201,6 +204,38 @@ namespace
         EXPECT_EQ(mTechnique->getHDR(), true);
         EXPECT_EQ(mTechnique->getPasses().size(), 1);
         EXPECT_EQ(mTechnique->getPasses().front()->getName(), "main");
+    }
+
+    TEST_F(TechniqueTest, screen_space_shadows_skip_interior_filtering)
+    {
+        const auto path
+            = std::filesystem::path(OPENMW_PROJECT_SOURCE_DIR) / "files/data/shaders/screen_space_shadows.omwfx";
+        std::ifstream stream(path);
+        ASSERT_TRUE(stream.is_open()) << path;
+
+        TestingOpenMW::VFSTestFile file(std::string(std::istreambuf_iterator<char>{ stream }, {}));
+        constexpr VFS::Path::NormalizedView shaderPath("shaders/screen_space_shadows.omwfx");
+        const auto vfs = TestingOpenMW::createTestVFS({ { shaderPath, &file } });
+        Resource::ImageManager imageManager(vfs.get(), 0);
+        Technique technique(*vfs, imageManager, shaderPath, "screen_space_shadows", 2880, 1800, true, true);
+
+        ASSERT_TRUE(technique.compile());
+        EXPECT_NE(technique.getFlags() & Technique::getEnvironmentMask(false, false), 0u);
+        EXPECT_NE(technique.getFlags() & Technique::getEnvironmentMask(true, false), 0u);
+        EXPECT_EQ(technique.getFlags() & Technique::getEnvironmentMask(false, true), 0u);
+        EXPECT_EQ(technique.getFlags() & Technique::getEnvironmentMask(true, true), 0u);
+        EXPECT_EQ(technique.getPasses().size(), 4u);
+        EXPECT_TRUE(technique.getNormals());
+
+        for (const std::string_view name : { "RT_ShadowRaw", "RT_ShadowDirectional", "RT_ShadowBlur" })
+        {
+            const auto target = technique.getRenderTargetsMap().find(name);
+            ASSERT_NE(target, technique.getRenderTargetsMap().end());
+            EXPECT_EQ(target->second.mSize.mWidthRatio, 0.5f);
+            EXPECT_EQ(target->second.mSize.mHeightRatio, 0.5f);
+            EXPECT_EQ(target->second.mTarget->getInternalFormat(), GL_R16F);
+            EXPECT_FALSE(target->second.mMipMap);
+        }
     }
 
     TEST_F(TechniqueTest, rendertarget_properties)

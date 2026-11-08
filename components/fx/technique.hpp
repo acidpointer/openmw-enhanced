@@ -133,6 +133,12 @@ namespace Fx
         static constexpr FlagsType Flag_Disable_SunGlare = (1 << 4);
         static constexpr FlagsType Flag_Hidden = (1 << 5);
 
+        static constexpr FlagsType getEnvironmentMask(bool underwater, bool exterior)
+        {
+            return (underwater ? Flag_Disable_Underwater : Flag_Disable_Abovewater)
+                | (exterior ? Flag_Disable_Exteriors : Flag_Disable_Interiors);
+        }
+
         static VFS::Path::Normalized makeFileName(std::string_view name);
 
         Technique(const VFS::Manager& vfs, Resource::ImageManager& imageManager, VFS::Path::NormalizedView fileName,

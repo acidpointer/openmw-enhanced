@@ -221,6 +221,8 @@ namespace MWRender
 
         void update(size_t frameId);
 
+        void updateBufferRequirements();
+
         void reloadIfRequired();
 
         void updateLiveReload();

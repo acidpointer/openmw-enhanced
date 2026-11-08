@@ -18,10 +18,11 @@
 
 namespace MWRender
 {
-    PingPongCanvas::PingPongCanvas(
-        Shader::ShaderManager& shaderManager, const std::shared_ptr<LuminanceCalculator>& luminanceCalculator)
+    PingPongCanvas::PingPongCanvas(Shader::ShaderManager& shaderManager,
+        const std::shared_ptr<LuminanceCalculator>& luminanceCalculator, DistortionCallback* distortionCallback)
         : mFallbackStateSet(new osg::StateSet)
         , mMultiviewResolveStateSet(new osg::StateSet)
+        , mDistortionCallback(distortionCallback)
         , mLuminanceCalculator(luminanceCalculator)
     {
         setUseDisplayList(false);
@@ -55,13 +56,12 @@ namespace MWRender
     void PingPongCanvas::setPasses(Fx::DispatchArray&& passes)
     {
         mPasses = std::move(passes);
+        mDirty = true;
     }
 
     void PingPongCanvas::setMask(bool underwater, bool exterior)
     {
-        mMask = 0;
-        mMask |= underwater ? Fx::Technique::Flag_Disable_Underwater : Fx::Technique::Flag_Disable_Abovewater;
-        mMask |= exterior ? Fx::Technique::Flag_Disable_Exteriors : Fx::Technique::Flag_Disable_Interiors;
+        mMask = Fx::Technique::getEnvironmentMask(underwater, exterior);
     }
 
     void PingPongCanvas::drawGeometry(osg::RenderInfo& renderInfo) const
@@ -136,6 +136,29 @@ namespace MWRender
             }
         }
 
+        auto beginGpuTiming = [&](std::string_view effect, std::string_view pass = {}) -> std::optional<GpuTiming> {
+            if (!gpuTimings || pendingTimings.size() >= 256)
+                return std::nullopt;
+
+            GpuTiming timing;
+            timing.mFrame = frameNumber;
+            timing.mName = "GPU postprocess " + std::string(effect);
+            if (!pass.empty())
+                timing.mName += "/" + std::string(pass);
+            timing.mName += " time taken";
+            timing.mStats = mGpuTimingStats;
+            ext->glGenQueries(2, timing.mQueries.data());
+            ext->glQueryCounter(timing.mQueries[0], GL_TIMESTAMP);
+            return timing;
+        };
+
+        auto endGpuTiming = [&](std::optional<GpuTiming>& timing) {
+            if (!timing)
+                return;
+            ext->glQueryCounter(timing->mQueries[1], GL_TIMESTAMP);
+            pendingTimings.push_back(std::move(*timing));
+        };
+
         std::vector<size_t> filtered;
 
         filtered.reserve(mPasses.size());
@@ -147,10 +170,40 @@ namespace MWRender
             if (mMask & node.mFlags)
                 continue;
 
+            if (node.mHandle->getInternal() && node.mHandle->getName() == "internal_distortion" && mDistortionCallback
+                && !mDistortionCallback->hasDistortion(state.getContextID(), frameNumber))
+                continue;
+
             filtered.push_back(i);
         }
 
         auto* resolveViewport = state.getCurrentViewport();
+
+        if (mDirty)
+        {
+            mFbos.fill(nullptr);
+            mMultiviewResolveFramebuffer = nullptr;
+            mLuminanceCalculator->dirty(mTextureScene->getTextureWidth(), mTextureScene->getTextureHeight());
+
+            if (Stereo::getStereo())
+                mRenderViewport
+                    = new osg::Viewport(0, 0, mTextureScene->getTextureWidth(), mTextureScene->getTextureHeight());
+            else
+                mRenderViewport = nullptr;
+
+            mDirty = false;
+        }
+
+        auto reportIntermediates = [&]() {
+            if (!mGpuTimingStats || !mGpuTimingStats->collectStats("resource"))
+                return;
+
+            unsigned int allocated = 0;
+            for (const auto& fbo : mFbos)
+                if (fbo && fbo->getHandle(state.getContextID()) != 0)
+                    ++allocated;
+            mGpuTimingStats->setAttribute(frameNumber, "Postprocess intermediates", allocated);
+        };
 
         if (filtered.empty() || !mPostprocessing)
         {
@@ -166,52 +219,51 @@ namespace MWRender
             state.applyTextureAttribute(0, mTextureScene);
             resolveViewport->apply(state);
 
+            auto timing = beginGpuTiming("presentation");
             drawGeometry(renderInfo);
+            endGpuTiming(timing);
             state.popStateSet();
 
             if (Stereo::getMultiview())
                 state.popStateSet();
 
             cacheEmptyUniformStacks(uniformMap, emptyUniformStacks);
+            reportIntermediates();
             return;
         }
 
-        const unsigned int handle = mFbos[0] ? mFbos[0]->getHandle(state.getContextID()) : 0;
-
-        if (handle == 0 || mDirty)
-        {
-            for (auto& fbo : mFbos)
+        // A single resolving pass needs no intermediate scene textures. Allocate a ping-pong
+        // buffer only when a pass actually writes to it, rather than clearing three full-size
+        // buffers on each canvas just because post-processing is enabled.
+        auto bindIntermediateFbo = [&](int attachment) {
+            auto& fbo = mFbos[attachment - GL_COLOR_ATTACHMENT0_EXT];
+            if (!fbo)
             {
                 fbo = new osg::FrameBufferObject;
                 attachCloneOfTemplate(fbo, osg::FrameBufferObject::BufferComponent::COLOR_BUFFER0, mTextureScene);
-                fbo->apply(state);
-                glClearColor(0.5, 0.5, 0.5, 1);
-                glClear(GL_COLOR_BUFFER_BIT);
             }
 
-            if (Stereo::getMultiview())
+            const bool initialize = fbo->getHandle(state.getContextID()) == 0;
+            fbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
+            if (initialize)
             {
-                mMultiviewResolveFramebuffer = new osg::FrameBufferObject();
-                attachCloneOfTemplate(mMultiviewResolveFramebuffer,
-                    osg::FrameBufferObject::BufferComponent::COLOR_BUFFER0, mTextureScene);
-                mMultiviewResolveFramebuffer->apply(state);
                 glClearColor(0.5, 0.5, 0.5, 1);
                 glClear(GL_COLOR_BUFFER_BIT);
-
-                mMultiviewResolveStateSet->setTextureAttribute(PostProcessor::Unit_LastShader,
-                    (osg::Texture*)mMultiviewResolveFramebuffer->getAttachment(osg::Camera::COLOR_BUFFER0)
-                        .getTexture());
             }
+            return fbo->getHandle(state.getContextID());
+        };
 
-            mLuminanceCalculator->dirty(mTextureScene->getTextureWidth(), mTextureScene->getTextureHeight());
+        if (Stereo::getMultiview() && !mMultiviewResolveFramebuffer)
+        {
+            mMultiviewResolveFramebuffer = new osg::FrameBufferObject();
+            attachCloneOfTemplate(
+                mMultiviewResolveFramebuffer, osg::FrameBufferObject::BufferComponent::COLOR_BUFFER0, mTextureScene);
+            mMultiviewResolveFramebuffer->apply(state);
+            glClearColor(0.5, 0.5, 0.5, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
 
-            if (Stereo::getStereo())
-                mRenderViewport
-                    = new osg::Viewport(0, 0, mTextureScene->getTextureWidth(), mTextureScene->getTextureHeight());
-            else
-                mRenderViewport = nullptr;
-
-            mDirty = false;
+            mMultiviewResolveStateSet->setTextureAttribute(PostProcessor::Unit_LastShader,
+                (osg::Texture*)mMultiviewResolveFramebuffer->getAttachment(osg::Camera::COLOR_BUFFER0).getTexture());
         }
 
         constexpr std::array<std::array<int, 2>, 3> buffers
@@ -223,14 +275,19 @@ namespace MWRender
 
         // A histogram based approach is superior way to calculate scene luminance. Using mipmaps is more broadly
         // supported, so that's what we use for now.
-        mLuminanceCalculator->draw(*this, renderInfo, state, ext, frameId);
+        if (mAvgLum)
+        {
+            auto timing = beginGpuTiming("luminance");
+            mLuminanceCalculator->draw(*this, renderInfo, state, ext, frameId);
+            endGpuTiming(timing);
+        }
 
         auto buffer = buffers[0];
 
         int lastDraw = 0;
         int lastShader = 0;
 
-        unsigned int lastApplied = handle;
+        unsigned int lastApplied = 0;
 
         const unsigned int cid = state.getContextID();
 
@@ -281,7 +338,7 @@ namespace MWRender
                 attachment.mClearColor.a());
             glClear(GL_COLOR_BUFFER_BIT);
 
-            if (attachment.mTarget->getNumMipmapLevels() > 0)
+            if (attachment.mMipMap)
             {
                 state.setActiveTextureUnit(0);
                 state.applyTextureAttribute(0, attachment.mTarget);
@@ -353,18 +410,14 @@ namespace MWRender
                 {
                     lastDraw = buffer[0];
                     lastShader = buffer[0];
-                    mFbos[buffer[0] - GL_COLOR_ATTACHMENT0_EXT]->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
+                    lastApplied = bindIntermediateFbo(buffer[0]);
                     buffer = buffers[lastShader - GL_COLOR_ATTACHMENT0_EXT];
-
-                    lastApplied = mFbos[buffer[0] - GL_COLOR_ATTACHMENT0_EXT]->getHandle(cid);
                 }
                 else
                 {
-                    mFbos[buffer[0] - GL_COLOR_ATTACHMENT0_EXT]->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
+                    lastApplied = bindIntermediateFbo(buffer[0]);
                     lastDraw = buffer[0];
                     std::swap(buffer[0], buffer[1]);
-
-                    lastApplied = mFbos[buffer[0] - GL_COLOR_ATTACHMENT0_EXT]->getHandle(cid);
                 }
 
                 state.pushStateSet(pass.mStateSet);
@@ -373,22 +426,15 @@ namespace MWRender
                 if (!state.getLastAppliedProgramObject())
                     mFallbackProgram->apply(state);
 
-                std::optional<GpuTiming> timing;
-                if (gpuTimings && pendingTimings.size() < 256)
-                {
-                    timing.emplace();
-                    timing->mFrame = frameNumber;
-                    timing->mName = "GPU postprocess " + node.mHandle->getName() + "/" + pass.mName + " time taken";
-                    timing->mStats = mGpuTimingStats;
-                    ext->glGenQueries(2, timing->mQueries.data());
-                    ext->glQueryCounter(timing->mQueries[0], GL_TIMESTAMP);
-                }
+                auto timing = beginGpuTiming(node.mHandle->getName(), pass.mName);
                 {
                     Debug::Trace::Scope trace("Postprocess draw dispatch", frameNumber);
                     drawGeometry(renderInfo);
                 }
 
-                if (pass.mRenderTarget && pass.mRenderTexture->getNumMipmapLevels() > 0)
+                // The effect declaration controls generation, not the allocated level count
+                // (which can also include just the base level).
+                if (pass.mRenderTarget && pass.mMipMap)
                 {
                     state.setActiveTextureUnit(0);
                     state.applyTextureAttribute(0,
@@ -397,11 +443,7 @@ namespace MWRender
                     ext->glGenerateMipmap(GL_TEXTURE_2D);
                 }
 
-                if (timing)
-                {
-                    ext->glQueryCounter(timing->mQueries[1], GL_TIMESTAMP);
-                    pendingTimings.push_back(std::move(*timing));
-                }
+                endGpuTiming(timing);
                 state.popStateSet();
                 state.apply();
             }
@@ -431,5 +473,6 @@ namespace MWRender
 
         cacheEmptyUniformStacks(uniformMap, emptyUniformStacks);
         mDirtyAttachments.clear();
+        reportIntermediates();
     }
 }

@@ -7,14 +7,32 @@
 #include <osg/Version>
 #include <osgDB/FileUtils>
 #include <osgDB/PluginQuery>
+#include <osgDB/Registry>
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <filesystem>
 #include <string_view>
 
 namespace Misc
 {
+    void configureOSGPluginPaths()
+    {
+#ifdef __linux__
+        const char* appImage = std::getenv("OPENMW_ENHANCED_APPIMAGE");
+        const char* paths = std::getenv("OPENMW_ENHANCED_OSG_LIBRARY_PATH");
+        if (appImage && std::string_view(appImage) == "1" && paths && *paths)
+        {
+            // OSG appends its compiled-in host directories to OSG_LIBRARY_PATH.
+            // An omitted lazy reader (e.g. glsl) can load another OSG ABI from
+            // those directories, corrupting registries through symbol interposition.
+            // Replace the list before loading any plugins; preserve native installs.
+            osgDB::Registry::instance()->setLibraryFilePathList(std::string(paths));
+        }
+#endif
+    }
+
 #if defined(OSG_LIBRARY_STATIC) || defined(__APPLE__)
 
     bool checkRequiredOSGPluginsArePresent()

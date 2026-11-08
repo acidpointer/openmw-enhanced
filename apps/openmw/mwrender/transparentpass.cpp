@@ -2,8 +2,11 @@
 
 #include "water.hpp"
 
+#include <algorithm>
+
 #include <osg/AlphaFunc>
 #include <osg/BlendFunc>
+#include <osg/ColorMask>
 #include <osg/Texture2D>
 #include <osg/Texture2DArray>
 
@@ -29,7 +32,8 @@ namespace MWRender
             if (!stateSet || !stateSet->getAttribute(osg::StateAttribute::MATERIAL))
                 return true;
 
-            const auto* mat = static_cast<const SceneUtil::Material*>(stateSet->getAttribute(osg::StateAttribute::MATERIAL));
+            const auto* mat
+                = static_cast<const SceneUtil::Material*>(stateSet->getAttribute(osg::StateAttribute::MATERIAL));
             return mat->getDiffuse().a() >= 0.5f;
         }
 
@@ -46,24 +50,6 @@ namespace MWRender
                 return false;
 
             return true;
-        }
-
-        struct TransparentDepthStats
-        {
-            unsigned int mLeaves = 0;
-            unsigned int mReplay = 0;
-        };
-
-        TransparentDepthStats collectTransparentDepthStats(osgUtil::RenderBin* bin)
-        {
-            TransparentDepthStats stats;
-            for (osgUtil::RenderLeaf* leaf : bin->getRenderLeafList())
-            {
-                ++stats.mLeaves;
-                if (shouldReplayTransparentLeaf(leaf))
-                    ++stats.mReplay;
-            }
-            return stats;
         }
     }
 
@@ -88,6 +74,9 @@ namespace MWRender
         Stereo::shaderStereoDefines(defines);
 
         mStateSet->setAttributeAndModes(new osg::BlendFunc, modeOff);
+        // Omitting a fragment color output does not disable color writes. This
+        // FBO also contains the opaque scene color used for water refraction.
+        mStateSet->setAttributeAndModes(new osg::ColorMask(false, false, false, false), modeOn);
         mStateSet->setAttributeAndModes(shaderManager.getProgram("depthclipped", defines), modeOn);
         mStateSet->setAttributeAndModes(new SceneUtil::AutoDepth, modeOn);
     }
@@ -126,8 +115,13 @@ namespace MWRender
         if (!mPostPass)
             return;
 
-        const TransparentDepthStats stats = collectTransparentDepthStats(bin);
-        if (stats.mReplay == 0)
+        const osg::Drawable* waterDrawable = mWater ? mWater->getDrawable() : nullptr;
+        const auto shouldReplay = [waterDrawable](osgUtil::RenderLeaf* leaf) {
+            return shouldReplayTransparentLeaf(leaf) && leaf->_drawable.get() != waterDrawable;
+        };
+        const auto& leaves = bin->getRenderLeafList();
+        const auto first = std::find_if(leaves.begin(), leaves.end(), shouldReplay);
+        if (first == leaves.end())
             return;
 
         opaqueFbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
@@ -140,14 +134,11 @@ namespace MWRender
         unsigned int insertStateSetPosition = state.getStateSetStackSize() - numToPop;
 
         state.insertStateSet(insertStateSetPosition, mStateSet);
-        for (auto rit = bin->getRenderLeafList().begin(); rit != bin->getRenderLeafList().end(); rit++)
+        for (auto rit = first; rit != leaves.end(); ++rit)
         {
             osgUtil::RenderLeaf* rl = *rit;
 
-            if (!shouldReplayTransparentLeaf(rl))
-                continue;
-
-            if (mWater && rl->_drawable.get() == mWater->getDrawable())
+            if (!shouldReplay(rl))
                 continue;
 
             rl->render(renderInfo, previous);

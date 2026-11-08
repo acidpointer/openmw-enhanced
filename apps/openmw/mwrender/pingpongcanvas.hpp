@@ -15,6 +15,7 @@
 
 #include <components/fx/technique.hpp>
 
+#include "distortion.hpp"
 #include "luminancecalculator.hpp"
 
 namespace Shader
@@ -27,8 +28,8 @@ namespace MWRender
     class PingPongCanvas : public osg::Geometry
     {
     public:
-        PingPongCanvas(
-            Shader::ShaderManager& shaderManager, const std::shared_ptr<LuminanceCalculator>& luminanceCalculator);
+        PingPongCanvas(Shader::ShaderManager& shaderManager,
+            const std::shared_ptr<LuminanceCalculator>& luminanceCalculator, DistortionCallback* distortionCallback);
 
         void drawGeometry(osg::RenderInfo& renderInfo) const;
 
@@ -84,6 +85,7 @@ namespace MWRender
         osg::ref_ptr<osg::Texture> mTextureWorldDepth;
         osg::ref_ptr<osg::Texture> mTextureNormals;
         osg::ref_ptr<osg::Texture> mTextureDistortion;
+        osg::ref_ptr<DistortionCallback> mDistortionCallback;
 
         struct GpuTiming
         {

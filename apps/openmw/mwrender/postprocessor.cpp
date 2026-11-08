@@ -138,13 +138,18 @@ namespace MWRender
         , mPingPongCull(new PingPongCull(this))
         , mDistortionCallback(new DistortionCallback)
     {
+        // HUD, framebuffer, and technique construction below all use these sizes.
+        osg::GraphicsContext* gc = viewer->getCamera()->getGraphicsContext();
+        mWidth = gc->getTraits()->width;
+        mHeight = gc->getTraits()->height;
+
         auto& shaderManager = mRendering.getResourceSystem()->getSceneManager()->getShaderManager();
 
         std::shared_ptr<LuminanceCalculator> luminanceCalculator = std::make_shared<LuminanceCalculator>(shaderManager);
 
         for (auto& canvas : mCanvases)
         {
-            canvas = new PingPongCanvas(shaderManager, luminanceCalculator);
+            canvas = new PingPongCanvas(shaderManager, luminanceCalculator, mDistortionCallback);
             canvas->setGpuTimingStats(mViewer->getViewerStats());
         }
 
@@ -210,11 +215,7 @@ namespace MWRender
         distortion->setLocked(true);
         mInternalTechniques.push_back(std::move(distortion));
 
-        osg::GraphicsContext* gc = viewer->getCamera()->getGraphicsContext();
         osg::GLExtensions* ext = gc->getState()->get<osg::GLExtensions>();
-
-        mWidth = gc->getTraits()->width;
-        mHeight = gc->getTraits()->height;
 
         if (!ext->glDisablei && ext->glDisableIndexedEXT)
             ext->glDisablei = ext->glDisableIndexedEXT;
@@ -434,6 +435,8 @@ namespace MWRender
 
         reloadIfRequired();
 
+        updateBufferRequirements();
+
         mCanvases[frameId]->setNodeMask(~0u);
         mCanvases[!frameId]->setNodeMask(0);
 
@@ -474,6 +477,31 @@ namespace MWRender
         }
     }
 
+    void PostProcessor::updateBufferRequirements()
+    {
+        // A technique kept in the chain may be disabled in this environment. Its
+        // inactive passes must not force normals output, light collection, or HDR
+        // luminance calculation. Re-evaluate on transitions and on the global toggle.
+        mHDR = false;
+        mNormals = false;
+        mPassLights = false;
+
+        if (!mUsePostProcessing)
+            return;
+
+        const Fx::FlagsType mask = Fx::Technique::getEnvironmentMask(mUnderwater, mExteriorFlag);
+
+        for (const auto& node : mTemplateData)
+        {
+            if (node.mFlags & mask)
+                continue;
+
+            mHDR |= node.mHandle->getHDR();
+            mNormals |= node.mHandle->getNormals();
+            mPassLights |= node.mHandle->getLights();
+        }
+    }
+
     void PostProcessor::createObjectsForFrame(size_t frameId)
     {
         auto& textures = mTextures[frameId];
@@ -481,8 +509,39 @@ namespace MWRender
         int width = renderWidth();
         int height = renderHeight();
 
-        for (osg::ref_ptr<osg::Texture>& texture : textures)
+        for (std::size_t index = 0; index < textures.size(); ++index)
         {
+            auto& texture = textures[index];
+            int textureWidth = width;
+            int textureHeight = height;
+            GLenum sourceFormat = GL_RGBA;
+            GLenum sourceType = GL_UNSIGNED_BYTE;
+            GLint internalFormat = GL_RGBA;
+            osg::Texture::FilterMode filter = osg::Texture::LINEAR;
+            switch (index)
+            {
+                case Tex_Normal:
+                    // Preserve half-float precision for additive terrain-normal blending.
+                    sourceFormat = GL_RGB;
+                    sourceType = GL_HALF_FLOAT;
+                    internalFormat = GL_RGB16F;
+                    break;
+                case Tex_Distortion:
+                    sourceFormat = GL_RGB;
+                    internalFormat = GL_RGB;
+                    textureWidth = std::max(1, static_cast<int>(width * DistortionRatio));
+                    textureHeight = std::max(1, static_cast<int>(height * DistortionRatio));
+                    break;
+                case Tex_Depth:
+                case Tex_OpaqueDepth:
+                case Tex_WorldDepth:
+                    sourceFormat = GL_DEPTH_STENCIL_EXT;
+                    sourceType = SceneUtil::AutoDepth::depthSourceType();
+                    internalFormat = SceneUtil::AutoDepth::depthInternalFormat();
+                    filter = osg::Texture::NEAREST;
+                    break;
+            }
+
             if (!texture)
             {
                 if (Stereo::getMultiview())
@@ -490,43 +549,27 @@ namespace MWRender
                 else
                     texture = new osg::Texture2D;
             }
-            Stereo::setMultiviewCompatibleTextureSize(texture, width, height);
-            texture->setSourceFormat(GL_RGBA);
-            texture->setSourceType(GL_UNSIGNED_BYTE);
-            texture->setInternalFormat(GL_RGBA);
-            texture->setFilter(osg::Texture2D::MIN_FILTER, osg::Texture::LINEAR);
-            texture->setFilter(osg::Texture2D::MAG_FILTER, osg::Texture::LINEAR);
+            // Reattaching a normals target or changing light requirements does
+            // not resize the scene. Keep existing texture storage in that case.
+            const bool storageChanged = texture->getTextureWidth() != textureWidth
+                || texture->getTextureHeight() != textureHeight || texture->getSourceFormat() != sourceFormat
+                || texture->getSourceType() != sourceType || texture->getInternalFormat() != internalFormat;
+            if (storageChanged)
+            {
+                Stereo::setMultiviewCompatibleTextureSize(texture, textureWidth, textureHeight);
+                texture->setSourceFormat(sourceFormat);
+                texture->setSourceType(sourceType);
+                texture->setInternalFormat(internalFormat);
+            }
+            texture->setFilter(osg::Texture2D::MIN_FILTER, filter);
+            texture->setFilter(osg::Texture2D::MAG_FILTER, filter);
             texture->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
             texture->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
             texture->setResizeNonPowerOfTwoHint(false);
-            Stereo::setMultiviewCompatibleTextureSize(texture, width, height);
-            texture->dirtyTextureObject();
+            if (storageChanged)
+                texture->dirtyTextureObject();
         }
 
-        // f16 normals: u8 isn't quite accurate enough even for opaque objects, but now we also
-        //  need to blend terrain normals, and it's additive, so now u8 rounding losses would pile up.
-        textures[Tex_Normal]->setSourceFormat(GL_RGB);
-        textures[Tex_Normal]->setSourceType(GL_HALF_FLOAT);
-        textures[Tex_Normal]->setInternalFormat(GL_RGB16F);
-
-        textures[Tex_Distortion]->setSourceFormat(GL_RGB);
-        textures[Tex_Distortion]->setInternalFormat(GL_RGB);
-
-        Stereo::setMultiviewCompatibleTextureSize(textures[Tex_Distortion], static_cast<int>(width * DistortionRatio),
-            static_cast<int>(height * DistortionRatio));
-        textures[Tex_Distortion]->dirtyTextureObject();
-
-        auto setupDepth = [](osg::Texture* tex) {
-            tex->setSourceFormat(GL_DEPTH_STENCIL_EXT);
-            tex->setSourceType(SceneUtil::AutoDepth::depthSourceType());
-            tex->setInternalFormat(SceneUtil::AutoDepth::depthInternalFormat());
-            tex->setFilter(osg::Texture2D::MIN_FILTER, osg::Texture::NEAREST);
-            tex->setFilter(osg::Texture2D::MAG_FILTER, osg::Texture::NEAREST);
-        };
-
-        setupDepth(textures[Tex_Depth]);
-        setupDepth(textures[Tex_OpaqueDepth]);
-        setupDepth(textures[Tex_WorldDepth]);
         textures[Tex_OpaqueDepth]->setName("opaqueTexMap");
         textures[Tex_WorldDepth]->setName("worldDepthTexMap");
         textures[Tex_OpaqueColor]->setName("opaqueTexColorMap");

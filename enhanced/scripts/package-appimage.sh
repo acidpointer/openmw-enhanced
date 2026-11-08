@@ -58,23 +58,89 @@ if [[ -z "${OSG_VERSION}" || ! -f "${OSG_DB_LIBRARY}" ]]; then
     echo "Cannot determine the build's shared OSG library/version from CMakeCache.txt." >&2
     exit 1
 fi
-OSG_PLUGIN_DIR="$(dirname -- "${OSG_DB_LIBRARY}")/osgPlugins-${OSG_VERSION}"
+OSG_LIBRARY_DIR="$(dirname -- "${OSG_DB_LIBRARY}")"
+OSG_SONAME="$(readelf -d "${OSG_DB_LIBRARY}" | sed -n 's/.*(SONAME).*\[\(.*\)\].*/\1/p')"
+if [[ ! "${OSG_SONAME}" =~ ^libosgDB\.so\.([0-9]+)$ ]]; then
+    echo "Cannot determine the build's OSG ABI from ${OSG_DB_LIBRARY}." >&2
+    exit 1
+fi
+OSG_ABI="${BASH_REMATCH[1]}"
+OSG_PLUGIN_DIR="${OSG_LIBRARY_DIR}/osgPlugins-${OSG_VERSION}"
 OSG_PLUGIN_DEST="${APPDIR}/usr/lib/osgPlugins-${OSG_VERSION}"
 mkdir -p "${OSG_PLUGIN_DEST}"
+ln -sfn "osgPlugins-${OSG_VERSION}" "${APPDIR}/usr/lib/openmw-osg-plugins"
 
-osg_library_args=()
-for plugin in bmp dae dds freetype jpeg osg png serializers_osg tga; do
+# Serializers lazily dlopen unversioned node-kit names (libosg.so, libosgFX.so,
+# etc.). SONAME-only deployment leaves those lookups free to load host libraries
+# with a different ABI. Keep the aliases and their targets from this build.
+shopt -s nullglob
+osg_libraries=("${OSG_LIBRARY_DIR}"/libosg*.so."${OSG_ABI}")
+if (( ${#osg_libraries[@]} == 0 )); then
+    echo "No OSG libraries found for ABI ${OSG_ABI}." >&2
+    exit 1
+fi
+osg_dependency_args=()
+for library in "${osg_libraries[@]}"; do
+    library_name="$(basename -- "${library}")"
+    library_soname="$(readelf -d "${library}" | sed -n 's/.*(SONAME).*\[\(.*\)\].*/\1/p')"
+    if [[ "${library_soname}" != "${library_name}" ]]; then
+        echo "Unexpected OSG library SONAME in ${library}: ${library_soname}" >&2
+        exit 1
+    fi
+    cp -L "${library}" "${APPDIR}/usr/lib/${library_name}"
+    ln -sfn "${library_name}" "${APPDIR}/usr/lib/${library_name%.${OSG_ABI}}"
+    osg_dependency_args+=(--deploy-deps-only "${APPDIR}/usr/lib/${library_name}")
+done
+
+osg_plugins=(bmp dae dds deprecated_osg freetype glsl jpeg osg png serializers_osg tga)
+declare -A included_plugins=()
+for plugin in "${osg_plugins[@]}"; do
+    included_plugins["${plugin}"]=1
+done
+# Both current and legacy scene readers load wrappers on demand. Keep those
+# wrappers with the matching core libraries instead of falling back to the host.
+for plugin_file in "${OSG_PLUGIN_DIR}"/osgdb_serializers_*.so "${OSG_PLUGIN_DIR}"/osgdb_deprecated_*.so; do
+    plugin="$(basename -- "${plugin_file}" .so)"
+    plugin="${plugin#osgdb_}"
+    if [[ ! -v "included_plugins[${plugin}]" ]]; then
+        osg_plugins+=("${plugin}")
+        included_plugins["${plugin}"]=1
+    fi
+done
+
+check_osg_dependencies() {
+    local binary="$1" dependency dynamic
+    local -a dependencies
+    dynamic="$(readelf -d "${binary}")" || return 1
+    mapfile -t dependencies < <(sed -n 's/.*(NEEDED).*\[\(libosg[^]]*\)\].*/\1/p' <<< "${dynamic}")
+    for dependency in "${dependencies[@]}"; do
+        if [[ "${dependency}" != *.so."${OSG_ABI}" || ! -f "${APPDIR}/usr/lib/${dependency}" ]]; then
+            echo "OSG ABI mismatch or missing bundled dependency in ${binary}: ${dependency}" >&2
+            exit 1
+        fi
+    done
+}
+
+for plugin in "${osg_plugins[@]}"; do
     plugin_file="${OSG_PLUGIN_DIR}/osgdb_${plugin}.so"
     if [[ ! -f "${plugin_file}" ]]; then
         echo "Missing required OSG plugin: ${plugin_file}" >&2
         exit 1
     fi
     cp -L "${plugin_file}" "${OSG_PLUGIN_DEST}/"
-    osg_library_args+=(--library "${OSG_PLUGIN_DEST}/osgdb_${plugin}.so")
+    # --library flattened a second physical copy into usr/lib. Loading the
+    # versioned and bare names can register the same OSG wrappers twice.
+    # Remove only these known stale deployment artifacts from cached AppDirs.
+    rm -f -- "${APPDIR}/usr/lib/osgdb_${plugin}.so"
+done
+for binary in "${OSG_PLUGIN_DEST}"/osgdb_*.so "${APPDIR}"/usr/lib/libosg*.so."${OSG_ABI}"; do
+    check_osg_dependencies "${binary}"
 done
 
 export APPIMAGE_EXTRACT_AND_RUN=1
-export OUTPUT="${DIST_DIR}/OpenMW-Enhanced-x86_64.AppImage"
+# Publish only after the staged layout passes its checks. Keep an existing
+# working AppImage intact if deployment or validation fails.
+export OUTPUT="${DIST_DIR}/.OpenMW-Enhanced-x86_64.AppImage.pending"
 
 "${LINUXDEPLOY}" \
     --appdir "${APPDIR}" \
@@ -82,8 +148,40 @@ export OUTPUT="${DIST_DIR}/OpenMW-Enhanced-x86_64.AppImage"
     --icon-file "${APPDIR}/usr/share/icons/hicolor/256x256/apps/openmw-enhanced.png" \
     --executable "${APPDIR}/usr/bin/openmw-launcher" \
     --executable "${APPDIR}/usr/bin/openmw" \
-    "${osg_library_args[@]}" \
+    "${osg_dependency_args[@]}" \
+    --deploy-deps-only "${OSG_PLUGIN_DEST}" \
     --plugin qt \
     --output appimage
+
+for plugin in "${osg_plugins[@]}"; do
+    flat_plugin="${APPDIR}/usr/lib/osgdb_${plugin}.so"
+    canonical_plugin="${OSG_PLUGIN_DEST}/osgdb_${plugin}.so"
+    if [[ ! -f "${canonical_plugin}" ]]; then
+        echo "Missing canonical OSG plugin after deployment: ${canonical_plugin}" >&2
+        exit 1
+    fi
+    if [[ -e "${flat_plugin}" || -L "${flat_plugin}" ]]; then
+        if [[ ! "${flat_plugin}" -ef "${canonical_plugin}" ]]; then
+            echo "Duplicate physical OSG plugin after deployment: ${flat_plugin}" >&2
+            exit 1
+        fi
+    fi
+done
+for library in "${osg_libraries[@]}"; do
+    library_name="$(basename -- "${library}")"
+    if [[ ! "${APPDIR}/usr/lib/${library_name%.${OSG_ABI}}" -ef "${APPDIR}/usr/lib/${library_name}" ]]; then
+        echo "Missing or incorrect bundled OSG node-kit alias: ${library_name%.${OSG_ABI}}" >&2
+        exit 1
+    fi
+done
+for binary in "${OSG_PLUGIN_DEST}"/osgdb_*.so "${APPDIR}"/usr/lib/libosg*.so."${OSG_ABI}"; do
+    check_osg_dependencies "${binary}"
+done
+if [[ ! "${APPDIR}/usr/lib/openmw-osg-plugins" -ef "${OSG_PLUGIN_DEST}" ]]; then
+    echo "OSG plugin alias no longer points to the build's plugin directory." >&2
+    exit 1
+fi
+mv -f -- "${OUTPUT}" "${DIST_DIR}/OpenMW-Enhanced-x86_64.AppImage"
+OUTPUT="${DIST_DIR}/OpenMW-Enhanced-x86_64.AppImage"
 
 echo "AppImage written to ${OUTPUT}"

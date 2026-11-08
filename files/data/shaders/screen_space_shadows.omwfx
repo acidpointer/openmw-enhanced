@@ -109,14 +109,20 @@ shared {
         return saturate(min(edge.x, edge.y) * 28.0);
     }
 
-    bool firstPersonOverlayAt(vec2 uv)
+    bool firstPersonOverlayAt(vec2 uv, float worldDepth)
     {
         if (!omw.enhancedIsFirstPerson)
             return false;
 
         float sceneDepth = omw_GetLinearDepth(uv);
-        float worldDepth = omw_GetWorldLinearDepth(uv);
         return sceneDepth + 4.0 < worldDepth;
+    }
+
+    bool firstPersonOverlayAt(vec2 uv)
+    {
+        if (!omw.enhancedIsFirstPerson)
+            return false;
+        return firstPersonOverlayAt(uv, omw_GetWorldLinearDepth(uv));
     }
 
     float depthLayerTolerance(float depth)
@@ -211,11 +217,8 @@ fragment shadow_raw(target=RT_ShadowRaw) {
         if (edgeFade <= 0.0)
             return 0.0;
 
-        if (firstPersonOverlayAt(sampleUv))
-            return 0.0;
-
         float sampleDepth = omw_GetWorldLinearDepth(sampleUv);
-        if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION)
+        if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(sampleUv, sampleDepth))
             return 0.0;
 
         float receiverLayerWeight = depthLayerWeight(receiverLinearDepth, sampleDepth, 3.0);
@@ -330,7 +333,7 @@ fragment shadow_raw(target=RT_ShadowRaw) {
         if (centerDepth >= omw.far * SKY_DEPTH_FRACTION)
             return 0.0;
 
-        if (firstPersonOverlayAt(uv))
+        if (firstPersonOverlayAt(uv, centerDepth))
             return 0.0;
 
         if (omw.isInterior)
@@ -364,21 +367,29 @@ fragment shadow_directional(target=RT_ShadowDirectional, rt1=RT_ShadowRaw) {
     void main()
     {
         float centerDepth = omw_GetWorldLinearDepth(omw_TexCoord);
-        if (centerDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(omw_TexCoord))
+        if (centerDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(omw_TexCoord, centerDepth))
         {
             omw_FragColor = vec4(0.0, 1.0, 1.0, 1.0);
             return;
         }
 
+        float softness = clamp(uSoftness, 0.0, 2.5);
+        float center = omw_Texture2D(RT_ShadowRaw, omw_TexCoord).r;
+        if (softness == 0.0)
+        {
+            omw_FragColor = vec4(center, 1.0, 1.0, 1.0);
+            return;
+        }
+
 #if OMW_NORMALS
-        vec3 centerNormal = normalWorldFromBuffer(omw_TexCoord);
+        // Camera rotation preserves normal dot products. Filtering in view space
+        // avoids a world-space matrix transform for every tap.
+        vec3 centerNormal = normalize(omw_GetNormals(omw_TexCoord));
 #endif
 
         vec2 axis = projectedLightAxis(omw_TexCoord, centerDepth);
         vec2 texel = shadowBufferTexel();
-        float softness = clamp(uSoftness, 0.0, 2.5);
         float radius = mix(0.9, 3.8, softness / 2.5);
-        float center = omw_Texture2D(RT_ShadowRaw, omw_TexCoord).r;
         float sum = center * 6.0;
         float weight = 6.0;
 
@@ -389,11 +400,11 @@ fragment shadow_directional(target=RT_ShadowDirectional, rt1=RT_ShadowRaw) {
 
             float sampleIndex = float(i);
             vec2 sampleUv = omw_TexCoord + axis * texel * sampleIndex * radius;
-            if (screenEdgeFade(sampleUv) <= 0.0 || firstPersonOverlayAt(sampleUv))
+            if (screenEdgeFade(sampleUv) <= 0.0)
                 continue;
 
             float sampleDepth = omw_GetWorldLinearDepth(sampleUv);
-            if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION)
+            if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(sampleUv, sampleDepth))
                 continue;
 
             float layerWeight = depthLayerWeight(centerDepth, sampleDepth, 1.0);
@@ -402,7 +413,7 @@ fragment shadow_directional(target=RT_ShadowDirectional, rt1=RT_ShadowRaw) {
 
             float depthWeight = layerWeight * layerWeight;
 #if OMW_NORMALS
-            vec3 sampleNormal = normalWorldFromBuffer(sampleUv);
+            vec3 sampleNormal = normalize(omw_GetNormals(sampleUv));
             float normalWeight = smoothstep(0.35, 0.95, dot(centerNormal, sampleNormal));
 #else
             float normalWeight = 1.0;
@@ -423,22 +434,28 @@ fragment shadow_cross(target=RT_ShadowBlur, rt1=RT_ShadowDirectional) {
     void main()
     {
         float centerDepth = omw_GetWorldLinearDepth(omw_TexCoord);
-        if (centerDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(omw_TexCoord))
+        if (centerDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(omw_TexCoord, centerDepth))
         {
             omw_FragColor = vec4(0.0, 1.0, 1.0, 1.0);
             return;
         }
 
+        float softness = clamp(uSoftness, 0.0, 2.5);
+        float center = omw_Texture2D(RT_ShadowDirectional, omw_TexCoord).r;
+        if (softness == 0.0)
+        {
+            omw_FragColor = vec4(center, 1.0, 1.0, 1.0);
+            return;
+        }
+
 #if OMW_NORMALS
-        vec3 centerNormal = normalWorldFromBuffer(omw_TexCoord);
+        vec3 centerNormal = normalize(omw_GetNormals(omw_TexCoord));
 #endif
 
         vec2 axis = projectedLightAxis(omw_TexCoord, centerDepth);
         vec2 crossAxis = vec2(-axis.y, axis.x);
         vec2 texel = shadowBufferTexel();
-        float softness = clamp(uSoftness, 0.0, 2.5);
         float radius = mix(0.6, 1.9, softness / 2.5);
-        float center = omw_Texture2D(RT_ShadowDirectional, omw_TexCoord).r;
         float sum = center * 5.0;
         float weight = 5.0;
 
@@ -449,11 +466,11 @@ fragment shadow_cross(target=RT_ShadowBlur, rt1=RT_ShadowDirectional) {
 
             float sampleIndex = float(i);
             vec2 sampleUv = omw_TexCoord + crossAxis * texel * sampleIndex * radius;
-            if (screenEdgeFade(sampleUv) <= 0.0 || firstPersonOverlayAt(sampleUv))
+            if (screenEdgeFade(sampleUv) <= 0.0)
                 continue;
 
             float sampleDepth = omw_GetWorldLinearDepth(sampleUv);
-            if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION)
+            if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(sampleUv, sampleDepth))
                 continue;
 
             float layerWeight = depthLayerWeight(centerDepth, sampleDepth, 0.85);
@@ -462,7 +479,7 @@ fragment shadow_cross(target=RT_ShadowBlur, rt1=RT_ShadowDirectional) {
 
             float depthWeight = layerWeight * layerWeight;
 #if OMW_NORMALS
-            vec3 sampleNormal = normalWorldFromBuffer(sampleUv);
+            vec3 sampleNormal = normalize(omw_GetNormals(sampleUv));
             float normalWeight = smoothstep(0.45, 0.96, dot(centerNormal, sampleNormal));
 #else
             float normalWeight = 1.0;
@@ -512,5 +529,7 @@ technique {
     version = "0.4";
     author = "OpenMW Enhanced";
     passes = shadow_raw, shadow_directional, shadow_cross, final;
+    // The raw pass returns zero indoors. Skip the filters and composite as well.
+    flags = disable_interiors;
     pass_normals = true;
 }

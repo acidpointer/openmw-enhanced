@@ -16,6 +16,7 @@
 #include <components/misc/constants.hpp>
 #include <components/resource/resourcesystem.hpp>
 #include <components/sceneutil/clusteredlighting.hpp>
+#include <components/sceneutil/lightboundsindex.hpp>
 #include <components/sceneutil/nodecallback.hpp>
 
 namespace SceneUtil
@@ -233,8 +234,11 @@ namespace SceneUtil
         /// Internal use only, called automatically by the LightSource's UpdateCallback
         void addLight(LightSource* lightSource, const osg::Matrixf& worldMat, size_t frameNum);
 
-        const std::vector<LightSourceViewBound>& getLightsInViewSpace(
-            osgUtil::CullVisitor* cv, const osg::RefMatrix* viewMatrix, size_t frameNum);
+        // Requesting index enables a lazy broad phase for larger per-object light
+        // lists. It may be null; its indices refer to the returned vector. Both
+        // are valid only until update(), as with the existing cached light list.
+        const std::vector<LightSourceViewBound>& getLightsInViewSpace(osgUtil::CullVisitor* cv,
+            const osg::RefMatrix* viewMatrix, size_t frameNum, const LightBoundsIndex** index = nullptr);
 
         osg::ref_ptr<osg::StateSet> getLightListStateSet(
             const LightList& lightList, size_t frameNum, const osg::RefMatrix* viewMatrix);
@@ -282,10 +286,18 @@ namespace SceneUtil
 
         std::vector<LightSourceTransform> mLights;
 
-        using LightSourceViewBoundCollection = std::vector<LightSourceViewBound>;
-        std::map<osg::observer_ptr<osg::Camera>, LightSourceViewBoundCollection> mLightsInViewSpace;
+        struct LightsInView
+        {
+            std::vector<LightSourceViewBound> mLights;
+            LightBoundsIndex mIndex;
+            bool mValid = false;
+            bool mIndexBuilt = false;
+        };
+        std::map<osg::observer_ptr<osg::Camera>, LightsInView> mLightsInViewSpace;
 
-        std::map<std::pair<const osg::RefMatrix*, std::vector<int>>, osg::ref_ptr<osg::StateSet>> mLightListStateSets;
+        using LightListKey = std::pair<const osg::RefMatrix*, std::vector<int>>;
+        LightListKey mLightListKey;
+        std::map<LightListKey, osg::ref_ptr<osg::StateSet>> mLightListStateSets;
 
         size_t mLightingMask;
 
@@ -382,6 +394,7 @@ namespace SceneUtil
         LightManager* mLightManager;
         size_t mLastFrameNumber;
         LightManager::LightList mLightList;
+        std::vector<std::size_t> mLightCandidates;
         std::set<SceneUtil::LightSource*> mIgnoredLightSources;
     };
 

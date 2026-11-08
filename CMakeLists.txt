@@ -323,6 +323,7 @@ set(USED_OSG_PLUGINS
     osgdb_dae
     osgdb_dds
     osgdb_freetype
+    osgdb_glsl
     osgdb_jpeg
     osgdb_osg
     osgdb_png

@@ -11,6 +11,7 @@
 #include <components/files/configurationmanager.hpp>
 #include <components/files/qtconversion.hpp>
 #include <components/l10n/qttranslations.hpp>
+#include <components/misc/osgpluginchecker.hpp>
 #include <components/platform/application.hpp>
 #include <components/platform/platform.hpp>
 #include <components/sceneutil/enhancedsettings.hpp>
@@ -20,6 +21,7 @@
 int runLauncher(int argc, char* argv[])
 {
     Platform::init();
+    Misc::configureOSGPluginPaths();
 
     boost::program_options::variables_map variables;
     boost::program_options::options_description description;

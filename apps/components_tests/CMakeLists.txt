@@ -22,6 +22,8 @@ file(GLOB UNITTEST_SRC_FILES
     lua/testyaml.cpp
 
     misc/compression.cpp
+    misc/hostenvironment.cpp
+    misc/osgpluginchecker.cpp
     misc/progressreporter.cpp
     misc/testendianness.cpp
     misc/testmathutil.cpp
@@ -92,6 +94,7 @@ file(GLOB UNITTEST_SRC_FILES
     vfs/testpathutil.cpp
 
     sceneutil/osgacontroller.cpp
+    sceneutil/lightmanager.cpp
     sceneutil/userdata.cpp
     sceneutil/occlusionbudget.cpp
     sceneutil/occlusionquery.cpp

@@ -23,6 +23,7 @@
 
 #include <components/debug/debuglog.hpp>
 #include <components/files/conversion.hpp>
+#include <components/misc/hostenvironment.hpp>
 
 #include <SDL_messagebox.h>
 
@@ -469,6 +470,10 @@ static void crash_catcher(int signum, siginfo_t* siginfo, void* /*context*/)
 
 [[noreturn]] static void handleCrash(const char* logfile)
 {
+    // This is a freshly exec'd crash helper, not the crashed engine. SDL may
+    // spawn host zenity, and debugger subprocesses use host library versions.
+    Misc::restoreHostEnvironment();
+
     if (fread(&crash_info, sizeof(crash_info), 1, stdin) != 1)
     {
         fprintf(stderr, "Failed to retrieve info from crashed process: %s\n",

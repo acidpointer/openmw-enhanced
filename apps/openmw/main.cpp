@@ -210,17 +210,38 @@ namespace
             }
         }
     };
+
+    class ScopedOSGLogHandler
+    {
+    public:
+        ScopedOSGLogHandler()
+            : mPrevious(osg::getNotifyHandler())
+        {
+            osg::setNotifyHandler(new OSGLogHandler());
+        }
+
+        ~ScopedOSGLogHandler()
+        {
+            // Plugin/global destructors can still notify after runApplication
+            // returns. They must not call into OpenMW's retired logging sinks.
+            osg::setNotifyHandler(mPrevious.get());
+        }
+
+    private:
+        osg::ref_ptr<osg::NotifyHandler> mPrevious;
+    };
 }
 
 int runApplication(int argc, char* argv[])
 {
     Platform::init();
+    Misc::configureOSGPluginPaths();
 
 #ifdef __APPLE__
     setenv("OSG_GL_TEXTURE_STORAGE", "OFF", 0);
 #endif
 
-    osg::setNotifyHandler(new OSGLogHandler());
+    ScopedOSGLogHandler osgLogging;
     Files::ConfigurationManager cfgMgr;
     std::unique_ptr<OMW::Engine> engine = std::make_unique<OMW::Engine>(cfgMgr);
 

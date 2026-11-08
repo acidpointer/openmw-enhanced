@@ -3,12 +3,36 @@ set -eu
 
 APPDIR="$(dirname "$(readlink -f "$0")")"
 
+# Keep the host environment for the separate crash-reporting process. Host
+# tools such as gdb and zenity must not load the AppImage's older libraries.
+if [ "${OPENMW_ENHANCED_HOST_ENV_SAVED:-}" != 1 ]; then
+    export OPENMW_ENHANCED_HOST_LD_LIBRARY_PATH_SET="${LD_LIBRARY_PATH+x}"
+    export OPENMW_ENHANCED_HOST_LD_LIBRARY_PATH="${LD_LIBRARY_PATH-}"
+    export OPENMW_ENHANCED_HOST_QT_PLUGIN_PATH_SET="${QT_PLUGIN_PATH+x}"
+    export OPENMW_ENHANCED_HOST_QT_PLUGIN_PATH="${QT_PLUGIN_PATH-}"
+    export OPENMW_ENHANCED_HOST_QT_QPA_PLATFORM_PLUGIN_PATH_SET="${QT_QPA_PLATFORM_PLUGIN_PATH+x}"
+    export OPENMW_ENHANCED_HOST_QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH-}"
+    export OPENMW_ENHANCED_HOST_OSG_LIBRARY_PATH_SET="${OSG_LIBRARY_PATH+x}"
+    export OPENMW_ENHANCED_HOST_OSG_LIBRARY_PATH="${OSG_LIBRARY_PATH-}"
+    export OPENMW_ENHANCED_HOST_XDG_DATA_DIRS_SET="${XDG_DATA_DIRS+x}"
+    export OPENMW_ENHANCED_HOST_XDG_DATA_DIRS="${XDG_DATA_DIRS-}"
+    export OPENMW_ENHANCED_HOST_ENV_SAVED=1
+fi
+
 # The launcher must stay alive while the engine uses files from the AppImage.
 export OPENMW_ENHANCED_APPIMAGE=1
+export OPENMW_ENHANCED_OSG_LIBRARY_PATH="${APPDIR}/usr/lib/openmw-osg-plugins:${APPDIR}/usr/lib:${APPDIR}/usr/lib/x86_64-linux-gnu"
 
-export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${APPDIR}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
-export OSG_LIBRARY_PATH="${APPDIR}/usr/lib:${APPDIR}/usr/lib/x86_64-linux-gnu:${OSG_LIBRARY_PATH:-}"
-export QT_PLUGIN_PATH="${APPDIR}/usr/plugins:${APPDIR}/usr/lib/qt6/plugins:${APPDIR}/usr/lib/x86_64-linux-gnu/qt6/plugins:${QT_PLUGIN_PATH:-}"
+# Preserve explicit driver-library overrides, but do not add an empty entry:
+# the ELF loader interprets that entry as the current working directory.
+export LD_LIBRARY_PATH="${APPDIR}/usr/lib/openmw-osg-plugins:${APPDIR}/usr/lib:${APPDIR}/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+# The engine also replaces OSG's built-in search list with this exact list.
+# Merely prepending it still lets missing readers pull in incompatible host OSG.
+export OSG_LIBRARY_PATH="${OPENMW_ENHANCED_OSG_LIBRARY_PATH}"
+export QT_PLUGIN_PATH="${APPDIR}/usr/plugins:${APPDIR}/usr/lib/qt6/plugins:${APPDIR}/usr/lib/x86_64-linux-gnu/qt6/plugins"
+# qt.conf redirects Qt's compiled-in plugin path; inherited overrides must not
+# bypass it and load a platform plugin from another Qt installation.
+unset QT_QPA_PLATFORM_PLUGIN_PATH
 export XDG_DATA_DIRS="${APPDIR}/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 
 if [ "$#" -gt 0 ] && [ "$1" = "--openmw" ]; then
