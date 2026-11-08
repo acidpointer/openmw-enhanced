@@ -6,6 +6,7 @@
 #include <osg/FrameBufferObject>
 #include <osg/Program>
 #include <osg/Texture2D>
+#include <osg/Viewport>
 
 namespace Shader
 {
@@ -54,6 +55,8 @@ namespace MWRender
 
         std::array<Container, 2> mBuffers;
         osg::ref_ptr<osg::Program> mLuminanceProgram;
+        osg::ref_ptr<osg::Viewport> mSceneViewport;
+        osg::ref_ptr<osg::Viewport> mResolveViewport = new osg::Viewport(0, 0, 1, 1);
         osg::ref_ptr<osg::Program> mResolveProgram;
 
         bool mCompiled = false;
@@ -62,7 +65,6 @@ namespace MWRender
 
         int mWidth = 1;
         int mHeight = 1;
-        osg::Vec2f mScale = osg::Vec2f(1, 1);
     };
 }
 

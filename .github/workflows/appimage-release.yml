@@ -1,0 +1,234 @@
+name: AppImage release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: appimage-release-${{ github.event.release.id }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  classify:
+    name: Validate release and classify tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      build: ${{ steps.tag.outputs.build }}
+      tag: ${{ steps.tag.outputs.tag }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+      appimage: ${{ steps.tag.outputs.appimage }}
+    steps:
+      - name: Accept stable and release-candidate tags
+        id: tag
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as stream:
+              tag = json.load(stream)["release"]["tag_name"]
+          pattern = r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?P<rc>-rc\.(0|[1-9][0-9]*))?"
+          match = re.fullmatch(pattern, tag)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              if match:
+                  prerelease = "true" if match.group("rc") else "false"
+                  output.write(f"build=true\ntag={tag}\nprerelease={prerelease}\n")
+                  output.write(f"appimage=OpenMW-Enhanced-{tag}-x86_64.AppImage\n")
+                  print(f"Building {tag}: prerelease={prerelease}")
+              else:
+                  output.write("build=false\n")
+                  print(f"Skipping unsupported release tag: {tag!r}")
+          PY
+
+      - name: Validate release state and apply tag classification
+        if: steps.tag.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ github.event.release.id }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+        run: |
+          release="$(gh api "repos/${GH_REPO}/releases/${RELEASE_ID}")"
+          if [[ "$(jq -r '.immutable' <<< "${release}")" == true ]]; then
+            echo "Immutable releases cannot accept assets after publication. This UI flow requires mutable releases." >&2
+            exit 1
+          fi
+          if ! jq -e --arg tag "${RELEASE_TAG}" \
+            '.tag_name == $tag and .draft == false' <<< "${release}" > /dev/null; then
+            echo "Release tag changed or the release was returned to draft; refusing to build." >&2
+            exit 1
+          fi
+          # Classify before the long build, including when the build later fails.
+          if [[ "${PRERELEASE}" == true ]]; then
+            gh api --method PATCH "repos/${GH_REPO}/releases/${RELEASE_ID}" \
+              --field prerelease=true --raw-field make_latest=false > /dev/null
+          elif [[ "$(jq -r '.prerelease' <<< "${release}")" != false ]]; then
+            gh api --method PATCH "repos/${GH_REPO}/releases/${RELEASE_ID}" \
+              --field prerelease=false > /dev/null
+          fi
+
+  build:
+    name: Build Linux x86_64 AppImage
+    needs: classify
+    if: needs.classify.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CMAKE_BUILD_TYPE: Release
+      APPIMAGE_NAME: ${{ needs.classify.outputs.appimage }}
+    steps:
+      - name: Check out the released commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Make room for Docker and the CMake tree
+        run: |
+          # These SDKs are unused by the Linux Docker build on this disposable runner.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h .
+
+      - name: Build and package with the fork's Docker script
+        run: ./enhanced/scripts/build-appimage.sh
+
+      - name: Prepare versioned AppImage and checksum
+        working-directory: .build/dist
+        run: |
+          test -s OpenMW-Enhanced-x86_64.AppImage
+          cp -- OpenMW-Enhanced-x86_64.AppImage "${APPIMAGE_NAME}"
+          sha256sum "${APPIMAGE_NAME}" > "${APPIMAGE_NAME}.sha256"
+
+      - name: Store release files as a workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: OpenMW-Enhanced-${{ needs.classify.outputs.tag }}-x86_64
+          path: |
+            .build/dist/${{ needs.classify.outputs.appimage }}
+            .build/dist/${{ needs.classify.outputs.appimage }}.sha256
+          if-no-files-found: error
+          # A full rerun uses the same name within the same workflow run.
+          overwrite: true
+          # The two explicitly selected files live under the hidden .build directory.
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 30
+
+  publish:
+    name: Attach AppImage to the existing release
+    needs: [classify, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_ID: ${{ github.event.release.id }}
+      RELEASE_TAG: ${{ needs.classify.outputs.tag }}
+      PRERELEASE: ${{ needs.classify.outputs.prerelease }}
+      APPIMAGE_NAME: ${{ needs.classify.outputs.appimage }}
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - name: Download the built release files
+        uses: actions/download-artifact@v7
+        with:
+          name: OpenMW-Enhanced-${{ needs.classify.outputs.tag }}-x86_64
+          path: dist
+
+      - name: Verify release identity and publish missing assets
+        working-directory: dist
+        run: |
+          sha256sum --check "${APPIMAGE_NAME}.sha256"
+          release="$(gh api "repos/${GH_REPO}/releases/${RELEASE_ID}")"
+          if ! jq -e --arg tag "${RELEASE_TAG}" --argjson prerelease "${PRERELEASE}" \
+            '.tag_name == $tag and .draft == false and .immutable != true and .prerelease == $prerelease' \
+            <<< "${release}" > /dev/null; then
+            echo "Release state changed while the AppImage was building; refusing to publish." >&2
+            exit 1
+          fi
+
+          # A tag name can stay the same while its target commit changes.
+          object="$(gh api "repos/${GH_REPO}/git/ref/tags/${RELEASE_TAG}" --jq '.object')"
+          for ((depth = 0; depth < 16; ++depth)); do
+            if [[ "$(jq -r '.type' <<< "${object}")" != tag ]]; then
+              break
+            fi
+            object_sha="$(jq -r '.sha' <<< "${object}")"
+            object="$(gh api "repos/${GH_REPO}/git/tags/${object_sha}" --jq '.object')"
+          done
+          object_type="$(jq -r '.type' <<< "${object}")"
+          object_sha="$(jq -r '.sha' <<< "${object}")"
+          if [[ "${object_type}" != commit || "${object_sha}" != "${EXPECTED_SHA}" ]]; then
+            echo "Release tag no longer points to the built commit; refusing to publish." >&2
+            exit 1
+          fi
+
+          # Verify all existing assets before uploading either file. Never delete
+          # a completed asset: a retry must preserve byte-identical release files.
+          assets="$(gh api --paginate --slurp \
+            "repos/${GH_REPO}/releases/${RELEASE_ID}/assets?per_page=100" | jq 'add')"
+          comparison_file="$(mktemp)"
+          trap 'rm -f -- "${comparison_file}"' EXIT
+          pending_assets=()
+          for asset in "${APPIMAGE_NAME}" "${APPIMAGE_NAME}.sha256"; do
+            existing="$(jq -c --arg name "${asset}" '.[] | select(.name == $name)' <<< "${assets}")"
+            if [[ -n "${existing}" ]]; then
+              asset_id="$(jq -r '.id' <<< "${existing}")"
+              state="$(jq -r '.state' <<< "${existing}")"
+              if [[ "${state}" == starter ]]; then
+                # GitHub may leave a failed-upload placeholder, not a valid asset.
+                gh api --method DELETE "repos/${GH_REPO}/releases/assets/${asset_id}"
+              elif [[ "${state}" == uploaded ]]; then
+                expected_digest="$(sha256sum "${asset}" | cut -d ' ' -f 1)"
+                actual_digest="$(jq -r '.digest // empty' <<< "${existing}")"
+                if [[ "${actual_digest}" != sha256:* ]]; then
+                  # Stream raw bytes by asset ID. Avoid CLI terminal-output
+                  # sanitization when hashing a legacy asset without a digest.
+                  curl --fail --silent --show-error --location --retry 3 \
+                    --header "Authorization: Bearer ${GH_TOKEN}" \
+                    --header 'Accept: application/octet-stream' \
+                    "${GITHUB_API_URL}/repos/${GH_REPO}/releases/assets/${asset_id}" \
+                    --output "${comparison_file}"
+                  actual_digest="sha256:$(sha256sum "${comparison_file}" | cut -d ' ' -f 1)"
+                fi
+                if [[ "${actual_digest}" != "sha256:${expected_digest}" ]]; then
+                  echo "Existing release asset differs: ${asset}. Publish a new tag or resolve it manually." >&2
+                  exit 1
+                fi
+                echo "Already published with matching checksum: ${asset}"
+                continue
+              else
+                echo "Unexpected release asset state for ${asset}: ${state}" >&2
+                exit 1
+              fi
+            fi
+            pending_assets+=("${asset}")
+          done
+
+          # Upload by release ID rather than looking up the tag again, so a
+          # deleted/recreated release cannot receive this run's files by mistake.
+          upload_url="$(jq -r '.upload_url | split("{")[0]' <<< "${release}")"
+          for asset in "${pending_assets[@]}"; do
+            asset_size="$(stat -c %s -- "${asset}")"
+            expected_digest="$(sha256sum "${asset}" | cut -d ' ' -f 1)"
+            response="$(gh api --method POST "${upload_url}?name=${asset}" \
+              --header 'Content-Type: application/octet-stream' \
+              --header "Content-Length: ${asset_size}" --input "${asset}")"
+            jq -e --arg name "${asset}" --arg digest "sha256:${expected_digest}" --argjson size "${asset_size}" \
+              '.name == $name and .state == "uploaded" and .size == $size and (.digest == null or .digest == $digest)' \
+              <<< "${response}" > /dev/null
+          done

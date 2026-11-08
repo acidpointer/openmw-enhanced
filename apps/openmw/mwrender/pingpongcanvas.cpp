@@ -18,6 +18,17 @@
 
 namespace MWRender
 {
+    static void clearColorTarget(osg::State& state, const osg::Vec4f& color)
+    {
+        glClearColor(color.r(), color.g(), color.b(), color.a());
+        glColorMask(true, true, true, true);
+        state.haveAppliedAttribute(osg::StateAttribute::COLORMASK);
+        const bool scissor = state.getLastAppliedMode(GL_SCISSOR_TEST);
+        state.applyMode(GL_SCISSOR_TEST, false);
+        glClear(GL_COLOR_BUFFER_BIT);
+        state.applyMode(GL_SCISSOR_TEST, scissor);
+    }
+
     PingPongCanvas::PingPongCanvas(Shader::ShaderManager& shaderManager,
         const std::shared_ptr<LuminanceCalculator>& luminanceCalculator, DistortionCallback* distortionCallback)
         : mFallbackStateSet(new osg::StateSet)
@@ -185,11 +196,8 @@ namespace MWRender
             mMultiviewResolveFramebuffer = nullptr;
             mLuminanceCalculator->dirty(mTextureScene->getTextureWidth(), mTextureScene->getTextureHeight());
 
-            if (Stereo::getStereo())
-                mRenderViewport
-                    = new osg::Viewport(0, 0, mTextureScene->getTextureWidth(), mTextureScene->getTextureHeight());
-            else
-                mRenderViewport = nullptr;
+            mRenderViewport
+                = new osg::Viewport(0, 0, mTextureScene->getTextureWidth(), mTextureScene->getTextureHeight());
 
             mDirty = false;
         }
@@ -217,7 +225,7 @@ namespace MWRender
             }
 
             state.applyTextureAttribute(0, mTextureScene);
-            resolveViewport->apply(state);
+            state.applyAttribute(resolveViewport);
 
             auto timing = beginGpuTiming("presentation");
             drawGeometry(renderInfo);
@@ -247,8 +255,7 @@ namespace MWRender
             fbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
             if (initialize)
             {
-                glClearColor(0.5, 0.5, 0.5, 1);
-                glClear(GL_COLOR_BUFFER_BIT);
+                clearColorTarget(state, osg::Vec4f(0.5, 0.5, 0.5, 1));
             }
             return fbo->getHandle(state.getContextID());
         };
@@ -259,8 +266,7 @@ namespace MWRender
             attachCloneOfTemplate(
                 mMultiviewResolveFramebuffer, osg::FrameBufferObject::BufferComponent::COLOR_BUFFER0, mTextureScene);
             mMultiviewResolveFramebuffer->apply(state);
-            glClearColor(0.5, 0.5, 0.5, 1);
-            glClear(GL_COLOR_BUFFER_BIT);
+            clearColorTarget(state, osg::Vec4f(0.5, 0.5, 0.5, 1));
 
             mMultiviewResolveStateSet->setTextureAttribute(PostProcessor::Unit_LastShader,
                 (osg::Texture*)mMultiviewResolveFramebuffer->getAttachment(osg::Camera::COLOR_BUFFER0).getTexture());
@@ -334,9 +340,7 @@ namespace MWRender
 
             glViewport(0, 0, attachment.mTarget->getTextureWidth(), attachment.mTarget->getTextureHeight());
             state.haveAppliedAttribute(osg::StateAttribute::VIEWPORT);
-            glClearColor(attachment.mClearColor.r(), attachment.mClearColor.g(), attachment.mClearColor.b(),
-                attachment.mClearColor.a());
-            glClear(GL_COLOR_BUFFER_BIT);
+            clearColorTarget(state, attachment.mClearColor);
 
             if (attachment.mMipMap)
             {
@@ -365,15 +369,13 @@ namespace MWRender
                     PostProcessor::TextureUnits::Unit_Distortion, mTextureDistortion);
 
             state.pushStateSet(node.mRootStateSet);
-            state.apply();
 
             for (size_t passIndex = 0; passIndex < node.mPasses.size(); ++passIndex)
             {
-                if (mRenderViewport)
-                    mRenderViewport->apply(state);
                 const auto& pass = node.mPasses[passIndex];
 
                 bool lastPass = passIndex == node.mPasses.size() - 1;
+                const bool resolveToOutput = !pass.mRenderTarget && pass.mResolve && index == filtered.back();
 
                 // VR-TODO: This won't actually work for tex2darrays
                 if (lastShader == 0)
@@ -398,13 +400,9 @@ namespace MWRender
 
                     lastApplied = pass.mRenderTarget->getHandle(state.getContextID());
                 }
-                else if (pass.mResolve && index == filtered.back())
+                else if (resolveToOutput)
                 {
                     bindDestinationFbo();
-                    if (!destinationFbo && !Stereo::getMultiview())
-                    {
-                        resolveViewport->apply(state);
-                    }
                 }
                 else if (lastPass)
                 {
@@ -421,7 +419,13 @@ namespace MWRender
                 }
 
                 state.pushStateSet(pass.mStateSet);
+                // Apply the complete pass once. Applying a temporary parent
+                // program between draws only adds driver work and uniform scans.
                 state.apply();
+                if (!pass.mRenderTarget)
+                    state.applyAttribute(resolveToOutput && !destinationFbo && !Stereo::getMultiview()
+                            ? resolveViewport
+                            : mRenderViewport.get());
 
                 if (!state.getLastAppliedProgramObject())
                     mFallbackProgram->apply(state);
@@ -445,7 +449,6 @@ namespace MWRender
 
                 endGpuTiming(timing);
                 state.popStateSet();
-                state.apply();
             }
 
             state.popStateSet();
@@ -456,14 +459,13 @@ namespace MWRender
             ext->glBindFramebuffer(GL_DRAW_FRAMEBUFFER_EXT, 0);
             lastApplied = 0;
 
-            resolveViewport->apply(state);
             state.pushStateSet(mMultiviewResolveStateSet);
             state.apply();
+            state.applyAttribute(resolveViewport);
 
             drawGeometry(renderInfo);
 
             state.popStateSet();
-            state.apply();
         }
 
         if (lastApplied != destinationHandle)

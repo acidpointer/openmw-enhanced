@@ -1,8 +1,11 @@
 name: Build and test
 
 on:
-- push
-- pull_request
+  # Release tags have their own packaging workflows. Keep regular CI on branches
+  # and pull requests instead of launching all platforms again for a UI-created tag.
+  push:
+    branches: ['**']
+  pull_request:
 
 env:
   BUILD_TYPE: RelWithDebInfo

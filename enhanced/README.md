@@ -60,7 +60,59 @@ Build with Bullet threading disabled:
 ```
 
 Docker mounts persistent caches from `.build/` so repeated builds reuse CMake
-outputs, ccache, Cargo downloads, and release artifacts.
+outputs, ccache, Cargo downloads, and release artifacts. `.dockerignore` keeps
+these caches and the Git database out of the toolchain image's build context;
+the source checkout, including Git metadata, is mounted at build time.
+
+## GitHub release AppImages
+
+The `AppImage release` workflow runs when a release is **published**, including
+a prerelease published from a draft through GitHub's UI. Creating a tag or saving
+a draft alone does not start this workflow.
+
+| Tag | Release type |
+| --- | --- |
+| `v1.0.0` | Stable release |
+| `v1.0.0-rc.1` | Prerelease |
+
+Tags must have three numeric version components, with an optional `-rc.N`
+suffix; numeric components cannot have leading zeros. Other tag formats are
+skipped. Before building, the workflow sets the GitHub prerelease flag from the
+tag and prevents release candidates from becoming the latest stable release,
+including when the build fails. Regular push CI runs on branches and pull
+requests; tag pushes use the release packaging workflows.
+
+Push the workflow and build-script changes before preparing the release. In
+GitHub's Releases UI, select or create the tag on a commit containing those
+changes, prepare your title and notes, and publish it. The workflow builds that
+tagged commit with the existing Docker script in Release mode, with Bullet
+threading enabled. It attaches these files to the existing release:
+
+- `OpenMW-Enhanced-v1.0.0-x86_64.AppImage`
+- `OpenMW-Enhanced-v1.0.0-x86_64.AppImage.sha256`
+
+Prerelease filenames include the full `-rc.N` suffix. The same files are also
+available as a workflow artifact for 30 days. A failed build leaves the manual
+release available without new assets. Re-run failed jobs to retry transient
+failures; a source fix requires a new release tag pointing at the fixed commit.
+Reruns keep the original checkout SHA. Before publishing, the workflow verifies
+that the release is still published and its tag still resolves to that SHA,
+including annotated tags.
+
+Upload retries skip completed assets with matching SHA-256 checksums, upload
+missing assets, and remove only failed-upload placeholders. Completed assets
+with different content cause an error instead of being overwritten. Prefer
+**Re-run failed jobs** after an upload failure to reuse the existing artifact:
+rebuilding from scratch can produce different bytes, even for the same commit.
+Workflow artifacts can be replaced on a full rerun; release assets remain
+available after the workflow artifact expires.
+
+This flow attaches assets after publication, so it requires mutable releases.
+If repository release immutability is enabled, it fails before building: GitHub
+requires assets to be attached to the draft before an immutable release is
+published. No additional repository secret is needed. Only the metadata and
+publishing jobs receive `contents: write` through the built-in `GITHUB_TOKEN`;
+the Docker build has read access only.
 
 ## Manual verification after upstream synchronization
 
@@ -325,6 +377,307 @@ distortion entering/leaving the view and resize, dense local lighting, and
 exterior shadow edges in first and third person. Compare normal play separately
 from diagnostic captures. These source-level reductions do not establish an FPS
 gain until those comparisons have been made.
+
+## Visibility and post-processing dispatch audit
+
+This pass targets unnecessary work on invisible objects and on screen regions
+where the shadow contribution is zero. It does not require another diagnostic
+replay to review, and its FPS impact has not been measured.
+
+- The shadow raw pass calculates its existing distance fade before normal
+  reconstruction and the 64-step trace. Beyond the authored 7600-unit cutoff,
+  the result was already multiplied by zero; the trace is now omitted there.
+- The speculative two-stage empty-neighborhood shadow filters were removed
+  after a playtest reported 30–40 FPS with post-processing versus 120+ without
+  it. Keeping all taps in local arrays across two loops increased live values
+  and fetched masks before geometric rejection; no driver measurements had
+  justified that tradeoff. The filters again use one loop and sample masks only
+  after their original eligibility checks. This removes a regression candidate;
+  it does not establish that those arrays caused the reported slowdown.
+- Shadow ray samples reject zero depth-hit weights before world-position
+  reconstruction and geometric hit tests. Samples that survive reuse the same
+  normalized world-depth value for reconstruction and linearization. Filter
+  centers also reuse depth for their projected light axis. Existing depth APIs
+  retain their signatures; the FX header adds `omw_LinearizeDepth(float)` and a
+  sampled-depth overload of `omw_GetWorldPosFromWorldDepthUV`. The input is the
+  value returned by `omw_GetWorldDepth`, including its reverse-Z conversion.
+  First-person overlay depth is sampled only for candidates that survive the
+  ray's depth-hit test or the filters' layer test, rather than for every step.
+  The trace still uses 64 steps and the filters retain their original taps,
+  weights, target sizes, and formats.
+- Cell occlusion skips masked scene children before reading bounds. Eligible
+  large and small children receive an ordinary OSG frustum precheck before MOC
+  projection, occluder-cache lookup, or static-candidate preparation. This avoids
+  processing nodes that the following normal traversal would reject anyway.
+  The precheck reads the parent's active planes without modifying current or
+  result masks, and leaves disabled culling, invalid bounds, cameras, and absolute
+  transforms to their existing traversal. Terrain is not rasterized into MOC
+  when the camera traversal mask excludes terrain.
+- For P post-processing passes in T active techniques, the dispatcher previously
+  performed 2P+T full state applications: one before each technique, one before
+  each draw, and one after each pass pop. It now performs P. Stack changes are
+  still balanced, and state is applied before every actual draw. Viewports are
+  explicitly tracked for scene intermediates, named targets, final presentation,
+  and stereo resolve. Initial target clears force full color writes and suspend
+  scissoring, so deferred state application cannot leave a partial initialization.
+- HDR luminance uses an explicit luminance-sized viewport and a 1×1 resolve
+  viewport. This removes its dependence on the inherited presentation viewport
+  while preserving normalized sampling. Dirty notifications no longer recreate
+  the luminance pyramid when its power-of-two dimensions have not changed.
+
+The latest existing log also revealed an earlier patch error: a `//` comment in
+the shadow technique metadata caused `unexpected token </>` and prevented the
+shader from loading. GLSL body validation had not checked that metadata syntax.
+The unsupported comment was removed; metadata now receives a separate static
+lexical check. The activation log also checks validity and GLSL support instead
+of reporting an invalid technique as active. This restores the requested shadow
+effect; it must not be counted as a performance improvement from disabling it.
+The later log confirms the shader is now active and requests normals. Thus the
+broken-shader build and the repaired build do not represent identical workloads;
+this fact alone does not explain the remaining post-processing on/off gap.
+
+Static checks cover the changed C++ and the shadow's metadata and 48 GLSL body
+variants. New occlusion regressions cover node-mask overrides, crossing bounds,
+disabled culling, invalid bounds, cameras, absolute transforms, and sibling-plane
+mask preservation. Test execution and GPU image/performance checks remain deferred.
+
+## Static candidates for the remaining post-processing degradation
+
+This is a source audit of the current renderer and the installed shader copies
+referenced by the user's configured chain. It identifies executable work and
+optimization candidates, not measured attribution of the reported 120+ to
+30–40 FPS change. No new playtest, build, or runtime check was performed.
+
+The key control-flow finding is that `PingPongCull::operator()` directs the scene
+into the primary FBO regardless of the post-processing toggle. The opaque
+color/depth blit, transparent depth replay, and first-person depth handling also
+remain installed when the toggle is off. In steady state, a genuinely empty
+effective chain with no normals/HDR/light requirements reaches the same
+`PingPongCanvas::drawImplementation` presentation branch in both toggle states.
+These existing scene copies are optimization targets, but their existence alone
+does not explain the on/off difference. The optional list also excludes the
+hidden internal distortion technique, and `loadChain` reinserts screen-space
+shadows on enable when its Enhanced setting is true. The reported case with
+shadows disabled must therefore be considered separately from the current
+configured chain, whose log confirms `hdr=1 normals=1`.
+
+Candidates, ordered by their relevance to the present configured workload:
+
+| Candidate | Static evidence and scale at 2880×1800 | Scope and next implementation target |
+| --- | --- | --- |
+| Normals change the cost of scene rendering | `PostProcessor::updateBufferRequirements` enables normals from active techniques. `update` changes the global `disableNormals` shader define; `createObjectsForFrame` attaches a full-resolution RGB16F target to scene and first-person FBOs. Object, terrain, groundcover, and water shaders export normals. `Terrain::createPasses` also enables normals blending for terrain layers. | Affects geometry before effect dispatch and grows with shaded overdraw and terrain layers. Audit normals output and blended terrain passes separately from the ray shader. Format throughput/padding is hardware-dependent; the source does not prove a slow driver format path. |
+| God-rays work survives zero ray strength | The installed `godrays.omwfx` calculates `strength` before its `for (i=1; i<=N)` loop, but applies that strength only after sampling and `exp`/`pow` inside the loop. There is a facing test, but no zero-strength test. Default N=20 permits 103.68 million iterations/frame. | Uniform zero strength can reject expensive ray integration before the loop. Preserve the later sun-disc composition; zero ray strength does not justify skipping the entire technique. This candidate applies when god rays are active, not to a chain with that effect removed. |
+| Full-resolution work and repeated scene intermediates | The same god-rays shader declares five passes without sized render targets. Its first two passes discard much of a full-size destination rather than declare smaller targets. The configured above-water exterior chain has 13 effect draws: ten full-resolution and three half-resolution, before optional distortion and HDR metering. | The dispatcher uses scene-size scratch targets for unnamed outputs. Introduce explicit pass-size/coverage contracts and resource lifetime planning; changing a shader's packed UV layout implicitly would break compatibility. Pixel-position counts are not GPU timings. |
+| Depth of field executes a blur on exactly sharp pixels | The installed `depth_of_field.omwfx` smartblur pass calculates `c=color.a*Rfixed`, then reads noise and all 12 neighbor samples even when c is exactly zero. All offsets are then zero. Up to 62.208 million neighbor fetch instructions/frame are submitted by this pass. | Return the center RGB with the original output alpha when c is exactly zero. A nonzero cutoff would change image quality and is not justified by this audit. Applies only while this effect is active. |
+| Hidden distortion resolve is based on draw candidates, not surviving pixels | `DistortionCallback` marks content from leaf/state-graph/child-bin presence. The canvas runs `internal_distortion` fullscreen if that flag is true or unknown. The distortion geometry uses shader depth occlusion, so candidate presence does not establish a visible distortion contribution. | Can remain with an empty optional F2 chain. Conservative screen coverage could restrict the resolve, with displacement-aware bounds; a visibility query must remain asynchronous and must not introduce a GPU wait. |
+| Scratch memory can cross a residency threshold | Three scene-size scratch textures per alternating canvas permit six RGBA8 images, approximately 118.65 MiB. Two logical RGB16F normal images add 59.33 MiB, the three half-resolution R16F shadow masks add 7.42 MiB, and the two HDR luminance pyramids add about 10.67 MiB. Driver alignment/padding is additional and formats are selected by the driver. | The full chain can use these allocations even though the empty-chain eager-allocation bug was fixed. Audit scratch sharing across alternating frames per graphics context and release inactive resources while preserving temporal effect targets. Residency pressure is plausible on a large mod list; it is not established by source inspection. |
+| Shadow rays perform work with guaranteed zero contribution | The raw loop calculates `distanceWeight=1-smoothstep(0.05,0.92,stepPosition)` after tracing. For i=59 through 63 of 64, stepPosition is always above 0.92, so these five traces contribute zero to both accumulators. All integrated contributions are nonnegative, and the final result saturates once `(integrated/64)*8.5*1.8` reaches one. | Calculate zero weights before tracing and terminate once the existing final result is guaranteed saturated. Keep the original 64-step sequence and normalization. These are specific shadow optimizations, not an explanation of the reported slowdown with shadows disabled. |
+
+The normal attachment's additional bandwidth and render-target footprint are
+consistent with the general guidance in Intel's
+[Xe-LP optimization guide](https://www.intel.com/content/www/us/en/developer/articles/guide/lp-api-developer-optimization-guide.html)
+to minimize render-target count and unnecessary precision/channels. NVIDIA's
+[shader guidance](https://developer.nvidia.com/blog/advanced-api-performance-shaders/)
+also identifies register pressure and expensive transcendental math as costs;
+its [memory guidance](https://developer.nvidia.com/blog/advanced-api-performance-memory-and-resources/)
+describes memory budgets, reuse, and render-target residency. These vendor
+guidelines support the mechanisms, not a diagnosis of this particular capture;
+API-specific D3D/Vulkan advice is not assumed to describe OpenGL behavior.
+
+Lower-priority explanations: changing normal/light requirements stops viewer
+threading, regenerates shader sources globally, and rebuilds FBOs, so transitions
+can hitch. The guarded code does not do this every steady-state frame. HDR
+metering generates a mip pyramid and performs tiny GPU blits, but has no CPU
+pixel readback here. The occlusion code does not branch on post-processing, and
+the fullscreen effect canvas has depth testing disabled: object occlusion can
+reduce scene work, but does not suppress expensive effect pixels. No evidence
+in this audit establishes an engine-requested full scene rerender or a loss of
+object occlusion solely from switching the toggle on.
+
+## Rendering optimization implementation plan
+
+Status: proposed work, based on the static audit above. Existing uncommitted
+rendering changes are the starting point and still require runtime validation;
+their presence does not establish that the FPS regression is fixed. Each work
+package should be independently reviewable. Packaging, release automation,
+crash handling, and the separate exit-crash work remain outside this plan.
+
+Preserve effect selection, user configuration/data precedence, effect settings,
+sample sequences, normal-map detail, resolution, and default quality. A faster
+result obtained by silently disabling an effect is not acceptance. No further
+manual diagnostic replay is a prerequisite for implementation.
+
+1. **Establish one effective execution plan and protect its invariants.**
+   Extract chain/environment filtering from the canvas and resource-requirement
+   calculation into a shared CPU-side plan. Represent internal distortion and
+   automatically inserted shadows explicitly. Distortion eligibility is refined
+   at draw time, when its current-frame bin contents are known. Resource needs
+   are derived from passes that can execute, not every loaded technique. Reuse
+   the immutable plan until chain, environment, or target descriptors change.
+   Add regressions for true-empty chains, hidden passes, disabled environments,
+   invalid techniques, final output selection, and last-shader/last-pass routing.
+   The true-empty case must request no normals, lights, HDR metering, or scratch
+   images and must use the existing presentation path. A one-time plan summary
+   on changes can expose pass sizes and requirements without per-frame logging.
+   Files: `components/fx/technique.hpp`, new FX plan helper, `postprocessor.*`,
+   `pingpongcanvas.*`, and component tests.
+
+2. **Remove exact zero-contribution shader work.**
+   In the owned shadow shader, calculate the existing distance weight before
+   tracing, omit zero-weight steps, and return the already-saturated result when
+   the original accumulation expression reaches one. Preserve the 64-step
+   sequence, denominator, and remaining sample order. Keep the single-loop
+   denoisers and recently added sampled-depth reuse. In the recognized god-rays
+   revision, reject zero ray strength before integration while preserving the
+   separate sun-disc composition. In recognized DOF, return center RGB and
+   alpha=1 before noise and neighbor sampling when radius is exactly zero.
+   Do not introduce near-zero approximations. Test shadow bound/accumulation
+   math and compare original/optimized shader outputs in automated offscreen
+   fixtures when execution becomes available.
+
+   These two mod shaders are not repository-owned active resources. Deliver
+   their changes through an isolated, source-fingerprinted compatibility helper
+   invoked after normal VFS resolution and before FX parsing. Match reviewed
+   source revisions, not filenames alone; preserve technique/uniform names,
+   saved values, source provenance, and hot reload. Unknown or edited revisions
+   retain the original source. A failed compatibility transformation falls back
+   to that original source with a clear diagnostic. No user/mod file is edited
+   and no bundled directory is promoted above the user's data order. Keep the
+   adapter small and versioned, with idempotence, unknown-source passthrough,
+   metadata, and shader-compilation regressions. Record upstream provenance and
+   check licenses before including third-party source fixtures. The adapter
+   implements reviewed semantic changes; it is not a general GLSL text optimizer.
+   Files: owned shader, `components/fx/technique.cpp`, a dedicated compatibility
+   helper, and FX tests.
+
+3. **Share transient scene scratch per rendering context.**
+   Replace independent scratch sets on alternating canvases with a pool owned
+   by the postprocessor and indexed by GL context and compatible descriptors.
+   Keep cull/update metadata double-buffered. Share only render-thread scratch
+   whose lifetime ends after the consuming draw; do not share scene inputs,
+   named persistent targets, temporal history, or HDR adaptation state. Plan
+   last-shader and last-pass lifetimes so a pass cannot overwrite a live input.
+   For serialized mono rendering, target three scene scratch images instead of
+   six, saving approximately 59.33 MiB at this resolution. Contexts, simultaneous
+   views, and incompatible sizes/formats receive distinct resources or retain
+   the existing allocation path. Refresh on descriptor changes; avoid recreating
+   the pool for a mere chain reorder. Initialize allocations deterministically
+   and use OSG-managed GL lifetimes on release. Retain bounded inactive reuse to
+   avoid allocation churn; never purge temporal named targets speculatively.
+   Tests cover overlapping lifetimes, feedback avoidance, two alternating
+   canvases, resize, stereo/multiview, and context release/recreation.
+   Files: new render-target pool, `pingpongcanvas.*`, `postprocessor.*`.
+
+4. **Scope normals output to cameras that consume it.**
+   Replace the runtime global `disableNormals` rewrite with cached shader
+   variants selected by an imported, camera-scoped normals-output define.
+   Enable writes for scene/first-person targets only when the effective plan
+   needs them; disable them for reflection and other color-only cameras. Use
+   the existing OSG define mechanism already used for `FORCE_OPAQUE` and
+   `DISTORTION`, with explicit inheritance/override rules. Preserve specialized
+   sky, effect, preview, and unsupported-hardware behavior. Changing the plan
+   should not regenerate every shader source globally. Cache the two output
+   variants; first-use compilation remains a possible transition cost.
+   Keep the existing RGB16F precision and blended-normal encoding. Check format,
+   blending, and MSAA support through cached capability information; RGBA16F is
+   a same-precision compatibility fallback, not an assumed performance upgrade.
+   Do not switch to packed or reconstructed normals without separate evidence
+   that the resulting image meets the existing quality contract. This scopes
+   unnecessary exports and transition work; it does not remove the main scene's
+   required normals bandwidth.
+   Files: `postprocessor.*`, scene shader fragments, camera setup, shader tests.
+
+5. **Reduce terrain layer draws and normals blend traffic.**
+   Add a bounded terrain shader variant that batches adjacent compatible layers
+   up to the available sampler/instruction budget. Start with small batches and
+   retain the one-layer path for unsupported combinations. Evaluate each
+   layer's own normal mapping, material lighting, specular, parallax, shadows,
+   and fog before reproducing the existing weighted sum. Preserve blendmap UVs,
+   depth semantics, vertex colors, and alpha accumulation: the existing
+   SRC_ALPHA blending also multiplies source alpha, so alpha cannot simply be
+   set to the sum of coverage weights. Write color and normals once per batch.
+   Do not hoist nonlinear lighting/clamping across layers without proving
+   equivalence. Respect reserved global texture units and keep composite baking
+   on its established path initially.
+
+   Per-layer RGBA8 and RGB16F framebuffer rounding means this is not bit-exact
+   merely because the algebra matches. Define bounded numerical tolerances and
+   automate comparisons for layered slopes, normal/specular/parallax maps,
+   fog, water edges, and screen-space shadow boundaries. Enable batching by
+   default only after those comparisons pass. Expected structural result is
+   ceil(L/K) layer draws for L compatible layers and batch size K, with fewer
+   blended MRT writes; no FPS multiplier is promised.
+   Files: `components/terrain/material.cpp`, terrain shaders, terrain tests.
+
+6. **Convert recognized packed god-ray masks to explicit targets.**
+   After the compatibility helper and resource planning are established, give
+   the first two god-ray mask passes explicit R8 targets instead of full-size
+   RGBA scratch outputs. Preserve the original stored alpha precision by moving
+   that mask to the red channel. The shader currently keeps a 0.55-sized packed
+   region, including a guard band around its nominal half-size data. Preserve
+   that coverage, pixel centers, sampling footprint, clamp behavior, and the
+   ray pass's full-resolution output. Rewrite affected sampler/UV mappings
+   together; simply setting width_ratio=0.5 is incorrect. Test odd dimensions,
+   screen-edge/offscreen sun positions, and aspect ratios against the original.
+   The first two mask destinations should fall from roughly 39.55 MiB to about
+   2.99 MiB at 2880×1800, before alignment, while preserving their useful sample
+   density. This estimate describes those targets, not guaranteed net pool
+   savings; later passes may still require three full-size scratch images.
+   Existing explicit render-target declarations should be used first. Broader
+   pass-size metadata is justified only by additional consumers.
+
+7. **Restrict expensive distortion sampling to conservative coverage.**
+   Accumulate current-frame screen coverage from distortion draw candidates,
+   separately per context and eye. Unknown/deformed bounds, near-plane crossing,
+   or unsupported child bins conservatively cover the full screen. Expand for
+   sampling footprints and any displacement needed by the selected algorithm.
+   The internal fullscreen resolve should return the ordinary scene sample
+   immediately outside coverage. It must still write every output pixel: a
+   scissor alone would leave stale pixels in a scratch destination. Evaluate
+   copy-plus-scissor only as a later alternative with an explicit input copy;
+   never introduce framebuffer feedback to avoid that copy. Retain the proven
+   empty-bin bypass. A previous-frame visibility query cannot justify skipping
+   a newly visible current-frame effect; no synchronous GPU query is planned.
+   Tests cover clear-after-content, resize, unknown bounds, fully occluded
+   candidates, and both stereo eyes.
+   Files: `distortion.*`, `pingpongcanvas.*`, internal distortion shader.
+
+8. **Finish render-target and visibility correctness around the new paths.**
+   Validate declared sizes as finite/positive and keep derived dimensions at
+   least one pixel. Preserve legacy size rounding for valid existing targets.
+   Explicitly distinguish transient scratch from persistent named resources;
+   a target read before its first write may intentionally contain history.
+   Recheck viewport, color masks, scissor, read/draw FBO restoration, and mipmap
+   generation for all new target transitions. Keep the current luminance-sized
+   and 1×1 HDR viewports and pyramid reuse. Avoid another HDR algorithm rewrite
+   until a demonstrated cost justifies it. Keep conservative mask/frustum/MOC
+   checks and camera ownership: never use CPU object occlusion as proof that
+   neighboring screen-space effect pixels are unnecessary. Broader scene-copy
+   elimination or depth-prepass changes need a separate consumer/lifetime audit
+   because soft particles and water use these buffers even with effects off.
+
+Implementation sequence: 1 → 2 → 3 → 4; then 5, 6, and 7 as independent
+reviewable packages on the relevant foundations, with 8 applied throughout.
+No parallel agent work is assumed. Keep unrelated working-tree edits intact.
+
+Verification uses actual FX parsing plus generated GLSL headers, both normal
+mode (static parameters emitted as constants) and debug mode (uniforms), GLSL
+120/330, normals and reverse-Z combinations, and supported stereo paths.
+Meaningful CPU regressions cover planning, aliasing, ownership, and fallbacks;
+offscreen reference comparisons cover shader and terrain image semantics.
+Structural acceptance includes zero scratch for true-empty chains, no live-input
+overwrite, reduced transient allocation, preserved history/settings, no new GPU
+waits, and explicit fallbacks. Build/test execution and automated GPU comparison
+must run in CI or by a maintainer under the repository's verification rules;
+agents perform allowed static checks only. Manual playtests remain deferred.
+FPS improvement and the remaining regression's dominant cause remain unmeasured
+until runtime evidence is available; this does not block the source work above.
+
+The memory-pool design follows the reuse/lifetime guidance cited in the audit.
+Separate read/write targets remain the default: the
+[OpenGL texture-barrier specification](https://registry.khronos.org/OpenGL/extensions/ARB/ARB_texture_barrier.txt)
+places specific restrictions on framebuffer feedback, and barriers are not a
+general license to run neighborhood filters in place.
 
 ## Lighting spatial index and render-target reuse
 

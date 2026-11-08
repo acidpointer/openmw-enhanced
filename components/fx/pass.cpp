@@ -235,9 +235,10 @@ mat4 omw_InvProjectionMatrix()
         return world_space.xyz / world_space.w;
     }
 
-    vec3 omw_GetWorldPosFromWorldDepthUV(vec2 uv)
+    // depth is the normalized value returned by omw_GetWorldDepth, including
+    // its reverse-Z conversion. Reuse it when the caller also needs linear depth.
+    vec3 omw_GetWorldPosFromWorldDepthUV(vec2 uv, float depth)
     {
-        float depth = omw_GetWorldDepth(uv);
 #if (OMW_REVERSE_Z == 1)
         float flippedDepth = 1.0 - depth;
 #else
@@ -248,30 +249,31 @@ mat4 omw_InvProjectionMatrix()
         return world_space.xyz / world_space.w;
     }
 
-    float omw_GetLinearDepth(vec2 uv)
+    vec3 omw_GetWorldPosFromWorldDepthUV(vec2 uv)
+    {
+        return omw_GetWorldPosFromWorldDepthUV(uv, omw_GetWorldDepth(uv));
+    }
+
+    float omw_LinearizeDepth(float depth)
     {
 #if (OMW_REVERSE_Z == 1)
-        float depth = omw_GetDepth(uv);
         float dist = omw.near * omw.far / (omw.far + depth * (omw.near - omw.far));
 #else
-        float depth = omw_GetDepth(uv) * 2.0 - 1.0;
+        depth = depth * 2.0 - 1.0;
         float dist = 2.0 * omw.near * omw.far / (omw.far + omw.near - depth * (omw.far - omw.near));
 #endif
 
         return dist;
     }
 
+    float omw_GetLinearDepth(vec2 uv)
+    {
+        return omw_LinearizeDepth(omw_GetDepth(uv));
+    }
+
     float omw_GetWorldLinearDepth(vec2 uv)
     {
-#if (OMW_REVERSE_Z == 1)
-        float depth = omw_GetWorldDepth(uv);
-        float dist = omw.near * omw.far / (omw.far + depth * (omw.near - omw.far));
-#else
-        float depth = omw_GetWorldDepth(uv) * 2.0 - 1.0;
-        float dist = 2.0 * omw.near * omw.far / (omw.far + omw.near - depth * (omw.far - omw.near));
-#endif
-
-        return dist;
+        return omw_LinearizeDepth(omw_GetWorldDepth(uv));
     }
 
 float omw_EstimateFogCoverageFromUV(vec2 uv)

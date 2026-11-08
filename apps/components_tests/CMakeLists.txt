@@ -98,6 +98,7 @@ file(GLOB UNITTEST_SRC_FILES
     sceneutil/userdata.cpp
     sceneutil/occlusionbudget.cpp
     sceneutil/occlusionquery.cpp
+    sceneutil/occlusiontraversal.cpp
 
     terrain/terrainoccluder.cpp
 

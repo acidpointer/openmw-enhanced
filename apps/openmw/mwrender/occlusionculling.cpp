@@ -1,6 +1,7 @@
 #include "occlusionculling.hpp"
 
 #include "objects.hpp"
+#include "vismask.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +24,7 @@
 #include <components/occlusionculling/occludermesh.hpp>
 #include <components/sceneutil/enhancedsettings.hpp>
 #include <components/sceneutil/occlusionculling.hpp>
+#include <components/sceneutil/occlusiontraversal.hpp>
 #include <components/sceneutil/userdata.hpp>
 #include <components/settings/values.hpp>
 #include <components/terrain/terrainoccluder.hpp>
@@ -343,7 +345,8 @@ namespace MWRender
         mCuller->setMinOccludeeScreenRatio(SceneUtil::Enhanced::occlusionMinOccludeeScreenRatio());
 
         // Build and rasterize terrain occluder mesh (skip for quasi-exteriors and interiors — no real terrain)
-        if (mEnableTerrainOccluder && !mIsQuasiExterior && !mIsInterior && mTerrainOccluder->hasTerrainData())
+        if (mEnableTerrainOccluder && (cv->getTraversalMask() & Mask_Terrain) && !mIsQuasiExterior && !mIsInterior
+            && mTerrainOccluder->hasTerrainData())
         {
             osg::Timer_t start = osg::Timer::instance()->tick();
             mTerrainOccluder->update(cv->getEyePoint(), mRadiusCells);
@@ -855,9 +858,13 @@ namespace MWRender
         for (unsigned int i = 0; i < numChildren; ++i)
         {
             osg::Node* child = node->getChild(i);
+            if (!cv->validNodeMask(*child))
+                continue;
             const osg::BoundingSphere& bs = child->getBound();
 
             if (!bs.valid() || bs.radius() < mOccluderMinRadius)
+                continue;
+            if (!SceneUtil::mayTraverseForOcclusion(*child, *cv, cv->getCurrentCullingSet()))
                 continue;
 
             // Paged chunks and other oversized objects — test visibility, rasterize stored occluders
@@ -956,6 +963,8 @@ namespace MWRender
         for (unsigned int i = 0; i < numChildren; ++i)
         {
             osg::Node* child = node->getChild(i);
+            if (!cv->validNodeMask(*child))
+                continue;
             const osg::BoundingSphere& bs = child->getBound();
 
             if (!bs.valid())
@@ -966,6 +975,8 @@ namespace MWRender
 
             if (bs.radius() >= mOccluderMinRadius)
                 continue; // Already handled in pass 1
+            if (!SceneUtil::mayTraverseForOcclusion(*child, *cv, cv->getCurrentCullingSet()))
+                continue;
 
             // Never occlude doors — they sit flush against building surfaces
             // and are easily falsely hidden by the parent building's AABB occluder

@@ -817,8 +817,8 @@ namespace MWRender
             mRendering.getSkyManager()->setSunglare(sunglare);
 
         if (mUsePostProcessing)
-            Log(Debug::Info) << "OpenMW Enhanced postprocess buffers: hdr=" << mHDR << " normals=" << mNormals
-                             << " lights=" << mPassLights
+            Log(Debug::Info) << "OpenMW Enhanced postprocess chain requirements: hdr=" << mHDR
+                             << " normals=" << mNormals << " lights=" << mPassLights
                              << " transparent_postpass=" << Settings::postProcessing().mTransparentPostpass;
 
         if (dirtyAttachments)
@@ -944,7 +944,14 @@ namespace MWRender
                     std::move(technique));
             }
 
-            Log(Debug::Info) << "OpenMW Enhanced screen-space shadows active as post-processing shader.";
+            if (std::any_of(mTechniques.begin(), mTechniques.end(), [this](const auto& technique) {
+                    return technique->getName() == EnhancedScreenSpaceShadowsTechnique && technique->isValid()
+                        && technique->getGLSLVersion() <= mGLSLVersion;
+                }))
+                Log(Debug::Info) << "OpenMW Enhanced screen-space shadows active as post-processing shader.";
+            else
+                Log(Debug::Warning)
+                    << "OpenMW Enhanced screen-space shadows unavailable: invalid or unsupported technique.";
         }
 
         dirtyTechniques();

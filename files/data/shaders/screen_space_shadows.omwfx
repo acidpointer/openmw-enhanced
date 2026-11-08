@@ -142,9 +142,9 @@ shared {
         return normalize(omw_GetNormalsWorldSpace(uv));
     }
 
-    vec2 projectedLightAxis(vec2 uv, float centerDepth)
+    vec2 projectedLightAxis(vec2 uv, float centerDepth, float worldDepth)
     {
-        vec3 centerWorld = omw_GetWorldPosFromWorldDepthUV(uv);
+        vec3 centerWorld = omw_GetWorldPosFromWorldDepthUV(uv, worldDepth);
         vec3 toLight = normalize(omw.sunPos.xyz);
         float depthScale = saturate(centerDepth / 5200.0);
         float probeDistance = mix(80.0, 360.0, depthScale);
@@ -217,29 +217,21 @@ fragment shadow_raw(target=RT_ShadowRaw) {
         if (edgeFade <= 0.0)
             return 0.0;
 
-        float sampleDepth = omw_GetWorldLinearDepth(sampleUv);
-        if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(sampleUv, sampleDepth))
+        float worldDepth = omw_GetWorldDepth(sampleUv);
+        float sampleDepth = omw_LinearizeDepth(worldDepth);
+        if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION)
             return 0.0;
 
         float receiverLayerWeight = depthLayerWeight(receiverLinearDepth, sampleDepth, 3.0);
         if (receiverLayerWeight <= 0.0)
             return 0.0;
 
-        vec3 sampleWorld = omw_GetWorldPosFromWorldDepthUV(sampleUv);
-        vec3 originToSample = sampleWorld - originWorld;
-        float rayAlong = dot(originToSample, toLightWorld);
-        if (rayAlong <= 0.0 || rayAlong > maxDistance)
-            return 0.0;
-
         float distanceScale = saturate(receiverDepth / 5200.0);
         float thicknessScale = clamp(uThickness, 0.25, 1.40);
         float casterBias = clamp(uCasterBias, 0.45, 1.60);
 
-        float receiverPlaneHeight = dot(originToSample, normalWorld);
-        float minCasterPlaneHeight = mix(7.0, 34.0, distanceScale) * casterBias;
-        if (receiverPlaneHeight <= minCasterPlaneHeight)
-            return 0.0;
-
+        // Reject misses using depth before reconstructing a world position and
+        // evaluating geometric hit weights. The hit interval is unchanged.
         float rayDepth = max(-rayView.z, 0.0);
         float depthDelta = rayDepth - sampleDepth;
         float depthBias = mix(1.4, 8.5, distanceScale) * casterBias;
@@ -249,6 +241,22 @@ fragment shadow_raw(target=RT_ShadowRaw) {
         float backReject = 1.0 - smoothstep(depthBias + thickness, depthBias + thickness * 2.2, depthDelta);
         float depthHit = frontHit * backReject;
         if (depthHit <= 0.0)
+            return 0.0;
+
+        // Most steps miss. Only surviving candidates need a second depth
+        // texture fetch to exclude first-person geometry.
+        if (firstPersonOverlayAt(sampleUv, sampleDepth))
+            return 0.0;
+
+        vec3 sampleWorld = omw_GetWorldPosFromWorldDepthUV(sampleUv, worldDepth);
+        vec3 originToSample = sampleWorld - originWorld;
+        float rayAlong = dot(originToSample, toLightWorld);
+        if (rayAlong <= 0.0 || rayAlong > maxDistance)
+            return 0.0;
+
+        float receiverPlaneHeight = dot(originToSample, normalWorld);
+        float minCasterPlaneHeight = mix(7.0, 34.0, distanceScale) * casterBias;
+        if (receiverPlaneHeight <= minCasterPlaneHeight)
             return 0.0;
 
         float worldRadius = (mix(16.0, 86.0, distanceScale) + rayDistance * 0.030) * thicknessScale;
@@ -329,7 +337,8 @@ fragment shadow_raw(target=RT_ShadowRaw) {
 
     float screenSpaceShadowLoss(vec2 uv)
     {
-        float centerDepth = omw_GetWorldLinearDepth(uv);
+        float worldDepth = omw_GetWorldDepth(uv);
+        float centerDepth = omw_LinearizeDepth(worldDepth);
         if (centerDepth >= omw.far * SKY_DEPTH_FRACTION)
             return 0.0;
 
@@ -339,18 +348,21 @@ fragment shadow_raw(target=RT_ShadowRaw) {
         if (omw.isInterior)
             return 0.0;
 
+        vec3 origin = omw_GetWorldPosFromWorldDepthUV(uv, worldDepth);
+        float receiverDepth = length(origin - omw.eyePos.xyz);
+        float distanceFade = 1.0 - smoothstep(3200.0, 7600.0, receiverDepth);
+        if (distanceFade <= 0.0)
+            return 0.0;
+
 #if OMW_NORMALS
         vec3 normal = normalWorldFromBuffer(uv);
 #else
         vec3 normal = fallbackWorldNormal(uv);
 #endif
 
-        vec3 origin = omw_GetWorldPosFromWorldDepthUV(uv);
-        float receiverDepth = length(origin - omw.eyePos.xyz);
         vec3 toLight = normalize(omw.sunPos.xyz);
         float occlusion = traceScreenSpaceShadow(uv, origin, normal, toLight, receiverDepth);
 
-        float distanceFade = 1.0 - smoothstep(3200.0, 7600.0, receiverDepth);
         float fogFade = 1.0 - omw_EstimateFogCoverageFromUV(uv) * 0.88;
         return saturate(occlusion * distanceFade * fogFade);
     }
@@ -366,7 +378,8 @@ fragment shadow_directional(target=RT_ShadowDirectional, rt1=RT_ShadowRaw) {
 
     void main()
     {
-        float centerDepth = omw_GetWorldLinearDepth(omw_TexCoord);
+        float worldDepth = omw_GetWorldDepth(omw_TexCoord);
+        float centerDepth = omw_LinearizeDepth(worldDepth);
         if (centerDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(omw_TexCoord, centerDepth))
         {
             omw_FragColor = vec4(0.0, 1.0, 1.0, 1.0);
@@ -381,15 +394,15 @@ fragment shadow_directional(target=RT_ShadowDirectional, rt1=RT_ShadowRaw) {
             return;
         }
 
+        vec2 axis = projectedLightAxis(omw_TexCoord, centerDepth, worldDepth);
+        vec2 texel = shadowBufferTexel();
+        float radius = mix(0.9, 3.8, softness / 2.5);
 #if OMW_NORMALS
         // Camera rotation preserves normal dot products. Filtering in view space
         // avoids a world-space matrix transform for every tap.
         vec3 centerNormal = normalize(omw_GetNormals(omw_TexCoord));
 #endif
 
-        vec2 axis = projectedLightAxis(omw_TexCoord, centerDepth);
-        vec2 texel = shadowBufferTexel();
-        float radius = mix(0.9, 3.8, softness / 2.5);
         float sum = center * 6.0;
         float weight = 6.0;
 
@@ -404,11 +417,14 @@ fragment shadow_directional(target=RT_ShadowDirectional, rt1=RT_ShadowRaw) {
                 continue;
 
             float sampleDepth = omw_GetWorldLinearDepth(sampleUv);
-            if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(sampleUv, sampleDepth))
+            if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION)
                 continue;
 
             float layerWeight = depthLayerWeight(centerDepth, sampleDepth, 1.0);
             if (layerWeight <= 0.0)
+                continue;
+
+            if (firstPersonOverlayAt(sampleUv, sampleDepth))
                 continue;
 
             float depthWeight = layerWeight * layerWeight;
@@ -433,7 +449,8 @@ fragment shadow_cross(target=RT_ShadowBlur, rt1=RT_ShadowDirectional) {
 
     void main()
     {
-        float centerDepth = omw_GetWorldLinearDepth(omw_TexCoord);
+        float worldDepth = omw_GetWorldDepth(omw_TexCoord);
+        float centerDepth = omw_LinearizeDepth(worldDepth);
         if (centerDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(omw_TexCoord, centerDepth))
         {
             omw_FragColor = vec4(0.0, 1.0, 1.0, 1.0);
@@ -448,14 +465,14 @@ fragment shadow_cross(target=RT_ShadowBlur, rt1=RT_ShadowDirectional) {
             return;
         }
 
+        vec2 axis = projectedLightAxis(omw_TexCoord, centerDepth, worldDepth);
+        vec2 crossAxis = vec2(-axis.y, axis.x);
+        vec2 texel = shadowBufferTexel();
+        float radius = mix(0.6, 1.9, softness / 2.5);
 #if OMW_NORMALS
         vec3 centerNormal = normalize(omw_GetNormals(omw_TexCoord));
 #endif
 
-        vec2 axis = projectedLightAxis(omw_TexCoord, centerDepth);
-        vec2 crossAxis = vec2(-axis.y, axis.x);
-        vec2 texel = shadowBufferTexel();
-        float radius = mix(0.6, 1.9, softness / 2.5);
         float sum = center * 5.0;
         float weight = 5.0;
 
@@ -470,11 +487,14 @@ fragment shadow_cross(target=RT_ShadowBlur, rt1=RT_ShadowDirectional) {
                 continue;
 
             float sampleDepth = omw_GetWorldLinearDepth(sampleUv);
-            if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION || firstPersonOverlayAt(sampleUv, sampleDepth))
+            if (sampleDepth >= omw.far * SKY_DEPTH_FRACTION)
                 continue;
 
             float layerWeight = depthLayerWeight(centerDepth, sampleDepth, 0.85);
             if (layerWeight <= 0.0)
+                continue;
+
+            if (firstPersonOverlayAt(sampleUv, sampleDepth))
                 continue;
 
             float depthWeight = layerWeight * layerWeight;
@@ -529,7 +549,6 @@ technique {
     version = "0.4";
     author = "OpenMW Enhanced";
     passes = shadow_raw, shadow_directional, shadow_cross, final;
-    // The raw pass returns zero indoors. Skip the filters and composite as well.
     flags = disable_interiors;
     pass_normals = true;
 }

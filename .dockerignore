@@ -1,0 +1,4 @@
+# Toolchain images do not consume the local build outputs or Git database.
+# The full working tree is mounted into the container when the build runs.
+.build/
+.git/

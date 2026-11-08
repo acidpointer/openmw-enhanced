@@ -42,10 +42,16 @@ if [[ "${IN_OPENMW_ENHANCED_CONTAINER:-0}" != "1" ]]; then
         mount_args+=("${item}")
     done < <(docker_mount_args "${ROOT}")
 
-    exec docker run --rm -t \
+    docker_tty_args=()
+    if [[ -t 1 ]]; then
+        docker_tty_args+=(-t)
+    fi
+
+    exec docker run --rm "${docker_tty_args[@]}" \
         -e IN_OPENMW_ENHANCED_CONTAINER=1 \
         -e OPENMW_SOURCE_DIR="${OPENMW_SOURCE_DIR:-}" \
         -e OPENMW_BULLET_THREADING="${BULLET_THREADING}" \
+        -e CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
         -e CCACHE_DIR=/ccache \
         -e CARGO_HOME=/cargo \
         "${mount_args[@]}" \
@@ -55,6 +61,9 @@ if [[ "${IN_OPENMW_ENHANCED_CONTAINER:-0}" != "1" ]]; then
 fi
 
 SOURCE_DIR="$(find_openmw_source_dir /src)"
+# The checkout is owned by the host runner/user; Git runs as root in Docker.
+# Trust only this mounted source directory so release commit metadata is available.
+git config --global --add safe.directory "${SOURCE_DIR}"
 BUILD_ROOT="/build/appimage"
 BUILD_DIR="${BUILD_ROOT}/build"
 APPDIR="${BUILD_ROOT}/AppDir"

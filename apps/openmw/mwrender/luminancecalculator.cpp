@@ -57,7 +57,7 @@ namespace MWRender
             buffer.sceneLumSS = new osg::StateSet;
             buffer.sceneLumSS->setAttributeAndModes(mLuminanceProgram);
             buffer.sceneLumSS->addUniform(new osg::Uniform("sceneTex", 0));
-            buffer.sceneLumSS->addUniform(new osg::Uniform("scaling", mScale));
+            buffer.sceneLumSS->addUniform(new osg::Uniform("scaling", osg::Vec2f(1, 1)));
 
             buffer.resolveSS = new osg::StateSet;
             buffer.resolveSS->setAttributeAndModes(mResolveProgram);
@@ -73,6 +73,7 @@ namespace MWRender
     void LuminanceCalculator::compile()
     {
         int mipmapLevels = osg::Image::computeNumberOfMipmapLevels(mWidth, mHeight);
+        mSceneViewport = new osg::Viewport(0, 0, mWidth, mHeight);
 
         for (auto& buffer : mBuffers)
         {
@@ -106,9 +107,9 @@ namespace MWRender
         auto& buffer = mBuffers[frameId];
         buffer.sceneLumFbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
         buffer.sceneLumSS->setTextureAttribute(0, canvas.getSceneTexture(frameId));
-        buffer.sceneLumSS->getUniform("scaling")->set(mScale);
 
         state.apply(buffer.sceneLumSS);
+        state.applyAttribute(mSceneViewport);
         canvas.drawGeometry(renderInfo);
 
         state.applyTextureAttribute(0, buffer.mipmappedSceneLuminanceTex);
@@ -130,6 +131,7 @@ namespace MWRender
 
         buffer.resolveFbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);
         state.apply(buffer.resolveSS);
+        state.applyAttribute(mResolveViewport);
         canvas.drawGeometry(renderInfo);
 
         ext->glBindFramebuffer(
@@ -145,10 +147,12 @@ namespace MWRender
     {
         constexpr int minSize = 64;
 
-        mWidth = std::max(minSize, Misc::nextPowerOfTwo(w) / 2);
-        mHeight = std::max(minSize, Misc::nextPowerOfTwo(h) / 2);
-
-        mScale = osg::Vec2f(w / static_cast<float>(mWidth), h / static_cast<float>(mHeight));
+        const int width = std::max(minSize, Misc::nextPowerOfTwo(w) / 2);
+        const int height = std::max(minSize, Misc::nextPowerOfTwo(h) / 2);
+        if (width == mWidth && height == mHeight)
+            return;
+        mWidth = width;
+        mHeight = height;
 
         mCompiled = false;
     }
