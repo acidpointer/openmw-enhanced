@@ -48,8 +48,9 @@ namespace Fx
             { "double", GL_DOUBLE },
         } };
 
-        constexpr std::array<std::pair<std::string_view, int>, 16> InternalFormat = { {
+        constexpr std::array<std::pair<std::string_view, int>, 17> InternalFormat = { {
             { "red", GL_RED },
+            { "r8", GL_R8 },
             { "r16f", GL_R16F },
             { "r32f", GL_R32F },
             { "rg", GL_RG },

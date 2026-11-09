@@ -7,6 +7,28 @@
 
 namespace SceneUtil
 {
+    inline bool maySubmitOccluderSphere(const osg::BoundingSphere& bound, const osg::CullingSet& culling)
+    {
+        if (!bound.valid())
+            return false;
+        if (culling.getCullingMask() & osg::CullingSet::SMALL_FEATURE_CULLING)
+            if ((bound.center() * culling.getPixelSizeVector()) * culling.getSmallFeatureCullingPixelSize()
+                > bound.radius())
+                return false;
+        if (culling.getCullingMask() & osg::CullingSet::VIEW_FRUSTUM_CULLING)
+        {
+            auto mask = culling.getFrustum().getCurrentMask();
+            for (const auto& plane : culling.getFrustum().getPlaneList())
+            {
+                if ((mask & 1) && plane.intersect(bound) < 0)
+                    return false;
+                mask >>= 1;
+                if (!mask)
+                    break;
+            }
+        }
+        return true;
+    }
     // An early rejection for occluder preparation, in the current parent's
     // coordinates. Do not mutate OSG's plane masks: sibling traversal still
     // needs them. Disabled culling and unusual/uncertain bounds stay visible.

@@ -1,8 +1,9 @@
 #include "occludermesh.hpp"
 
 #include <algorithm>
-#include <cstdint>
 #include <cmath>
+#include <components/nifosg/nifloader.hpp>
+#include <cstdint>
 
 #include <osg/AlphaFunc>
 #include <osg/AutoTransform>
@@ -29,6 +30,9 @@ namespace
             : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
             , mSkippedRootTransform(skippedRootTransform)
         {
+            // Hidden/collision nodes may stay in update traversal for animation
+            // or physics. Their invisible triangles must never close openings.
+            setTraversalMask(~NifOsg::Loader::getHiddenNodeMask());
         }
 
         void apply(osg::Transform& transform) override

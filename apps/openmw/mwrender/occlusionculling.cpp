@@ -1,6 +1,5 @@
 #include "occlusionculling.hpp"
 
-#include "objects.hpp"
 #include "vismask.hpp"
 
 #include <algorithm>
@@ -18,14 +17,17 @@
 #include <osg/Transform>
 #include <osgUtil/CullVisitor>
 
-#include "../mwworld/class.hpp"
 #include <components/debug/debuglog.hpp>
 #include <components/misc/constants.hpp>
 #include <components/occlusionculling/occludermesh.hpp>
 #include <components/sceneutil/enhancedsettings.hpp>
+#include <components/sceneutil/occlusioncallback.hpp>
 #include <components/sceneutil/occlusionculling.hpp>
 #include <components/sceneutil/occlusiontraversal.hpp>
+#include <components/sceneutil/renderstageinventory.hpp>
 #include <components/sceneutil/userdata.hpp>
+#include <components/sceneutil/util.hpp>
+#include <components/sceneutil/viewpreparation.hpp>
 #include <components/settings/values.hpp>
 #include <components/terrain/terrainoccluder.hpp>
 
@@ -33,8 +35,6 @@ namespace MWRender
 {
     namespace
     {
-        constexpr unsigned int PagedOccluderBinDim = 16;
-
         class StaticCandidateTimer
         {
         public:
@@ -54,118 +54,30 @@ namespace MWRender
             osg::Timer_t mStart;
         };
 
-        VFS::Path::Normalized getModelPathForNode(osg::Node* node)
-        {
-            if (node)
-                if (const auto* ptr = SceneUtil::findUserData<MWWorld::Ptr>(*node))
-                    return ptr->getClass().getCorrectedModel(*ptr);
-            return {};
-        }
-
-        unsigned int occluderBinIndex(float value, float minValue, float maxValue, unsigned int dim)
-        {
-            if (dim <= 1 || maxValue <= minValue)
-                return 0;
-
-            const float normalized = (value - minValue) / (maxValue - minValue);
-            return std::min(dim - 1, static_cast<unsigned int>(std::max(0.0f, normalized) * dim));
-        }
-
-        float distanceSqToRect2D(const osg::Vec3f& point, float minX, float minY, float maxX, float maxY)
-        {
-            const float dx = point.x() < minX ? minX - point.x() : (point.x() > maxX ? point.x() - maxX : 0.0f);
-            const float dy = point.y() < minY ? minY - point.y() : (point.y() > maxY ? point.y() - maxY : 0.0f);
-            return dx * dx + dy * dy;
-        }
     }
 
-    void PagedOccluderData::buildSpatialBins()
+    void PagedOccluderData::buildSpatialIndex()
     {
-        mOccluderBins.clear();
-        mOccluderBounds = osg::BoundingBox();
-        mOccluderBinDim = 0;
-
-        if (mOccluderMeshes.size() < 64)
-            return;
-
-        for (const OccluderMesh& mesh : mOccluderMeshes)
-            if (mesh.aabb.valid())
-                mOccluderBounds.expandBy(mesh.aabb.center());
-
-        if (!mOccluderBounds.valid() || mOccluderBounds.xMax() <= mOccluderBounds.xMin()
-            || mOccluderBounds.yMax() <= mOccluderBounds.yMin())
-            return;
-
-        mOccluderBinDim = PagedOccluderBinDim;
-        mOccluderBins.resize(mOccluderBinDim * mOccluderBinDim);
-
-        for (unsigned int i = 0; i < mOccluderMeshes.size(); ++i)
-        {
-            const OccluderMesh& mesh = mOccluderMeshes[i];
-            if (!mesh.aabb.valid())
-                continue;
-
-            const osg::Vec3f center = mesh.aabb.center();
-            const unsigned int x = occluderBinIndex(center.x(), mOccluderBounds.xMin(), mOccluderBounds.xMax(),
-                mOccluderBinDim);
-            const unsigned int y = occluderBinIndex(center.y(), mOccluderBounds.yMin(), mOccluderBounds.yMax(),
-                mOccluderBinDim);
-            mOccluderBins[x + y * mOccluderBinDim].push_back(i);
-        }
+        mIndexed = mOccluderMeshes.size() >= 64;
+        if (mIndexed)
+            mIndex.build(mOccluderMeshes, [](const auto& mesh) { return osg::BoundingSphere(mesh->aabb); });
     }
 
-    void PagedOccluderData::collectNearbyOccluders(
-        const osg::Vec3f& eyeWorld, float maxDistanceSq, std::vector<const OccluderMesh*>& out) const
+    void PagedOccluderData::collectNearbyOccluders(const osg::Vec3f& eye, float maxDistanceSq,
+        std::vector<std::shared_ptr<const OccluderMesh>>& out, std::vector<std::size_t>& candidates) const
     {
-        if (mOccluderBins.empty() || !mOccluderBounds.valid() || mOccluderBinDim == 0)
-        {
-            out.reserve(out.size() + mOccluderMeshes.size());
-            for (const OccluderMesh& mesh : mOccluderMeshes)
-            {
-                if (!mesh.aabb.valid())
-                    continue;
-                if ((mesh.aabb.center() - eyeWorld).length2() <= maxDistanceSq)
-                    out.push_back(&mesh);
-            }
-            return;
-        }
-
-        const float radius = std::sqrt(maxDistanceSq);
-        const float binWidth = (mOccluderBounds.xMax() - mOccluderBounds.xMin()) / static_cast<float>(mOccluderBinDim);
-        const float binHeight = (mOccluderBounds.yMax() - mOccluderBounds.yMin()) / static_cast<float>(mOccluderBinDim);
-        const unsigned int minX = occluderBinIndex(eyeWorld.x() - radius, mOccluderBounds.xMin(),
-            mOccluderBounds.xMax(), mOccluderBinDim);
-        const unsigned int maxX = occluderBinIndex(eyeWorld.x() + radius, mOccluderBounds.xMin(),
-            mOccluderBounds.xMax(), mOccluderBinDim);
-        const unsigned int minY = occluderBinIndex(eyeWorld.y() - radius, mOccluderBounds.yMin(),
-            mOccluderBounds.yMax(), mOccluderBinDim);
-        const unsigned int maxY = occluderBinIndex(eyeWorld.y() + radius, mOccluderBounds.yMin(),
-            mOccluderBounds.yMax(), mOccluderBinDim);
-
-        for (unsigned int y = minY; y <= maxY; ++y)
-        {
-            for (unsigned int x = minX; x <= maxX; ++x)
-            {
-                const float binMinX = mOccluderBounds.xMin() + static_cast<float>(x) * binWidth;
-                const float binMinY = mOccluderBounds.yMin() + static_cast<float>(y) * binHeight;
-                const float binMaxX = binMinX + binWidth;
-                const float binMaxY = binMinY + binHeight;
-                if (distanceSqToRect2D(eyeWorld, binMinX, binMinY, binMaxX, binMaxY) > maxDistanceSq)
-                    continue;
-
-                const std::vector<unsigned int>& bin = mOccluderBins[x + y * mOccluderBinDim];
-                out.reserve(out.size() + bin.size());
-                for (unsigned int index : bin)
-                    if (index < mOccluderMeshes.size())
-                    {
-                        const OccluderMesh& mesh = mOccluderMeshes[index];
-                        if (!mesh.aabb.valid())
-                            continue;
-                        if ((mesh.aabb.center() - eyeWorld).length2() <= maxDistanceSq)
-                            out.push_back(&mesh);
-                    }
-            }
-        }
+        const auto append = [&](const auto& mesh) {
+            if (mesh->aabb.valid() && SceneUtil::occlusionDistanceSquared(mesh->aabb, eye) <= maxDistanceSq)
+                out.push_back(mesh);
+        };
+        // The existing BVH is a conservative broad phase. The final predicate
+        // uses distance to the full mesh bounds, not its centroid.
+        if (mIndexed && mIndex.queryCandidates(osg::BoundingSphere(eye, std::sqrt(maxDistanceSq)), candidates))
+            for (const auto index : candidates)
+                append(mOccluderMeshes[index]);
+        else
+            for (const auto& mesh : mOccluderMeshes)
+                append(mesh);
     }
 
     SceneOcclusionCallback::SceneOcclusionCallback(SceneUtil::OcclusionCuller* culler,
@@ -289,13 +201,6 @@ namespace MWRender
             return;
         }
         const unsigned int frameNumber = cv->getFrameStamp()->getFrameNumber();
-        if (const auto it = mLastFrameNumbers.find(cameraName);
-            it != mLastFrameNumbers.end() && it->second == frameNumber)
-        {
-            traverse(node, cv);
-            return;
-        }
-        mLastFrameNumbers[cameraName] = frameNumber;
         // MOC depth is reciprocal clip W and cannot represent orthographic depth.
         if ((*cv->getProjectionMatrix())(3, 3) != 0.0)
         {
@@ -312,7 +217,8 @@ namespace MWRender
 
         // Begin occlusion frame with camera matrices
         const osg::Timer_t beginStart = osg::Timer::instance()->tick();
-        mCuller->beginFrame(*cv->getModelViewMatrix(), *cv->getProjectionMatrix(), Settings::camera().mNearClip.get());
+        mCuller->beginFrame(
+            *cv->getModelViewMatrix(), *cv->getProjectionMatrix(), Settings::camera().mNearClip.get(), true);
         if (!mCuller->isFrameActive())
         {
             traverse(node, cv);
@@ -329,10 +235,9 @@ namespace MWRender
         bool staticOccludersEnabled = SceneUtil::Enhanced::occlusionCullingStaticOccluders();
 
         const bool adaptiveStatics = sceneCamera && SceneUtil::Enhanced::occlusionAdaptiveStatics();
-        if (adaptiveStatics && mAdaptiveStaticCooldownFrames > 0)
+        const bool throttled = adaptiveStatics && mAdaptiveStaticCooldownFrames > 0;
+        if (throttled)
         {
-            staticOccludersEnabled = false;
-            smallObjectTestingEnabled = false;
             --mAdaptiveStaticCooldownFrames;
         }
         if (!smallObjectTestingEnabled)
@@ -340,32 +245,11 @@ namespace MWRender
 
         mCuller->setStaticOccludersEnabled(staticOccludersEnabled);
         mCuller->setSmallObjectTestingEnabled(smallObjectTestingEnabled);
-        mCuller->setStaticRasterBudgetMs(SceneUtil::Enhanced::occlusionStaticRasterTimeBudgetMs());
+        mCuller->setStaticRasterBudgetMs(
+            SceneUtil::adaptiveOcclusionBudget(SceneUtil::Enhanced::occlusionStaticRasterTimeBudgetMs(), throttled));
         mCuller->setMinOccluderScreenRatio(SceneUtil::Enhanced::occlusionMinOccluderScreenRatio());
         mCuller->setMinOccludeeScreenRatio(SceneUtil::Enhanced::occlusionMinOccludeeScreenRatio());
 
-        // Build and rasterize terrain occluder mesh (skip for quasi-exteriors and interiors — no real terrain)
-        if (mEnableTerrainOccluder && (cv->getTraversalMask() & Mask_Terrain) && !mIsQuasiExterior && !mIsInterior
-            && mTerrainOccluder->hasTerrainData())
-        {
-            osg::Timer_t start = osg::Timer::instance()->tick();
-            mTerrainOccluder->update(cv->getEyePoint(), mRadiusCells);
-            const auto& positions = mTerrainOccluder->getPositions();
-            const auto& indices = mTerrainOccluder->getIndices();
-            mTerrainVerts = positions.size();
-            mTerrainTris = indices.size() / 3;
-            mTerrainBuildMs = osg::Timer::instance()->delta_m(start, osg::Timer::instance()->tick());
-
-            if (!positions.empty())
-            {
-                start = osg::Timer::instance()->tick();
-                const bool needFullBuffer = staticOccludersEnabled || smallObjectTestingEnabled;
-                mCuller->rasterizeTerrainOccluder(positions, indices, needFullBuffer);
-                mTerrainRasterMs = osg::Timer::instance()->delta_m(start, osg::Timer::instance()->tick());
-            }
-        }
-        mCuller->resetStaticRasterBudgetBaseline();
-        mBeginCallbackMs = osg::Timer::instance()->delta_m(beginStart, osg::Timer::instance()->tick());
         mActiveFrameNumber = frameNumber;
         mActiveCameraName = cameraName;
         mActiveSceneCamera = sceneCamera;
@@ -373,14 +257,96 @@ namespace MWRender
         mActiveStaticOccludersEnabled = staticOccludersEnabled;
         mActiveSmallObjectTestingEnabled = smallObjectTestingEnabled;
         mFrameStarted = true;
-        mCuller->bindVisitor(*cv);
+        auto* stats = cam->getStats();
+        const bool inventory = stats && stats->collectStats("rendering");
+        const auto before = inventory ? SceneUtil::countRenderSubmissions(*cv->getCurrentRenderStage())
+                                      : SceneUtil::SubmissionCounts{};
+        const auto beforeNested = inventory ? SceneUtil::countDependentSubmissions(*cv->getCurrentRenderStage())
+                                            : SceneUtil::SubmissionCounts{};
         try
         {
+            // Prepare the exact view selected by terrain/paging without a cull
+            // traversal. No render leaves, light lists or skinning run here.
+            mPlan.start();
+            if (staticOccludersEnabled)
+            {
+                StaticCandidateTimer timer(*mCuller);
+                SceneUtil::OcclusionPreparationVisitor prepare(
+                    *cv, mPlan, { Mask_Object, Mask_Actor, Mask_Groundcover });
+                node->accept(prepare);
+            }
+            const bool terrain = mEnableTerrainOccluder && (cv->getTraversalMask() & Mask_Terrain) && !mIsQuasiExterior
+                && !mIsInterior && mTerrainOccluder->hasTerrainData();
+            if (terrain)
+            {
+                const auto start = osg::Timer::instance()->tick();
+                mTerrainOccluder->update(cv->getEyePoint(), mRadiusCells);
+                mTerrainBuildMs = osg::Timer::instance()->delta_m(start, osg::Timer::instance()->tick());
+                mTerrainVerts = mTerrainOccluder->getPositions().size();
+                mTerrainTris = mTerrainOccluder->getIndices().size() / 3;
+            }
+            SceneUtil::OcclusionViewKey key;
+            key.mCamera = cam;
+            key.mView = *cv->getModelViewMatrix();
+            key.mProjection = *cv->getProjectionMatrix();
+            const auto* viewport = cv->getViewport();
+            key.mViewport.set(viewport->x(), viewport->y(), viewport->width(), viewport->height());
+            key.mPlanes = cv->getCurrentCullingSet().getFrustum().getPlaneList();
+            key.mTerrainRevision = mTerrainOccluder->getRevision();
+            key.mTerrain = terrain;
+            key.mStatics = staticOccludersEnabled;
+            key.mTraversalMask = cv->getTraversalMask();
+            key.mCullingMode = cv->getCurrentCullingSet().getCullingMask();
+            key.mSmallFeature = cv->getCurrentCullingSet().getSmallFeatureCullingPixelSize();
+            key.mLodScale = cv->getLODScale();
+            key.mNear = Settings::camera().mNearClip.get();
+            key.mMaxTriangles = SceneUtil::Enhanced::occlusionMaxTriangles();
+            key.mMinOccluder = SceneUtil::Enhanced::occlusionMinOccluderScreenRatio();
+            key.mBudget = SceneUtil::Enhanced::occlusionStaticRasterTimeBudgetMs();
+            bool reused;
+            {
+                StaticCandidateTimer timer(*mCuller);
+                reused = mPlan.prepare(key);
+            }
+            if (!reused)
+            {
+                mCuller->clearDepth();
+                if (terrain)
+                {
+                    const auto start = osg::Timer::instance()->tick();
+                    mCuller->rasterizeTerrainOccluder(mTerrainOccluder->getPositions(), mTerrainOccluder->getIndices(),
+                        staticOccludersEnabled || smallObjectTestingEnabled);
+                    mTerrainRasterMs = osg::Timer::instance()->delta_m(start, osg::Timer::instance()->tick());
+                }
+            }
+            mCuller->resetStaticRasterBudgetBaseline();
+            mPlan.rasterize(*mCuller);
+            mBeginCallbackMs = osg::Timer::instance()->delta_m(beginStart, osg::Timer::instance()->tick());
+            if (auto* stats = cam->getStats(); stats && stats->collectStats("rendering"))
+            {
+                stats->setAttribute(frameNumber, "Occlusion depth reused", reused);
+                stats->setAttribute(frameNumber, "Occlusion plan complete", mPlan.complete());
+            }
+            mCuller->bindVisitor(*cv);
+            if (inventory)
+                stats->setAttribute(frameNumber, "Occlusion preparation submitted leaves",
+                    SceneUtil::countRenderSubmissions(*cv->getCurrentRenderStage()).mLeaves - before.mLeaves);
             traverse(node, cv);
+            if (inventory)
+            {
+                const auto after = SceneUtil::countRenderSubmissions(*cv->getCurrentRenderStage());
+                const auto nested = SceneUtil::countDependentSubmissions(*cv->getCurrentRenderStage());
+                stats->setAttribute(frameNumber, "World submitted leaves", after.mLeaves - before.mLeaves);
+                stats->setAttribute(frameNumber, "World submitted geometry", after.mGeometry - before.mGeometry);
+                stats->setAttribute(
+                    frameNumber, "World submitted primitive sets", after.mPrimitiveSets - before.mPrimitiveSets);
+                stats->setAttribute(frameNumber, "World dependent geometry", nested.mGeometry - beforeNested.mGeometry);
+            }
             endFrame(node, cv);
         }
         catch (...)
         {
+            mPlan.invalidate();
             mCuller->endFrame();
             mFrameStarted = false;
             throw;
@@ -441,18 +407,16 @@ namespace MWRender
                 mAdaptiveStaticBadFrames = 0;
                 mAdaptiveStaticCooldownFrames = SceneUtil::Enhanced::occlusionAdaptiveCooldownFrames();
                 if (mEnableDebugMessages)
-                    Log(Debug::Info) << "OcclusionCull: adaptive enhanced cell occlusion cooldown triggered"
+                    Log(Debug::Info) << "OcclusionCull: adaptive static budget reduced; visibility tests remain active"
                                      << " begin_marker_ms=" << mBeginCallbackMs
                                      << " child_traverse_ms=" << mCuller->getChildTraverseMs()
                                      << " callback_overhead_ms=" << callbackOverheadMs
-                                     << " overhead_ms=" << occlusionOverheadMs
-                                     << " tested=" << tested
+                                     << " overhead_ms=" << occlusionOverheadMs << " tested=" << tested
                                      << " occluded=" << occluded
-                                     << " terrain_cell_skips=" << mCuller->getTerrainCellOccluded()
-                                     << "/" << mCuller->getTerrainCellTests()
-                                     << " paged_chunk_skips=" << mCuller->getTerrainPagedOccluded()
-                                     << "/" << mCuller->getTerrainPagedTests()
-                                     << " benefit=" << benefitRatio
+                                     << " terrain_cell_skips=" << mCuller->getTerrainCellOccluded() << "/"
+                                     << mCuller->getTerrainCellTests()
+                                     << " paged_chunk_skips=" << mCuller->getTerrainPagedOccluded() << "/"
+                                     << mCuller->getTerrainPagedTests() << " benefit=" << benefitRatio
                                      << " candidates=" << mCuller->getStaticOccluderCandidates()
                                      << " cooldown=" << mAdaptiveStaticCooldownFrames;
             }
@@ -540,12 +504,29 @@ namespace MWRender
         }
     }
 
-    PagedOccluderCallback::PagedOccluderCallback(
-        SceneUtil::OcclusionCuller* culler, float maxDistance, unsigned int maxTriangles)
+    PagedOccluderCallback::PagedOccluderCallback(SceneUtil::OcclusionCuller* culler)
         : mCuller(culler)
-        , mMaxDistanceSq(maxDistance * maxDistance)
-        , mMaxTriangles(maxTriangles)
+        , mMaxDistanceSq(std::pow(SceneUtil::Enhanced::occlusionOccluderMaxDistance(), 2))
     {
+    }
+
+    void PagedOccluderCallback::prepareOccluders(
+        osg::Node& node, const osg::Matrixd& matrix, osgUtil::CullVisitor& cv, SceneUtil::OcclusionPlan& plan)
+    {
+        auto bound = node.getBound();
+        SceneUtil::transformBoundingSphere(matrix, bound);
+        if (node.isCullingActive() && !SceneUtil::maySubmitOccluderSphere(bound, cv.getCurrentCullingSet()))
+            return;
+        if (const auto* data = node.getUserDataContainer())
+            for (unsigned int i = 0; i < data->getNumUserObjects(); ++i)
+                if (const auto* paged = dynamic_cast<const PagedOccluderData*>(data->getUserObject(i)))
+                {
+                    auto& nearby = plan.nearbyScratch();
+                    paged->collectNearbyOccluders(cv.getEyePoint(), mMaxDistanceSq, nearby, plan.indexScratch());
+                    for (const auto& mesh : nearby)
+                        plan.add(*mCuller, { mesh, {}, mesh->aabb, false });
+                    break;
+                }
     }
 
     void PagedOccluderCallback::operator()(osg::Node* node, osgUtil::CullVisitor* cv)
@@ -558,17 +539,10 @@ namespace MWRender
         const osg::Timer_t callbackStart = osg::Timer::instance()->tick();
         double childTraverseMs = 0.0;
 
-        struct Candidate
-        {
-            const OccluderMesh* mMesh = nullptr;
-            unsigned int mTris = 0;
-            double mScore = 0.0;
-        };
-
         // Transform chunk bounding sphere from local to world space.
         // The chunk sits under a PAT, so node->getBound() is in chunk-local space.
         const osg::BoundingSphere& bs = node->getBound();
-        if (bs.valid())
+        if (SceneUtil::mayTestOcclusionBounds(*node))
         {
             const osg::Matrixd& viewInverse = mCuller->getViewInverse();
             const osg::Matrixd modelToWorld = *cv->getModelViewMatrix() * viewInverse;
@@ -579,9 +553,12 @@ namespace MWRender
             for (unsigned int i = 0; i < 8; ++i)
                 worldBB.expandBy(localBB.corner(i) * modelToWorld);
 
-            // If entire chunk is occluded, skip rasterization AND traversal
-            const bool chunkVisible = mCuller->testVisibleAABBTerrainOnly(worldBB);
-            mCuller->recordTerrainPagedTest(chunkVisible);
+            // Complete static depth is now available before any chunks draw.
+            // Reject a whole hidden chunk before lighting or leaf queries.
+            const bool terrainVisible = mCuller->testVisibleAABBTerrainOnly(worldBB);
+            mCuller->recordTerrainPagedTest(terrainVisible);
+            const bool chunkVisible
+                = terrainVisible && (!mCuller->smallObjectTestingEnabled() || mCuller->testVisibleAABB(worldBB));
             if (!chunkVisible)
             {
                 const double overheadMs = osg::Timer::instance()->delta_m(callbackStart, osg::Timer::instance()->tick());
@@ -590,91 +567,6 @@ namespace MWRender
                 return;
             }
 
-            // Rasterize nearby building occluder meshes for visible chunks
-            const osg::Vec3f eyeWorld(viewInverse(3, 0), viewInverse(3, 1), viewInverse(3, 2));
-
-            if (mCuller->staticOccludersEnabled() && mCuller->staticCandidateBudgetAvailable())
-            {
-                std::vector<Candidate> candidates;
-                candidates.reserve(64);
-                if (auto* udc = node->getUserDataContainer())
-                {
-                    for (unsigned int i = 0; i < udc->getNumUserObjects(); ++i)
-                    {
-                        if (auto* pod = dynamic_cast<PagedOccluderData*>(udc->getUserObject(i)))
-                        {
-                            std::vector<const OccluderMesh*> nearbyOccluders;
-                            nearbyOccluders.reserve(64);
-                            {
-                                StaticCandidateTimer timer(*mCuller);
-                                pod->collectNearbyOccluders(eyeWorld, mMaxDistanceSq, nearbyOccluders);
-                            }
-                            for (const OccluderMesh* occMeshPtr : nearbyOccluders)
-                            {
-                                if (!mCuller->staticCandidateBudgetAvailable())
-                                {
-                                    mCuller->incrementStaticOccludersSkippedBudget();
-                                    break;
-                                }
-                                StaticCandidateTimer timer(*mCuller);
-                                const OccluderMesh& occMesh = *occMeshPtr;
-                                if (occMesh.indices.empty() || !occMesh.aabb.valid())
-                                    continue;
-
-                                mCuller->incrementStaticOccluderCandidates();
-
-                                const osg::Vec3f center = occMesh.aabb.center();
-                                if (occMesh.aabb.contains(eyeWorld))
-                                    continue;
-
-                                if ((center - eyeWorld).length2() > mMaxDistanceSq)
-                                {
-                                    mCuller->incrementStaticOccludersSkippedDistance();
-                                    continue;
-                                }
-
-                                double screenRatio = 0.0;
-                                if (!mCuller->estimateScreenRatio(occMesh.aabb, screenRatio)
-                                    || screenRatio < mCuller->getMinOccluderScreenRatio())
-                                {
-                                    mCuller->incrementStaticOccludersSkippedScreen();
-                                    continue;
-                                }
-
-                                const unsigned int newTris = static_cast<unsigned int>(occMesh.indices.size() / 3);
-                                const double score = screenRatio / std::sqrt(static_cast<double>(std::max(1u, newTris)));
-                                candidates.push_back(Candidate{ &occMesh, newTris, score });
-                            }
-                            break;
-                        }
-                    }
-                }
-
-                {
-                    StaticCandidateTimer timer(*mCuller);
-                    std::sort(candidates.begin(), candidates.end(),
-                        [](const Candidate& left, const Candidate& right) { return left.mScore > right.mScore; });
-                }
-
-                for (const Candidate& candidate : candidates)
-                {
-                    if (!mCuller->staticRasterBudgetAvailable())
-                    {
-                        mCuller->incrementStaticOccludersSkippedBudget();
-                        break;
-                    }
-
-                    if (mMaxTriangles > 0 && mCuller->getNumBuildingTris() + candidate.mTris > mMaxTriangles)
-                    {
-                        mCuller->incrementStaticOccludersSkippedBudget();
-                        continue;
-                    }
-
-                    mCuller->rasterizeOccluder(candidate.mMesh->vertices, candidate.mMesh->indices);
-                    mCuller->incrementBuildingOccluders(
-                        candidate.mTris, static_cast<unsigned int>(candidate.mMesh->vertices.size()));
-                }
-            }
         }
 
         const double overheadMs = osg::Timer::instance()->delta_m(callbackStart, osg::Timer::instance()->tick());
@@ -687,65 +579,80 @@ namespace MWRender
     }
 
     CellOcclusionCallback::CellOcclusionCallback(SceneUtil::OcclusionCuller* culler, float occluderMinRadius,
-        float occluderMaxRadius, float occluderShrinkFactor, int occluderMeshResolution, int occluderMaxMeshResolution,
-        float occluderInsideThreshold, float occluderMaxDistance, bool enableStaticOccluders,
-        unsigned int maxTriangles, OcclusionStorage* storage)
+        float occluderMaxRadius, float occluderMaxDistance, bool enableStaticOccluders, OcclusionStorage* storage)
         : mCuller(culler)
         , mOccluderMinRadius(occluderMinRadius)
         , mOccluderMaxRadius(occluderMaxRadius)
-        , mOccluderShrinkFactor(occluderShrinkFactor)
-        , mOccluderMeshResolution(occluderMeshResolution)
-        , mOccluderMaxMeshResolution(occluderMaxMeshResolution)
-        , mOccluderInsideThreshold(occluderInsideThreshold)
         , mOccluderMaxDistanceSq(occluderMaxDistance * occluderMaxDistance)
         , mEnableStaticOccluders(enableStaticOccluders)
-        , mMaxTriangles(maxTriangles)
         , mStorage(storage)
     {
     }
 
-    const CellOcclusionCallback::CachedMesh* CellOcclusionCallback::getOccluderMesh(
-        osg::Node* node, const osg::Matrixd& parentToWorld)
+    void CellOcclusionCallback::registerOccluder(osg::Node* node, StaticOccluderData* data)
     {
-        if (!mStorage)
-            return nullptr;
-        bool skip = false;
-        node->getUserValue("skipOcclusion", skip);
-        if (skip)
-            return nullptr;
-        bool eligible = false;
-        node->getUserValue("staticOccluderEligible", eligible);
-        if (!eligible)
-            return nullptr;
-        const auto model = getModelPathForNode(node);
-        if (model.empty())
-            return nullptr;
-        osg::Matrixd matrix = parentToWorld;
-        if (const auto* transform = node->asTransform())
-            transform->computeLocalToWorldMatrix(matrix, nullptr);
-        const osg::Matrixf placement(matrix);
-        if (const auto it = mMeshCache.find(node); it != mMeshCache.end() && it->second.mNode.get() == node
-            && it->second.mPlacement == placement && it->second.mModel == model.value())
-            return &it->second;
+        mPlacements.insert_or_assign(node, PlacementEntry{ node, data });
+    }
 
-        const float radius = node->getBound().radius();
-        const int meshRes
-            = std::clamp(static_cast<int>(mOccluderMeshResolution * (radius / std::max(mOccluderMinRadius, 1.f))),
-                mOccluderMeshResolution, mOccluderMaxMeshResolution);
-        const auto ready
-            = mStorage->getReady(model.value(), meshRes, OcclusionStorage::makeShrinkKey(mOccluderShrinkFactor));
-        if (!ready)
-            return nullptr; // No I/O, mesh generation, or waiting on the cull thread.
-        auto& cached = mMeshCache[node];
-        cached.mNode = node;
-        cached.mPlacement = placement;
-        cached.mModel = model.value();
-        cached.mMesh = ready;
-        cached.mWorldBounds.init();
-        if (ready->aabb.valid())
-            for (unsigned int i = 0; i < 8; ++i)
-                cached.mWorldBounds.expandBy(ready->aabb.corner(i) * placement);
-        return &cached;
+    void CellOcclusionCallback::collectOccluders(
+        osg::Group& cell, const osg::Matrixd& parentToWorld, osgUtil::CullVisitor& cv, SceneUtil::OcclusionPlan& plan)
+    {
+        if (!mEnableStaticOccluders || !mCuller->staticOccludersEnabled())
+            return;
+        for (auto it = mPlacements.begin(); it != mPlacements.end();)
+        {
+            osg::ref_ptr<osg::Node> node;
+            bool belongs = false;
+            if (it->second.mNode.lock(node))
+                for (unsigned int i = 0; i < node->getNumParents(); ++i)
+                    if (node->getParent(i) == &cell)
+                    {
+                        belongs = true;
+                        break;
+                    }
+            if (!belongs)
+            {
+                it = mPlacements.erase(it);
+                continue;
+            }
+            auto& data = *it->second.mData;
+            ++it;
+            if (!cv.validNodeMask(*node) || !SceneUtil::mayTestOcclusionBounds(*node))
+                continue;
+            bool opaque = true;
+            node->getUserValue("occlusionOpaque", opaque);
+            const auto* visual = data.mVisual.get();
+            if (!opaque || !visual || !cv.validNodeMask(*visual) || !node->asGroup()
+                || !node->asGroup()->containsNode(visual))
+                continue;
+            const float radius = node->getBound().radius();
+            if (radius < mOccluderMinRadius || radius > mOccluderMaxRadius)
+                continue;
+            auto bound = node->getBound();
+            SceneUtil::transformBoundingSphere(parentToWorld, bound);
+            if (!SceneUtil::maySubmitOccluderSphere(bound, cv.getCurrentCullingSet()))
+                continue;
+            if (!data.mMesh && mStorage)
+                data.mMesh = mStorage->getReady(data.mModel, data.mResolution, data.mShrink);
+            if (!data.mMesh || data.mMesh->indices.empty())
+                continue;
+            osg::Matrixd matrix = parentToWorld;
+            if (const auto* transform = node->asTransform())
+            {
+                if (transform->getReferenceFrame() != osg::Transform::RELATIVE_RF)
+                    continue;
+                transform->computeLocalToWorldMatrix(matrix, nullptr);
+            }
+            const osg::Matrixf placement(matrix);
+            if (data.mPlacement != placement || !data.mBounds.valid())
+            {
+                data.mPlacement = placement;
+                data.mBounds = SceneUtil::occlusionWorldBounds(data.mMesh->aabb, placement);
+            }
+            if (SceneUtil::occlusionDistanceSquared(data.mBounds, cv.getEyePoint()) > mOccluderMaxDistanceSq)
+                continue;
+            plan.add(*mCuller, { data.mMesh, placement, data.mBounds, true });
+        }
     }
 
     void CellOcclusionCallback::operator()(osg::Group* node, osgUtil::CullVisitor* cv)
@@ -773,16 +680,18 @@ namespace MWRender
             mCuller->recordOcclusionOverhead(std::max(0.0, totalMs - childTraverseMs));
         };
 
+        const osg::Matrixd parentToWorld = *cv->getModelViewMatrix() * mCuller->getViewInverse();
         // Test cell bounding box against terrain-only depth — if fully hidden by terrain,
         // skip entire cell. Use terrain-only so buildings in adjacent cells don't
         // false-cull entire cells that are clearly in view.
         const osg::BoundingSphere& cellBS = node->getBound();
-        if (cellBS.valid())
+        if (SceneUtil::mayTestOcclusionBounds(*node))
         {
             osg::BoundingBox cellBB;
             cellBB.expandBy(cellBS);
 
-            const bool cellVisible = mCuller->testVisibleAABBTerrainOnly(cellBB);
+            const bool cellVisible
+                = mCuller->testVisibleAABBTerrainOnly(SceneUtil::occlusionWorldBounds(cellBB, parentToWorld));
             mCuller->recordTerrainCellTest(cellVisible);
             if (!cellVisible)
             {
@@ -800,166 +709,9 @@ namespace MWRender
             return;
         }
 
-        const osg::Matrixd parentToWorld = *cv->getModelViewMatrix() * mCuller->getViewInverse();
         const unsigned int numChildren = node->getNumChildren();
-        const bool allowStaticOccluders
-            = mEnableStaticOccluders && mCuller->staticOccludersEnabled() && mCuller->staticCandidateBudgetAvailable();
 
-        struct Candidate
-        {
-            const OccluderMesh* mMesh = nullptr;
-            const osg::Matrixf* mTransform = nullptr;
-            unsigned int mTris = 0;
-            double mScore = 0.0;
-        };
-        std::vector<Candidate> candidates;
-        candidates.reserve(64);
-
-        auto addCandidate = [&](const OccluderMesh& mesh, const osg::BoundingBox& bounds,
-                                const osg::Vec3f& distanceCenter, const osg::Matrixf* transform = nullptr) {
-            if (!bounds.valid() || mesh.indices.empty())
-                return;
-
-            mCuller->incrementStaticOccluderCandidates();
-
-            const float distSq = (distanceCenter - cv->getEyePoint()).length2();
-            if (distSq >= mOccluderMaxDistanceSq)
-            {
-                mCuller->incrementStaticOccludersSkippedDistance();
-                return;
-            }
-
-            osg::Vec3f center = bounds.center();
-            osg::Vec3f halfExtent
-                = (osg::Vec3f(bounds.xMax(), bounds.yMax(), bounds.zMax()) - center) * mOccluderInsideThreshold;
-            osg::BoundingBox scaledBB;
-            scaledBB.expandBy(center - halfExtent);
-            scaledBB.expandBy(center + halfExtent);
-            if (scaledBB.contains(cv->getEyePoint()))
-                return;
-
-            SceneUtil::OcclusionCuller::ProjectedBounds projected;
-            if (!mCuller->projectBounds(bounds, projected)
-                || projected.screenRatio() < mCuller->getMinOccluderScreenRatio())
-            {
-                mCuller->incrementStaticOccludersSkippedScreen();
-                return;
-            }
-
-            if (!mCuller->testVisibleAABBTerrainOnly(projected))
-                return;
-
-            const unsigned int newTris = static_cast<unsigned int>(mesh.indices.size() / 3);
-            const double score = projected.screenRatio() / std::sqrt(static_cast<double>(std::max(1u, newTris)));
-            candidates.push_back(Candidate{ &mesh, transform, newTris, score });
-        };
-
-        // Pass 1: Large objects — test against terrain depth, optionally rasterize as occluders
-        for (unsigned int i = 0; i < numChildren; ++i)
-        {
-            osg::Node* child = node->getChild(i);
-            if (!cv->validNodeMask(*child))
-                continue;
-            const osg::BoundingSphere& bs = child->getBound();
-
-            if (!bs.valid() || bs.radius() < mOccluderMinRadius)
-                continue;
-            if (!SceneUtil::mayTraverseForOcclusion(*child, *cv, cv->getCurrentCullingSet()))
-                continue;
-
-            // Paged chunks and other oversized objects — test visibility, rasterize stored occluders
-            if (bs.radius() > mOccluderMaxRadius)
-            {
-                osg::BoundingBox pageBB;
-                pageBB.expandBy(bs);
-                const bool pageVisible = mCuller->testVisibleAABBTerrainOnly(pageBB);
-                mCuller->recordTerrainPagedTest(pageVisible);
-                if (!pageVisible)
-                    continue;
-
-                // Rasterize sub-object occluder meshes stored at chunk creation time
-                if (allowStaticOccluders && mCuller->staticCandidateBudgetAvailable())
-                {
-                    if (auto* udc = child->getUserDataContainer())
-                    {
-                        for (unsigned int j = 0; j < udc->getNumUserObjects(); ++j)
-                        {
-                            if (auto* pod = dynamic_cast<PagedOccluderData*>(udc->getUserObject(j)))
-                            {
-                                std::vector<const OccluderMesh*> nearbyOccluders;
-                                nearbyOccluders.reserve(64);
-                                {
-                                    StaticCandidateTimer timer(*mCuller);
-                                    pod->collectNearbyOccluders(
-                                        cv->getEyePoint(), mOccluderMaxDistanceSq, nearbyOccluders);
-                                }
-                                for (const OccluderMesh* occMesh : nearbyOccluders)
-                                {
-                                    if (!mCuller->staticCandidateBudgetAvailable())
-                                    {
-                                        mCuller->incrementStaticOccludersSkippedBudget();
-                                        break;
-                                    }
-                                    StaticCandidateTimer timer(*mCuller);
-                                    addCandidate(*occMesh, occMesh->aabb, occMesh->aabb.center());
-                                }
-                                break; // Only one PagedOccluderData per chunk
-                            }
-                        }
-                    }
-                }
-
-                // Test chunk visibility against terrain-only depth — paged chunks are large
-                // geometry that should only be culled by terrain, not adjacent buildings.
-                acceptChild(child);
-                continue;
-            }
-
-            // Rasterize as occluder if in range and camera is not inside the building.
-            // Test against terrain-only buffer so other buildings don't prevent rasterization
-            // of adjacent buildings (which would reduce culling coverage for Pass 2).
-            if (allowStaticOccluders && mCuller->staticCandidateBudgetAvailable())
-            {
-                StaticCandidateTimer timer(*mCuller);
-                if (const auto* mesh = getOccluderMesh(child, parentToWorld))
-                    addCandidate(*mesh->mMesh, mesh->mWorldBounds, bs.center(), &mesh->mPlacement);
-            }
-
-            // Always traverse large buildings. Do NOT gate traversal on testVisibleAABB —
-            // buildings testing against a buffer that includes previously rasterized
-            // buildings causes false culling (flickering) when child ordering happens to
-            // place one building in front of another in the depth buffer. Large buildings
-            // are correctly culled by PVS and the cell-level AABB test above; MSOC
-            // is reserved for culling small objects in Pass 2.
-            acceptChild(child);
-        }
-
-        {
-            StaticCandidateTimer timer(*mCuller);
-            std::sort(candidates.begin(), candidates.end(),
-                [](const Candidate& left, const Candidate& right) { return left.mScore > right.mScore; });
-        }
-
-        for (const Candidate& candidate : candidates)
-        {
-            if (!mCuller->staticRasterBudgetAvailable())
-            {
-                mCuller->incrementStaticOccludersSkippedBudget();
-                break;
-            }
-
-            if (mMaxTriangles > 0 && mCuller->getNumBuildingTris() + candidate.mTris > mMaxTriangles)
-            {
-                mCuller->incrementStaticOccludersSkippedBudget();
-                continue;
-            }
-
-            mCuller->rasterizeOccluder(candidate.mMesh->vertices, candidate.mMesh->indices, candidate.mTransform);
-            mCuller->incrementBuildingOccluders(
-                candidate.mTris, static_cast<unsigned int>(candidate.mMesh->vertices.size()));
-        }
-
-        // Pass 2: Small objects — test against enriched depth buffer (terrain + buildings)
+        // Pass 2: Test all object sizes before lighting, skinning, or draw submission.
         for (unsigned int i = 0; i < numChildren; ++i)
         {
             osg::Node* child = node->getChild(i);
@@ -973,27 +725,21 @@ namespace MWRender
                 continue;
             }
 
-            if (bs.radius() >= mOccluderMinRadius)
-                continue; // Already handled in pass 1
             if (!SceneUtil::mayTraverseForOcclusion(*child, *cv, cv->getCurrentCullingSet()))
                 continue;
-
-            // Never occlude doors — they sit flush against building surfaces
-            // and are easily falsely hidden by the parent building's AABB occluder
-            bool skipOcclusion = false;
-            child->getUserValue("skipOcclusion", skipOcclusion);
 
             osg::BoundingBox childBB;
             childBB.expandBy(bs);
 
-            if (skipOcclusion || !mCuller->smallObjectTestingEnabled())
+            // Preserve explicit exclusions, including doors and disabled culling.
+            if (!SceneUtil::mayTestOcclusionBounds(*child))
             {
                 acceptChild(child);
                 continue;
             }
 
             const osg::Timer_t smallTestStart = osg::Timer::instance()->tick();
-            if (mCuller->testVisibleAABB(childBB))
+            if (mCuller->testVisibleAABB(SceneUtil::occlusionWorldBounds(childBB, parentToWorld)))
             {
                 smallTestMs += osg::Timer::instance()->delta_m(smallTestStart, osg::Timer::instance()->tick());
                 acceptChild(child);

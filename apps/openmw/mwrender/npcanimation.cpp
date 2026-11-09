@@ -2,6 +2,7 @@
 
 #include <osg/Depth>
 #include <osg/GLExtensions>
+#include <osg/Stats>
 
 #include <components/stereo/multiview.hpp>
 #include <components/stereo/stereomanager.hpp>
@@ -24,6 +25,7 @@
 #include <components/sceneutil/depth.hpp>
 #include <components/sceneutil/keyframe.hpp>
 #include <components/sceneutil/lightcommon.hpp>
+#include <components/sceneutil/renderstageinventory.hpp>
 #include <components/sceneutil/textkeymap.hpp>
 #include <components/sceneutil/userdata.hpp>
 #include <components/sceneutil/visitor.hpp>
@@ -358,7 +360,15 @@ namespace MWRender
 
             auto opaqueDepthFBO = postProcessor->getFbo(PostProcessor::FBO_OpaqueDepth, frameId);
             auto worldDepthFBO = postProcessor->getFbo(PostProcessor::FBO_WorldDepth, frameId);
-            if (opaqueDepthFBO && worldDepthFBO)
+            if (auto* stats = bin->getStage()->getCamera()->getStats(); stats && stats->collectStats("rendering"))
+            {
+                const auto frame = state->getFrameStamp()->getFrameNumber();
+                stats->setAttribute(frame, "World depth copied",
+                    postProcessor->needsWorldDepth(frameId) && opaqueDepthFBO && worldDepthFBO);
+                stats->setAttribute(
+                    frame, "First-person depth replay leaves", SceneUtil::countRenderSubmissions(*bin).mLeaves);
+            }
+            if (postProcessor->needsWorldDepth(frameId) && opaqueDepthFBO && worldDepthFBO)
             {
                 // Keep world depth separate from first-person hands for screen-space shadows.
                 if (Stereo::getMultiview())

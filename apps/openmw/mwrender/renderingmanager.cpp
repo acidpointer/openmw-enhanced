@@ -32,13 +32,14 @@
 
 #include <components/settings/values.hpp>
 
+#include <components/occlusionculling/occlusionstorage.hpp>
 #include <components/sceneutil/cullsafeboundsvisitor.hpp>
 #include <components/sceneutil/depth.hpp>
 #include <components/sceneutil/enhancedsettings.hpp>
 #include <components/sceneutil/lightmanager.hpp>
-#include <components/sceneutil/occlusionculling.hpp>
-#include <components/occlusionculling/occlusionstorage.hpp>
 #include <components/sceneutil/material.hpp>
+#include <components/sceneutil/occlusionculling.hpp>
+#include <components/sceneutil/occlusionorder.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
 #include <components/sceneutil/rtt.hpp>
 #include <components/sceneutil/shadow.hpp>
@@ -258,7 +259,7 @@ namespace MWRender
         osg::ref_ptr<osg::Group> sceneContentRoot = sceneRoot.get();
         if (SceneUtil::Enhanced::occlusionCulling())
         {
-            mOcclusionWorldRoot = new osg::Group;
+            mOcclusionWorldRoot = new SceneUtil::OcclusionOrderGroup(Constants::SceneCamera, 1);
             mOcclusionWorldRoot->setName("Occlusion World Root");
             mOcclusionWorldRoot->setNodeMask(Mask_Scene);
             mOcclusionWorldRoot->setCullingActive(false);
@@ -364,11 +365,12 @@ namespace MWRender
             const bool debugOverlay = SceneUtil::Enhanced::occlusionDebugOverlay();
             const bool debugMessages = SceneUtil::Enhanced::occlusionDebugMessages();
             const bool enableInteriors = SceneUtil::Enhanced::occlusionCullingInteriors();
-            const unsigned int maxTriangles
-                = static_cast<unsigned int>(SceneUtil::Enhanced::occlusionMaxTriangles());
             mSceneOcclusionCallback = new SceneOcclusionCallback(
                 mOcclusionCuller, mTerrainOccluder.get(), radius, enableTerrain, debugOverlay, debugMessages,
                 enableInteriors, mOcclusionStorage.get());
+            for (auto& [worldspace, chunks] : mWorldspaceChunks)
+                if (chunks.mGroundcover)
+                    chunks.mGroundcover->setOcclusionCuller(mOcclusionCuller);
             mOcclusionWorldRoot->addCullCallback(mSceneOcclusionCallback);
             if (!mOcclusionWorldRoot->getNumParents())
                 sceneRoot->insertChild(0, mOcclusionWorldRoot);
@@ -378,14 +380,12 @@ namespace MWRender
             const float occluderShrinkFactor = SceneUtil::Enhanced::occlusionOccluderShrinkFactor();
             const int occluderMeshRes = SceneUtil::Enhanced::occlusionOccluderMeshResolution();
             const int occluderMaxMeshRes = SceneUtil::Enhanced::occlusionOccluderMaxMeshResolution();
-            const float occluderInsideThreshold = SceneUtil::Enhanced::occlusionOccluderInsideThreshold();
             const float occluderMaxDistance = SceneUtil::Enhanced::occlusionOccluderMaxDistance();
             const bool enableStatics = SceneUtil::Enhanced::occlusionCullingStaticOccluders();
             mObjects->setOcclusionCuller(mOcclusionCuller, occluderMinRadius, occluderMaxRadius, occluderShrinkFactor,
-                occluderMeshRes, occluderMaxMeshRes, occluderInsideThreshold, occluderMaxDistance, enableStatics,
-                maxTriangles, mOcclusionStorage.get());
+                occluderMeshRes, occluderMaxMeshRes, occluderMaxDistance, enableStatics, mOcclusionStorage.get());
             if (mObjectPaging)
-                mObjectPaging->setOcclusionCuller(mOcclusionCuller, maxTriangles, mOcclusionStorage.get());
+                mObjectPaging->setOcclusionCuller(mOcclusionCuller, mOcclusionStorage.get());
         }
 
         mStateUpdater = new SceneUtil::StateUpdater();
@@ -1432,9 +1432,7 @@ namespace MWRender
                 newChunkMgr.mObjectPaging
                     = std::make_unique<ObjectPaging>(mResourceSystem->getSceneManager(), worldspace);
                 if (mOcclusionCuller)
-                    newChunkMgr.mObjectPaging->setOcclusionCuller(mOcclusionCuller,
-                        static_cast<unsigned int>(SceneUtil::Enhanced::occlusionMaxTriangles()),
-                        mOcclusionStorage.get());
+                    newChunkMgr.mObjectPaging->setOcclusionCuller(mOcclusionCuller, mOcclusionStorage.get());
                 quadTreeWorld->addChunkManager(newChunkMgr.mObjectPaging.get());
                 mResourceSystem->addResourceManager(newChunkMgr.mObjectPaging.get());
             }
@@ -1445,6 +1443,7 @@ namespace MWRender
 
                 newChunkMgr.mGroundcover = std::make_unique<Groundcover>(
                     mResourceSystem->getSceneManager(), density, groundcoverDistance, mGroundCoverStore);
+                newChunkMgr.mGroundcover->setOcclusionCuller(mOcclusionCuller);
                 quadTreeWorld->addChunkManager(newChunkMgr.mGroundcover.get());
                 mResourceSystem->addResourceManager(newChunkMgr.mGroundcover.get());
             }
@@ -1840,18 +1839,15 @@ namespace MWRender
         const float occluderShrinkFactor = SceneUtil::Enhanced::occlusionOccluderShrinkFactor();
         const int occluderMeshRes = SceneUtil::Enhanced::occlusionOccluderMeshResolution();
         const int occluderMaxMeshRes = SceneUtil::Enhanced::occlusionOccluderMaxMeshResolution();
-        const float occluderInsideThreshold = SceneUtil::Enhanced::occlusionOccluderInsideThreshold();
         const float occluderMaxDistance = SceneUtil::Enhanced::occlusionOccluderMaxDistance();
         const bool enableStatics = SceneUtil::Enhanced::occlusionCullingStaticOccluders();
-        const unsigned int maxTriangles = static_cast<unsigned int>(SceneUtil::Enhanced::occlusionMaxTriangles());
         mObjects->setOcclusionCuller(mOcclusionCuller, occluderMinRadius, occluderMaxRadius, occluderShrinkFactor,
-            occluderMeshRes, occluderMaxMeshRes, occluderInsideThreshold, occluderMaxDistance, enableStatics,
-            maxTriangles, mOcclusionStorage.get());
+            occluderMeshRes, occluderMaxMeshRes, occluderMaxDistance, enableStatics, mOcclusionStorage.get());
         if (mSceneOcclusionCallback)
             mSceneOcclusionCallback->setStorage(mOcclusionStorage.get());
         for (auto& [worldspace, chunks] : mWorldspaceChunks)
             if (chunks.mObjectPaging)
-                chunks.mObjectPaging->setOcclusionCuller(mOcclusionCuller, maxTriangles, mOcclusionStorage.get());
+                chunks.mObjectPaging->setOcclusionCuller(mOcclusionCuller, mOcclusionStorage.get());
     }
 
 }

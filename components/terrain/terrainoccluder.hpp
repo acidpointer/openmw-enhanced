@@ -8,6 +8,7 @@
 #include <components/esm/refid.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <map>
 #include <utility>
 #include <vector>
@@ -42,12 +43,14 @@ namespace Terrain
         void update(const osg::Vec3f& eyePoint, int radiusCells);
         const std::vector<osg::Vec3f>& getPositions() const { return mCachedPositions; }
         const std::vector<unsigned int>& getIndices() const { return mCachedIndices; }
+        std::uint64_t getRevision() const { return mRevision; }
 
         bool hasTerrainData() const;
 
     private:
         void invalidate()
         {
+            ++mRevision;
             mCacheValid = false;
             mCells.clear();
             mCachedPositions.clear();
@@ -60,6 +63,7 @@ namespace Terrain
         };
         std::map<std::pair<int, int>, CellMesh> mCells;
         bool mCacheValid = false;
+        std::uint64_t mRevision = 0;
         Storage* mStorage;
         ESM::RefId mWorldspace;
         float mCellWorldSize;

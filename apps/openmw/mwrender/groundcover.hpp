@@ -3,6 +3,7 @@
 
 #include <components/esm3/loadcell.hpp>
 #include <components/resource/scenemanager.hpp>
+#include <components/sceneutil/occlusionculling.hpp>
 #include <components/terrain/quadtreeworld.hpp>
 #include <components/vfs/pathutil.hpp>
 
@@ -33,6 +34,7 @@ namespace MWRender
         unsigned int getNodeMask() override;
 
         void reportStats(unsigned int frameNumber, osg::Stats* stats) const override;
+        void setOcclusionCuller(SceneUtil::OcclusionCuller* culler) { mOcclusionCuller = culler; }
 
         struct GroundcoverEntry
         {
@@ -50,6 +52,7 @@ namespace MWRender
         using InstanceMap = std::map<VFS::Path::Normalized, std::vector<GroundcoverEntry>, std::less<>>;
 
         Resource::SceneManager* mSceneManager;
+        osg::ref_ptr<SceneUtil::OcclusionCuller> mOcclusionCuller;
         float mDensity;
         osg::ref_ptr<osg::StateSet> mStateset;
         osg::ref_ptr<osg::Program> mProgramTemplate;

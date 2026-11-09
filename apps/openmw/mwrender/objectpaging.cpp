@@ -2,7 +2,9 @@
 
 #include "occlusionculling.hpp"
 
+#include <components/sceneutil/occlusioncallback.hpp>
 #include <components/sceneutil/occlusionculling.hpp>
+#include <components/sceneutil/paginganalysis.hpp>
 
 #include <string_view>
 #include <limits>
@@ -268,7 +270,9 @@ namespace MWRender
                 if (const osg::Sequence* sq = dynamic_cast<const osg::Sequence*>(node))
                 {
                     osg::Group* n = new osg::Group;
-                    n->addChild(operator()(sq->getChild(sq->getValue() != -1 ? sq->getValue() : 0)));
+                    const auto index = sq->getValue() < 0 ? 0u : unsigned(sq->getValue());
+                    if (index < sq->getNumChildren())
+                        n->addChild(operator()(sq->getChild(index)));
                     n->setDataVariance(osg::Object::STATIC);
                     return n;
                 }
@@ -347,88 +351,7 @@ namespace MWRender
             osg::Callback* operator()(const osg::Callback* callback) const override { return nullptr; }
         };
 
-        class AnalyzeVisitor : public osg::NodeVisitor
-        {
-        public:
-            AnalyzeVisitor(osg::Node::NodeMask analyzeMask)
-                : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
-                , mCurrentStateSet(nullptr)
-            {
-                setTraversalMask(analyzeMask);
-            }
-
-            typedef std::unordered_map<osg::StateSet*, unsigned int> StateSetCounter;
-            struct Result
-            {
-                StateSetCounter mStateSetCounter;
-                unsigned int mNumVerts = 0;
-            };
-
-            void apply(osg::Node& node) override
-            {
-                if (node.getStateSet())
-                    mCurrentStateSet = node.getStateSet();
-
-                if (osg::Switch* sw = node.asSwitch())
-                {
-                    for (unsigned int i = 0; i < sw->getNumChildren(); ++i)
-                        if (sw->getValue(i))
-                            traverse(*sw->getChild(i));
-                    return;
-                }
-                if (osg::LOD* lod = dynamic_cast<osg::LOD*>(&node))
-                {
-                    for (unsigned int i = 0; i < lod->getNumChildren(); ++i)
-                        if (const auto r = intersection(lod->getRangeList()[i], mDistances); !empty(r))
-                            traverse(*lod->getChild(i));
-                    return;
-                }
-                if (osg::Sequence* sq = dynamic_cast<osg::Sequence*>(&node))
-                {
-                    traverse(*sq->getChild(sq->getValue() != -1 ? sq->getValue() : 0));
-                    return;
-                }
-
-                traverse(node);
-            }
-            void apply(osg::Geometry& geom) override
-            {
-                if (osg::Array* array = geom.getVertexArray())
-                    mResult.mNumVerts += array->getNumElements();
-
-                ++mResult.mStateSetCounter[mCurrentStateSet];
-                ++mGlobalStateSetCounter[mCurrentStateSet];
-            }
-            Result retrieveResult()
-            {
-                Result result = mResult;
-                mResult = Result();
-                mCurrentStateSet = nullptr;
-                return result;
-            }
-            void addInstance(const Result& result)
-            {
-                for (auto pair : result.mStateSetCounter)
-                    mGlobalStateSetCounter[pair.first] += pair.second;
-            }
-            float getMergeBenefit(const Result& result)
-            {
-                if (result.mStateSetCounter.empty())
-                    return 1;
-                float mergeBenefit = 0;
-                for (auto pair : result.mStateSetCounter)
-                {
-                    mergeBenefit += mGlobalStateSetCounter[pair.first];
-                }
-                mergeBenefit /= result.mStateSetCounter.size();
-                return mergeBenefit;
-            }
-
-            Result mResult;
-            osg::StateSet* mCurrentStateSet;
-            StateSetCounter mGlobalStateSetCounter;
-            LODRange mDistances = { 0.f, 0.f };
-        };
+        using AnalyzeVisitor = SceneUtil::PagingAnalysis;
 
         class DebugVisitor : public osg::NodeVisitor
         {
@@ -491,10 +414,9 @@ namespace MWRender
     }
 
     void ObjectPaging::setOcclusionCuller(
-        SceneUtil::OcclusionCuller* culler, unsigned int maxTriangles, OcclusionCulling::OcclusionStorage* storage)
+        SceneUtil::OcclusionCuller* culler, OcclusionCulling::OcclusionStorage* storage)
     {
         mOcclusionCuller = culler;
-        mMaxTriangles = maxTriangles;
         mOcclusionStorage = storage;
     }
 
@@ -939,7 +861,8 @@ namespace MWRender
 
                         auto occMesh = transformOccluderMesh(localMesh, occluderMatrix, worldCenter);
                         if (!occMesh.indices.empty())
-                            pagedOccluderData->mOccluderMeshes.push_back(std::move(occMesh));
+                            pagedOccluderData->mOccluderMeshes.push_back(
+                                std::make_shared<OccluderMesh>(std::move(occMesh)));
                     }
                 }
 
@@ -1009,6 +932,11 @@ namespace MWRender
             }
         }
 
+        if (mOcclusionCuller)
+        {
+            SceneUtil::InstallOcclusionDrawables install(mOcclusionCuller);
+            group->accept(install);
+        }
         osgUtil::IncrementalCompileOperation* const ico = mSceneManager->getIncrementalCompileOperation();
         if (!stateToCompile.empty() && ico)
         {
@@ -1022,8 +950,7 @@ namespace MWRender
         // Cull terrain-hidden chunks before preparing their light lists, even
         // when they contain no eligible static occluder geometry.
         if (mOcclusionCuller)
-            group->addCullCallback(new PagedOccluderCallback(
-                mOcclusionCuller, SceneUtil::Enhanced::occlusionOccluderMaxDistance(), mMaxTriangles));
+            group->addCullCallback(new PagedOccluderCallback(mOcclusionCuller));
         if (activeGrid)
         {
             std::sort(refnums.begin(), refnums.end());
@@ -1035,7 +962,7 @@ namespace MWRender
             SceneUtil::addTemplateRef(*group, ref.get());
         if (pagedOccluderData && !pagedOccluderData->mOccluderMeshes.empty())
         {
-            pagedOccluderData->buildSpatialBins();
+            pagedOccluderData->buildSpatialIndex();
             group->getOrCreateUserDataContainer()->addUserObject(pagedOccluderData);
         }
 

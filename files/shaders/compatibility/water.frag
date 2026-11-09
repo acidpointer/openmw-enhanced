@@ -1,4 +1,5 @@
 #version 120
+#pragma import_defines(OMW_WRITE_NORMALS)
 
 #if @useGPUShader4
     #extension GL_EXT_gpu_shader4: require
@@ -253,7 +254,7 @@ void main(void)
     gl_FragData[0].rgb = mix(rawRefraction, gl_FragData[0].rgb, shoreOffset);
 #endif
 
-#if !@disableNormals
+#if !@disableNormals && defined(OMW_WRITE_NORMALS) && OMW_WRITE_NORMALS
     gl_FragData[1].rgb = normalize(gl_NormalMatrix * normal) * 0.5 + 0.5;
 #endif
 

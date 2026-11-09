@@ -1,4 +1,5 @@
 #version 120
+#pragma import_defines(OMW_WRITE_NORMALS)
 #pragma import_defines(FORCE_OPAQUE, DISTORTION)
 
 #if @useGPUShader4
@@ -108,7 +109,7 @@ void main()
     gl_FragData[0].a = 1.0;
 #endif
 
-#if !defined(FORCE_OPAQUE) && !@disableNormals
+#if !defined(FORCE_OPAQUE) && !@disableNormals && defined(OMW_WRITE_NORMALS) && OMW_WRITE_NORMALS
     gl_FragData[1].xyz = viewNormal * 0.5 + 0.5;
 #endif
 

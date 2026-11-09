@@ -11,6 +11,10 @@
 
 namespace
 {
+    struct TestCullVisitor : osgUtil::CullVisitor
+    {
+        ~TestCullVisitor() override = default;
+    };
     const std::vector<osg::Vec3f> Wall{ { -8, -6, -10 }, { 8, -6, -10 }, { 8, 6, -10 }, { -8, 6, -10 } };
     const std::vector<unsigned int> Indices{ 0, 1, 2, 0, 2, 3 };
 
@@ -43,6 +47,50 @@ namespace
         EXPECT_TRUE(culler.testVisibleAABB(osg::BoundingBox(-0.5, -0.5, -21, 0.5, 0.5, -20)));
     }
 
+    TEST(OcclusionQueryTest, AnOccluderCannotHideItsOwnConservativeBounds)
+    {
+        SceneUtil::OcclusionCuller culler(256, 128);
+        culler.beginFrame(osg::Matrixd::identity(), osg::Matrixd::perspective(90, 1, 1, 100), 1);
+        culler.rasterizeOccluder(Wall, Indices);
+        osg::BoundingBox bounds;
+        for (const auto& vertex : Wall)
+            bounds.expandBy(vertex);
+        EXPECT_TRUE(culler.testVisibleAABB(bounds));
+        EXPECT_FALSE(culler.testVisibleAABB(osg::BoundingBox(-0.5, -0.5, -21, 0.5, 0.5, -20)));
+    }
+
+    TEST(OcclusionQueryTest, CameraInsideModelBoundsDoesNotDiscardItsOpaqueWallTriangles)
+    {
+        SceneUtil::OcclusionCuller culler(256, 128);
+        culler.beginFrame(osg::Matrixd::identity(), osg::Matrixd::perspective(90, 1, 1, 100), 1);
+        const osg::BoundingBox enclosing(-8, -6, -10, 8, 6, 2);
+        SceneUtil::OcclusionCuller::ProjectedBounds projected;
+        EXPECT_FALSE(culler.projectBounds(enclosing, projected));
+        ASSERT_TRUE(culler.projectOccluderBounds(enclosing, projected));
+        EXPECT_DOUBLE_EQ(projected.screenRatio(), 1);
+        EXPECT_TRUE(culler.testVisibleAABB(enclosing));
+
+        auto vertices = Wall;
+        // A finite vertex on the camera plane must not discard the entire
+        // model in debug builds. MOC clips triangles before perspective divide.
+        vertices.push_back({ 0, 0, 0 });
+        culler.rasterizeOccluder(vertices, Indices);
+        EXPECT_FALSE(culler.testVisibleAABB(osg::BoundingBox(-0.5, -0.5, -21, 0.5, 0.5, -20)));
+        EXPECT_TRUE(culler.testVisibleAABB(enclosing));
+        EXPECT_TRUE(culler.testVisibleAABB(osg::BoundingBox(-0.5, -0.5, -6, 0.5, 0.5, -5)));
+    }
+
+    TEST(OcclusionQueryTest, ClippedCandidateRankingRejectsBehindCameraAndOffscreenBounds)
+    {
+        SceneUtil::OcclusionCuller culler(256, 128);
+        culler.beginFrame(osg::Matrixd::identity(), osg::Matrixd::perspective(90, 1, 1, 100), 1);
+        SceneUtil::OcclusionCuller::ProjectedBounds projected;
+        EXPECT_FALSE(culler.projectOccluderBounds(osg::BoundingBox(-1, -1, 1, 1, 1, 2), projected));
+        EXPECT_FALSE(culler.projectOccluderBounds(osg::BoundingBox(100, -1, -10, 110, 1, 2), projected));
+        EXPECT_TRUE(culler.projectOccluderBounds(osg::BoundingBox(-1, -1, -10, 1, 1, -5), projected));
+        EXPECT_LT(projected.screenRatio(), 1);
+    }
+
     TEST(OcclusionQueryTest, simdProjectionMatchesKnownPerspectiveBounds)
     {
         SceneUtil::OcclusionCuller culler(256, 128);
@@ -64,7 +112,7 @@ namespace
         stage->setCamera(camera);
         osg::ref_ptr<osg::FrameStamp> stamp = new osg::FrameStamp;
         stamp->setFrameNumber(1);
-        osgUtil::CullVisitor visitor, otherVisitor;
+        TestCullVisitor visitor, otherVisitor;
         visitor.setRenderStage(stage);
         visitor.setFrameStamp(stamp);
         visitor.pushViewport(new osg::Viewport(0, 0, 64, 32));

@@ -118,7 +118,8 @@ namespace OcclusionCulling
         // VFS resolves the winning mod/archive entry. Hash its bytes rather than
         // just its name, so changed assets never reuse the old occluder geometry.
         std::ostringstream key;
-        key << "mesh-v3:" << modelPath;
+        // v4 excludes update-only hidden/collision geometry from opaque proxies.
+        key << "mesh-v4:" << modelPath;
         if (mVfs)
         {
             try

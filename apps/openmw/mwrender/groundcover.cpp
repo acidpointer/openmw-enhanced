@@ -17,6 +17,7 @@
 #include <components/misc/convert.hpp>
 #include <components/sceneutil/lightmanager.hpp>
 #include <components/sceneutil/nodecallback.hpp>
+#include <components/sceneutil/occlusioncallback.hpp>
 #include <components/sceneutil/templateref.hpp>
 #include <components/settings/values.hpp>
 #include <components/shader/shadermanager.hpp>
@@ -454,6 +455,8 @@ namespace MWRender
         group->accept(cbv);
         osg::BoundingBox box = cbv.getBoundingBox();
         group->addCullCallback(new ViewDistanceCallback(getViewDistance(), box));
+        if (mOcclusionCuller)
+            group->addCullCallback(new SceneUtil::OcclusionNodeCallback(mOcclusionCuller));
 
         group->setStateSet(mStateset);
         group->setNodeMask(Mask_Groundcover);

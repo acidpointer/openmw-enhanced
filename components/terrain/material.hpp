@@ -24,6 +24,12 @@ namespace Terrain
         bool mSpecular = false;
     };
 
+    inline bool canBatchLayers(const TextureLayer& first, const TextureLayer& second)
+    {
+        return first.mDiffuseMap.valid() && second.mDiffuseMap.valid() && !first.mNormalMap && !second.mNormalMap
+            && !first.mParallax && !second.mParallax && !first.mSpecular && !second.mSpecular;
+    }
+
     std::vector<osg::ref_ptr<osg::StateSet>> createPasses(Resource::SceneManager* sceneManager,
         const std::vector<TextureLayer>& layers, const std::vector<osg::ref_ptr<osg::Texture2D>>& blendmaps,
         int blendmapScale, float layerTileSize, bool isComposite, bool esm4terrain = false);

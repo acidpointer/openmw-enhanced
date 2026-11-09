@@ -1,4 +1,5 @@
 #version 120
+#pragma import_defines(OMW_WRITE_NORMALS)
 
 #if @useGPUShader4
     #extension GL_EXT_gpu_shader4: require
@@ -7,6 +8,10 @@
 varying vec2 uv;
 
 uniform sampler2D diffuseMap;
+#if @terrainLayerBatch
+uniform sampler2D diffuseMap2;
+uniform sampler2D blendMap2;
+#endif
 
 #if @normalMap
 uniform sampler2D normalMap;
@@ -50,7 +55,7 @@ uniform mat4 texMat1;
 
 centroid varying vec4 passColor;
 
-void main()
+void shadeTerrainLayer(sampler2D layerDiffuse, sampler2D layerBlend)
 {
     Material material = getMaterial();
 
@@ -60,7 +65,7 @@ void main()
     float height = texture2D(normalMap, adjustedUV).a;
     adjustedUV += getParallaxOffset(transpose(normalToViewMatrix) * normalize(-passViewPos), height);
 #endif
-    vec4 diffuseTex = texture2D(diffuseMap, adjustedUV);
+    vec4 diffuseTex = texture2D(layerDiffuse, adjustedUV);
     gl_FragData[0] = vec4(diffuseTex.xyz, 1.0);
 
     vec4 diffuseColor = getDiffuseColor(material, passColor);
@@ -68,7 +73,7 @@ void main()
 
 #if @blendMap
     vec2 blendMapUV = (texMat1 * vec4(uv, 0.0, 1.0)).xy;
-    gl_FragData[0].a *= texture2D(blendMap, blendMapUV).a;
+    gl_FragData[0].a *= texture2D(layerBlend, blendMapUV).a;
 #endif
 
 #if @normalMap
@@ -106,10 +111,34 @@ void main()
 
     gl_FragData[0] = applyFogAtDist(gl_FragData[0], passViewPos, euclideanDepth, linearDepth, near, far);
 
-#if !@disableNormals
+#if !@disableNormals && defined(OMW_WRITE_NORMALS) && OMW_WRITE_NORMALS
     // Terrain normals are now additively blended the same way as terrain color is, thus using color's alpha.
     gl_FragData[1] = vec4(viewNormal * 0.5 + 0.5, gl_FragData[0].a);
 #endif
 
     applyShadowDebugOverlay();
+}
+
+void main()
+{
+#if @blendMap
+    shadeTerrainLayer(diffuseMap, blendMap);
+#else
+    shadeTerrainLayer(diffuseMap, diffuseMap);
+#endif
+#if @terrainLayerBatch
+    vec4 first = gl_FragData[0];
+    shadeTerrainLayer(diffuseMap2, blendMap2);
+    vec4 second = gl_FragData[0];
+    // Match the source-alpha products of the legacy normalized color target.
+    // Batching changes per-layer framebuffer rounding and remains opt-in.
+    first = clamp(first, 0.0, 1.0);
+    second = clamp(second, 0.0, 1.0);
+    gl_FragData[0] = vec4(first.rgb * first.a + second.rgb * second.a,
+        first.a * first.a + second.a * second.a);
+#if !@disableNormals && defined(OMW_WRITE_NORMALS) && OMW_WRITE_NORMALS
+    // Eligible layers share the same geometric normal (no normal/parallax maps).
+    gl_FragData[1] = vec4(gl_FragData[1].rgb * (first.a + second.a), 1.0);
+#endif
+#endif
 }

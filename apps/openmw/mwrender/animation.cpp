@@ -1882,6 +1882,9 @@ namespace MWRender
             return;
         mAlpha = alpha;
         mActorFade = actorFade;
+        // A faded static placement may remain a visibility consumer, but must
+        // stop contributing opaque wall depth before the next cull traversal.
+        mInsert->setUserValue("occlusionOpaque", mAlpha == 1.f && mActorFade == 1.f);
 
         // TODO: we use it to fade actors away too, but it would be nice to have a dithering shader instead.
         if (mAlpha != 1.f || mActorFade != 1.f)

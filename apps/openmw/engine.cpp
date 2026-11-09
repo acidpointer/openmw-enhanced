@@ -27,6 +27,7 @@
 #include <components/sdlutil/imagetosurface.hpp>
 #include <components/sdlutil/sdlgraphicswindow.hpp>
 #include <components/sdlutil/sdlinputwrapper.hpp>
+#include <components/sdlutil/startupsignals.hpp>
 
 #include <components/resource/resourcesystem.hpp>
 #include <components/resource/scenemanager.hpp>
@@ -685,6 +686,7 @@ void OMW::Engine::createWindow()
 
     realizeOperations->add(mSelectDepthFormatOperation);
     realizeOperations->add(mSelectColorFormatOperation);
+    realizeOperations->add(new SceneUtil::Color::SelectNormalFormatOperation(Settings::video().mAntialiasing));
 
     if (Stereo::getStereo())
     {
@@ -1026,7 +1028,10 @@ void OMW::Engine::go()
 
     mEnvironment.setFrameRateLimit(Settings::video().mFramerateLimit);
 
-    prepareEngine();
+    {
+        SDLUtil::ScopedStartupSignals startupSignals;
+        prepareEngine();
+    }
 
     if (const char* driver = SDL_GetCurrentVideoDriver())
         Log(Debug::Info) << "SDL video driver: " << driver;

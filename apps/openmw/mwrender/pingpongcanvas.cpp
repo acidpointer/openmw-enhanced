@@ -1,6 +1,7 @@
 #include "pingpongcanvas.hpp"
 
 #include <components/debug/frametrace.hpp>
+#include <components/fx/scratchrouting.hpp>
 #include <cstdlib>
 #include <string_view>
 
@@ -30,10 +31,12 @@ namespace MWRender
     }
 
     PingPongCanvas::PingPongCanvas(Shader::ShaderManager& shaderManager,
-        const std::shared_ptr<LuminanceCalculator>& luminanceCalculator, DistortionCallback* distortionCallback)
+        const std::shared_ptr<LuminanceCalculator>& luminanceCalculator, DistortionCallback* distortionCallback,
+        PostprocessScratch* scratch)
         : mFallbackStateSet(new osg::StateSet)
         , mMultiviewResolveStateSet(new osg::StateSet)
         , mDistortionCallback(distortionCallback)
+        , mScratch(scratch)
         , mLuminanceCalculator(luminanceCalculator)
     {
         setUseDisplayList(false);
@@ -67,6 +70,7 @@ namespace MWRender
     void PingPongCanvas::setPasses(Fx::DispatchArray&& passes)
     {
         mPasses = std::move(passes);
+        mExecutionPlanDirty = true;
         mDirty = true;
     }
 
@@ -85,6 +89,13 @@ namespace MWRender
         osg::Geometry::resizeGLObjectBuffers(maxSize);
         mEmptyUniformStacks.resize(maxSize);
         mGpuTimings.resize(maxSize);
+        mScratch->resizeGLObjectBuffers(maxSize);
+    }
+
+    void PingPongCanvas::releaseGLObjects(osg::State* state) const
+    {
+        osg::Geometry::releaseGLObjects(state);
+        mScratch->releaseGLObjects(state);
     }
 
     static void attachCloneOfTemplate(
@@ -170,21 +181,18 @@ namespace MWRender
             pendingTimings.push_back(std::move(*timing));
         };
 
-        std::vector<size_t> filtered;
-
-        filtered.reserve(mPasses.size());
-
-        for (size_t i = 0; i < mPasses.size(); ++i)
+        if (mExecutionPlanDirty || mExecutionPlan.mMask != mMask || mExecutionPlan.mEnabled != mPostprocessing)
         {
-            const auto& node = mPasses[i];
-
-            if (mMask & node.mFlags)
-                continue;
-
-            if (node.mHandle->getInternal() && node.mHandle->getName() == "internal_distortion" && mDistortionCallback
+            mExecutionPlan = Fx::makeExecutionPlan(mPasses, mMask, mPostprocessing);
+            mExecutionPlanDirty = false;
+        }
+        auto& filtered = mFiltered;
+        filtered.clear();
+        for (const auto i : mExecutionPlan.mNodes)
+        {
+            if (mPasses[i].mInternalDistortion && mDistortionCallback
                 && !mDistortionCallback->hasDistortion(state.getContextID(), frameNumber))
                 continue;
-
             filtered.push_back(i);
         }
 
@@ -192,7 +200,6 @@ namespace MWRender
 
         if (mDirty)
         {
-            mFbos.fill(nullptr);
             mMultiviewResolveFramebuffer = nullptr;
             mLuminanceCalculator->dirty(mTextureScene->getTextureWidth(), mTextureScene->getTextureHeight());
 
@@ -206,15 +213,13 @@ namespace MWRender
             if (!mGpuTimingStats || !mGpuTimingStats->collectStats("resource"))
                 return;
 
-            unsigned int allocated = 0;
-            for (const auto& fbo : mFbos)
-                if (fbo && fbo->getHandle(state.getContextID()) != 0)
-                    ++allocated;
+            const auto allocated = mScratch->allocated(state.getContextID());
             mGpuTimingStats->setAttribute(frameNumber, "Postprocess intermediates", allocated);
         };
 
         if (filtered.empty() || !mPostprocessing)
         {
+            mLuminanceCalculator->disable();
             state.pushStateSet(mFallbackStateSet);
             state.apply();
 
@@ -243,8 +248,9 @@ namespace MWRender
         // A single resolving pass needs no intermediate scene textures. Allocate a ping-pong
         // buffer only when a pass actually writes to it, rather than clearing three full-size
         // buffers on each canvas just because post-processing is enabled.
-        auto bindIntermediateFbo = [&](int attachment) {
-            auto& fbo = mFbos[attachment - GL_COLOR_ATTACHMENT0_EXT];
+        auto& fbos = mScratch->get(state, *mTextureScene);
+        auto bindIntermediateFbo = [&](int slot) {
+            auto& fbo = fbos[slot];
             if (!fbo)
             {
                 fbo = new osg::FrameBufferObject;
@@ -272,11 +278,6 @@ namespace MWRender
                 (osg::Texture*)mMultiviewResolveFramebuffer->getAttachment(osg::Camera::COLOR_BUFFER0).getTexture());
         }
 
-        constexpr std::array<std::array<int, 2>, 3> buffers
-            = { { { GL_COLOR_ATTACHMENT1_EXT, GL_COLOR_ATTACHMENT2_EXT },
-                { GL_COLOR_ATTACHMENT0_EXT, GL_COLOR_ATTACHMENT2_EXT },
-                { GL_COLOR_ATTACHMENT0_EXT, GL_COLOR_ATTACHMENT1_EXT } } };
-
         (mAvgLum) ? mLuminanceCalculator->enable() : mLuminanceCalculator->disable();
 
         // A histogram based approach is superior way to calculate scene luminance. Using mipmaps is more broadly
@@ -288,10 +289,7 @@ namespace MWRender
             endGpuTiming(timing);
         }
 
-        auto buffer = buffers[0];
-
-        int lastDraw = 0;
-        int lastShader = 0;
+        Fx::ScratchRouting routing;
 
         unsigned int lastApplied = 0;
 
@@ -368,6 +366,15 @@ namespace MWRender
                 node.mRootStateSet->setTextureAttribute(
                     PostProcessor::TextureUnits::Unit_Distortion, mTextureDistortion);
 
+            if (node.mInternalDistortion && mDistortionCallback && mTextureDistortion)
+            {
+                auto coverage = mDistortionCallback->coverage(state.getContextID(), frameNumber);
+                const float padX = 0.14f + 2.f / std::max(1, mTextureDistortion->getTextureWidth());
+                const float padY = 0.14f + 2.f / std::max(1, mTextureDistortion->getTextureHeight());
+                coverage += osg::Vec4f(-padX, -padY, padX, padY);
+                node.mRootStateSet->getOrCreateUniform("enhancedDistortionCoverage", osg::Uniform::FLOAT_VEC4)
+                    ->set(coverage);
+            }
             state.pushStateSet(node.mRootStateSet);
 
             for (size_t passIndex = 0; passIndex < node.mPasses.size(); ++passIndex)
@@ -378,19 +385,19 @@ namespace MWRender
                 const bool resolveToOutput = !pass.mRenderTarget && pass.mResolve && index == filtered.back();
 
                 // VR-TODO: This won't actually work for tex2darrays
-                if (lastShader == 0)
+                if (routing.lastShader() < 0)
                     pass.mStateSet->setTextureAttribute(PostProcessor::Unit_LastShader, mTextureScene);
                 else
                     pass.mStateSet->setTextureAttribute(PostProcessor::Unit_LastShader,
-                        (osg::Texture*)mFbos[lastShader - GL_COLOR_ATTACHMENT0_EXT]
+                        (osg::Texture*)fbos[routing.lastShader()]
                             ->getAttachment(osg::Camera::COLOR_BUFFER0)
                             .getTexture());
 
-                if (lastDraw == 0)
+                if (routing.lastPass() < 0)
                     pass.mStateSet->setTextureAttribute(PostProcessor::Unit_LastPass, mTextureScene);
                 else
                     pass.mStateSet->setTextureAttribute(PostProcessor::Unit_LastPass,
-                        (osg::Texture*)mFbos[lastDraw - GL_COLOR_ATTACHMENT0_EXT]
+                        (osg::Texture*)fbos[routing.lastPass()]
                             ->getAttachment(osg::Camera::COLOR_BUFFER0)
                             .getTexture());
 
@@ -404,18 +411,9 @@ namespace MWRender
                 {
                     bindDestinationFbo();
                 }
-                else if (lastPass)
-                {
-                    lastDraw = buffer[0];
-                    lastShader = buffer[0];
-                    lastApplied = bindIntermediateFbo(buffer[0]);
-                    buffer = buffers[lastShader - GL_COLOR_ATTACHMENT0_EXT];
-                }
                 else
                 {
-                    lastApplied = bindIntermediateFbo(buffer[0]);
-                    lastDraw = buffer[0];
-                    std::swap(buffer[0], buffer[1]);
+                    lastApplied = bindIntermediateFbo(routing.selectOutput(lastPass));
                 }
 
                 state.pushStateSet(pass.mStateSet);

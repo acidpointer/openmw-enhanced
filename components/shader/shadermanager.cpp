@@ -869,6 +869,7 @@ namespace Shader
             { "classicFalloff", "1" },
             { "skyBlending", "0" },
             { "disableNormals", "1" },
+            { "terrainLayerBatch", "0" },
             { "useGPUShader4", "0" },
             { "useOVR_multiview", "0" },
             { "distorionRTRatio", "0" },

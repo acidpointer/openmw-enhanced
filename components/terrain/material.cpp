@@ -8,6 +8,7 @@
 
 #include <components/resource/scenemanager.hpp>
 #include <components/sceneutil/depth.hpp>
+#include <components/sceneutil/enhancedsettings.hpp>
 #include <components/sceneutil/texmat.hpp>
 #include <components/sceneutil/util.hpp>
 #include <components/shader/shadermanager.hpp>
@@ -187,10 +188,17 @@ namespace Terrain
         auto& shaderManager = sceneManager->getShaderManager();
         std::vector<osg::ref_ptr<osg::StateSet>> passes;
 
+        // Gated until image comparisons cover intermediate framebuffer rounding.
+        const bool batchLayers = !isComposite && !esm4terrain && !blendmaps.empty()
+            && shaderManager.getAvailableTextureUnits() >= 4
+            && SceneUtil::Enhanced::settingBool("Terrain", "batch texture layers", false);
         unsigned int blendmapIndex = 0;
         for (std::vector<TextureLayer>::const_iterator it = layers.begin(); it != layers.end(); ++it)
         {
             bool firstLayer = (it == layers.begin());
+            const auto next = std::next(it);
+            const bool batch = batchLayers && next != layers.end() && canBatchLayers(*it, *next)
+                && blendmapIndex + 1 < blendmaps.size();
 
             osg::ref_ptr<osg::StateSet> stateset(new osg::StateSet);
 
@@ -227,6 +235,15 @@ namespace Terrain
                     stateset->addUniform(BlendmapTexMat::value(blendmapScale));
                 stateset->addUniform(UniformCollection::value().mBlendMap);
             }
+            if (batch)
+            {
+                stateset->setTextureAttribute(2, next->mDiffuseMap);
+                stateset->setTextureAttribute(3, blendmaps.at(blendmapIndex++));
+                stateset->addUniform(new osg::Uniform("diffuseMap2", 2));
+                stateset->addUniform(new osg::Uniform("blendMap2", 3));
+                stateset->setAttributeAndModes(
+                    new osg::BlendFunc(osg::BlendFunc::ONE, firstLayer ? osg::BlendFunc::ZERO : osg::BlendFunc::ONE));
+            }
             if (isComposite)
             {
                 stateset->setAttributeAndModes(
@@ -259,6 +276,7 @@ namespace Terrain
                 }
 
                 Shader::ShaderManager::DefineMap defineMap;
+                defineMap["terrainLayerBatch"] = batch ? "1" : "0";
                 defineMap["normalMap"] = (it->mNormalMap) ? "1" : "0";
                 defineMap["blendMap"] = (!blendmaps.empty()) ? "1" : "0";
                 defineMap["specularMap"] = it->mSpecular ? "1" : "0";
@@ -271,6 +289,8 @@ namespace Terrain
             }
 
             passes.push_back(stateset);
+            if (batch)
+                ++it;
         }
         return passes;
     }

@@ -1,6 +1,7 @@
 #include <components/occlusionculling/occludermesh.hpp>
 
 #include <algorithm>
+#include <components/nifosg/nifloader.hpp>
 #include <components/sceneutil/occlusionculling.hpp>
 #include <osg/AlphaFunc>
 #include <osg/Geode>
@@ -59,6 +60,28 @@ namespace
             EXPECT_GE(mesh.vertices[i + 3].x(), 10);
             EXPECT_EQ(mesh.vertices[i].z(), 0);
         }
+    }
+
+    TEST(OccluderMeshTest, updateOnlyCollisionAndHiddenGeometryCannotBecomeOccluders)
+    {
+        struct RestoreMask
+        {
+            unsigned int value = NifOsg::Loader::getHiddenNodeMask();
+            ~RestoreMask() { NifOsg::Loader::setHiddenNodeMask(value); }
+        } restore;
+        NifOsg::Loader::setHiddenNodeMask(1);
+        osg::ref_ptr<osg::Group> root = new osg::Group;
+        root->addChild(geometry({ { 0, 0, -5 }, { 2, 0, -5 }, { 0, 2, -5 } }));
+        osg::ref_ptr<osg::Group> hidden = new osg::Group;
+        hidden->setNodeMask(1);
+        hidden->addChild(geometry({ { -100, -100, -5 }, { 100, -100, -5 }, { 0, 100, -5 } }));
+        root->addChild(hidden);
+        auto direct = geometry({ { -100, -100, -10 }, { 100, -100, -10 }, { 0, 100, -10 } });
+        direct->setNodeMask(1);
+        root->addChild(direct);
+        const auto mesh = OcclusionCulling::buildSimplifiedMesh(root, 4, 1);
+        ASSERT_EQ(mesh.indices.size(), 3);
+        EXPECT_EQ(mesh.aabb, osg::BoundingBox(0, 0, -5, 2, 2, -5));
     }
 
     TEST(OccluderMeshTest, realOpeningRemainsVisibleWhileSolidWallOccludes)

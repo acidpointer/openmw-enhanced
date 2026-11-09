@@ -39,10 +39,13 @@ namespace
         occluder.update({ 1, 1, 1 }, 1);
         EXPECT_EQ(storage.reads, 9);
         const auto* positions = occluder.getPositions().data();
+        const auto revision = occluder.getRevision();
         occluder.update({ 2, 2, 1 }, 1);
         EXPECT_EQ(storage.reads, 9);
         EXPECT_EQ(positions, occluder.getPositions().data());
+        EXPECT_EQ(occluder.getRevision(), revision);
         occluder.update({ 9, 1, 1 }, 1);
+        EXPECT_GT(occluder.getRevision(), revision);
         EXPECT_EQ(storage.reads, 12);
         for (const auto index : occluder.getIndices())
             EXPECT_LT(index, occluder.getPositions().size());

@@ -18,7 +18,10 @@
 
 #include <components/occlusionculling/occludermesh.hpp>
 #include <components/occlusionculling/occlusionstorage.hpp>
+#include <components/sceneutil/lightboundsindex.hpp>
 #include <components/sceneutil/nodecallback.hpp>
+#include <components/sceneutil/occlusionplan.hpp>
+#include <components/sceneutil/occlusionpreparation.hpp>
 
 namespace MWRender
 {
@@ -36,21 +39,46 @@ namespace MWRender
         PagedOccluderData(const PagedOccluderData& copy, const osg::CopyOp& = {})
             : osg::Object(copy)
             , mOccluderMeshes(copy.mOccluderMeshes)
-            , mOccluderBins(copy.mOccluderBins)
-            , mOccluderBounds(copy.mOccluderBounds)
-            , mOccluderBinDim(copy.mOccluderBinDim)
+            , mIndex(copy.mIndex)
+            , mIndexed(copy.mIndexed)
         {
         }
         META_Object(MWRender, PagedOccluderData)
 
-        void buildSpatialBins();
-        void collectNearbyOccluders(
-            const osg::Vec3f& eyeWorld, float maxDistanceSq, std::vector<const OccluderMesh*>& out) const;
+        void buildSpatialIndex();
+        void collectNearbyOccluders(const osg::Vec3f& eyeWorld, float maxDistanceSq,
+            std::vector<std::shared_ptr<const OccluderMesh>>& out, std::vector<std::size_t>& scratch) const;
 
-        std::vector<OccluderMesh> mOccluderMeshes;
-        std::vector<std::vector<unsigned int>> mOccluderBins;
-        osg::BoundingBox mOccluderBounds;
-        unsigned int mOccluderBinDim = 0;
+        std::vector<std::shared_ptr<const OccluderMesh>> mOccluderMeshes;
+
+    private:
+        SceneUtil::LightBoundsIndex mIndex;
+        bool mIndexed = false;
+    };
+
+    // Per-placement metadata, owning immutable mesh data but no scene nodes.
+    class StaticOccluderData : public osg::Object
+    {
+    public:
+        StaticOccluderData() { setName("OpenMW Static Occluder"); }
+        StaticOccluderData(const StaticOccluderData& other, const osg::CopyOp& op = {})
+            : osg::Object(other, op)
+            , mModel(other.mModel)
+            , mResolution(other.mResolution)
+            , mShrink(other.mShrink)
+            , mMesh(other.mMesh)
+            , mVisual(other.mVisual)
+            , mPlacement(other.mPlacement)
+            , mBounds(other.mBounds)
+        {
+        }
+        META_Object(MWRender, StaticOccluderData)
+        std::string mModel;
+        int mResolution = 0, mShrink = 0;
+        std::shared_ptr<const OccluderMesh> mMesh;
+        osg::observer_ptr<osg::Node> mVisual;
+        osg::Matrixf mPlacement;
+        osg::BoundingBox mBounds;
     };
 }
 
@@ -108,7 +136,7 @@ namespace MWRender
         bool mEnableInteriors;
         bool mIsInterior = false;
         bool mIsQuasiExterior = false;
-        std::unordered_map<std::string, unsigned int> mLastFrameNumbers;
+        SceneUtil::OcclusionPlan mPlan;
         OcclusionStorage* mStorage = nullptr;
 
         // Scratch buffers reused across frames
@@ -136,63 +164,59 @@ namespace MWRender
         std::vector<float> mDepthPixels;
     };
 
-    /// Installed on paged chunk nodes (from ObjectPaging). Rasterizes the chunk's
-    /// pre-built occluder meshes into MOC during the terrain traversal, before cell
-    /// objects are tested.
+    /// Consumes completed software depth before traversing paged geometry.
     class PagedOccluderCallback
-        : public SceneUtil::NodeCallback<PagedOccluderCallback, osg::Node*, osgUtil::CullVisitor*>
+        : public SceneUtil::NodeCallback<PagedOccluderCallback, osg::Node*, osgUtil::CullVisitor*>,
+          public SceneUtil::OcclusionSource
     {
     public:
-        PagedOccluderCallback(SceneUtil::OcclusionCuller* culler, float maxDistance, unsigned int maxTriangles);
+        explicit PagedOccluderCallback(SceneUtil::OcclusionCuller* culler);
 
         void operator()(osg::Node* node, osgUtil::CullVisitor* cv);
+        void prepareOccluders(osg::Node& node, const osg::Matrixd& matrix, osgUtil::CullVisitor& cv,
+            SceneUtil::OcclusionPlan& plan) override;
 
     private:
         osg::ref_ptr<SceneUtil::OcclusionCuller> mCuller;
         float mMaxDistanceSq;
-        unsigned int mMaxTriangles;
     };
 
-    /// Installed on each Cell Root group. Two-pass approach:
-    /// Pass 1: Large objects are traversed, and eligible opaque mesh subsets
-    ///         are rasterized within the static time/triangle budget.
-    /// Pass 2: Small objects are tested against the enriched depth buffer (terrain + buildings).
+    /// Owns registered placements for preparation and consumes completed depth.
     class CellOcclusionCallback
-        : public SceneUtil::NodeCallback<CellOcclusionCallback, osg::Group*, osgUtil::CullVisitor*>
+        : public SceneUtil::NodeCallback<CellOcclusionCallback, osg::Group*, osgUtil::CullVisitor*>,
+          public SceneUtil::OcclusionSource
     {
     public:
         CellOcclusionCallback(SceneUtil::OcclusionCuller* culler, float occluderMinRadius, float occluderMaxRadius,
-            float occluderShrinkFactor, int occluderMeshResolution, int occluderMaxMeshResolution,
-            float occluderInsideThreshold, float occluderMaxDistance, bool enableStaticOccluders,
-            unsigned int maxTriangles, OcclusionStorage* storage = nullptr);
+            float occluderMaxDistance, bool enableStaticOccluders, OcclusionStorage* storage = nullptr);
 
         void operator()(osg::Group* node, osgUtil::CullVisitor* cv);
 
+        void registerOccluder(osg::Node* node, StaticOccluderData* data);
+        void collectOccluders(osg::Group& cell, const osg::Matrixd& parentToWorld, osgUtil::CullVisitor& cv,
+            SceneUtil::OcclusionPlan& plan);
+        void setStorage(OcclusionStorage* storage) { mStorage = storage; }
+        void prepareOccluders(osg::Node& node, const osg::Matrixd& matrix, osgUtil::CullVisitor& cv,
+            SceneUtil::OcclusionPlan& plan) override
+        {
+            if (auto* group = node.asGroup())
+                collectOccluders(*group, matrix, cv, plan);
+        }
+
     private:
-        /// Get cached occluder mesh (actual triangles + AABB) for a node.
-        struct CachedMesh;
-        const CachedMesh* getOccluderMesh(osg::Node* node, const osg::Matrixd& parentToWorld);
 
         osg::ref_ptr<SceneUtil::OcclusionCuller> mCuller;
         float mOccluderMinRadius;
         float mOccluderMaxRadius;
-        float mOccluderShrinkFactor;
-        int mOccluderMeshResolution;
-        int mOccluderMaxMeshResolution;
-        float mOccluderInsideThreshold;
         float mOccluderMaxDistanceSq;
         bool mEnableStaticOccluders;
-        unsigned int mMaxTriangles;
 
-        struct CachedMesh
+        struct PlacementEntry
         {
             osg::observer_ptr<osg::Node> mNode;
-            osg::Matrixf mPlacement;
-            std::string mModel;
-            std::shared_ptr<const OccluderMesh> mMesh;
-            osg::BoundingBox mWorldBounds;
+            osg::ref_ptr<StaticOccluderData> mData;
         };
-        std::unordered_map<osg::Node*, CachedMesh> mMeshCache;
+        std::unordered_map<osg::Node*, PlacementEntry> mPlacements;
         OcclusionStorage* mStorage = nullptr;
     };
 }

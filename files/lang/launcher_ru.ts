@@ -801,31 +801,11 @@ Logs and settings changed through the launcher and in-game will be saved here.</
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <source>Shrink factor applied to occluder meshes toward their centroid.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>Occluder mesh resolution</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <source>Base grid resolution for vertex clustering of occluder meshes.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>Occluder max mesh resolution</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Maximum grid resolution for adaptive scaling of large occluders.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Inside threshold</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Scale factor for the AABB used to detect if the camera is inside an occluder.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
@@ -918,6 +898,26 @@ Logs and settings changed through the launcher and in-game will be saved here.</
     </message>
     <message>
         <source>Temporarily use terrain-only occlusion when enhanced cell occlusion is expensive and low benefit.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Shrink each retained opaque triangle toward its own centroid. Values of 1 or greater preserve it.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Controls the number of original opaque triangles retained as occluders.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Maximum resolution when adapting the triangle budget to large occluders.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Inside threshold (legacy)</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Retained for configuration compatibility. Opaque triangle occluders use clipping and remain usable from inside their model bounds.</source>
         <translation type="unfinished"></translation>
     </message>
 </context>

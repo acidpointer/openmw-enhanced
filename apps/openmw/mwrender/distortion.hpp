@@ -33,11 +33,18 @@ namespace MWRender
             return content.mFrameNumber != frameNumber || content.mHasDistortion;
         }
 
+        osg::Vec4f coverage(unsigned int contextId, unsigned int frameNumber) const
+        {
+            const auto& content = mContent[contextId];
+            return content.mFrameNumber == frameNumber ? content.mCoverage : osg::Vec4f(0, 0, 1, 1);
+        }
+
     private:
         struct Content
         {
             std::optional<unsigned int> mFrameNumber;
             bool mHasDistortion = true;
+            osg::Vec4f mCoverage{ 1, 1, 0, 0 };
             std::array<osg::observer_ptr<osg::FrameBufferObject>, 2> mClearedFbos;
         };
 

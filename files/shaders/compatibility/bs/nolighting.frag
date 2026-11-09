@@ -1,4 +1,5 @@
 #version 120
+#pragma import_defines(OMW_WRITE_NORMALS)
 #pragma import_defines(FORCE_OPAQUE)
 
 #if @useGPUShader4
@@ -59,10 +60,12 @@ void main()
 
     gl_FragData[0] = applyFogAtDist(gl_FragData[0], passViewPos, euclideanDepth, linearDepth, near, far);
 
+#if !defined(FORCE_OPAQUE) && (@softParticles || (!@disableNormals && defined(OMW_WRITE_NORMALS) && OMW_WRITE_NORMALS))
+    vec3 viewNormal = normalize(gl_NormalMatrix * passNormal);
+#endif
 #if !defined(FORCE_OPAQUE) && @softParticles
     vec2 screenCoords = gl_FragCoord.xy / screenRes;
     vec3 viewVec = normalize(passViewPos.xyz);
-    vec3 viewNormal = normalize(gl_NormalMatrix * passNormal);
 
     gl_FragData[0].a *= calcSoftParticleFade(
         viewVec,
@@ -85,8 +88,7 @@ void main()
     gl_FragData[0].a = 1.0;
 #endif
 
-#if !defined(FORCE_OPAQUE) && !@disableNormals
-    vec3 viewNormal = normalize(gl_NormalMatrix * passNormal);
+#if !defined(FORCE_OPAQUE) && !@disableNormals && defined(OMW_WRITE_NORMALS) && OMW_WRITE_NORMALS
     gl_FragData[1].xyz = viewNormal * 0.5 + 0.5;
 #endif
 

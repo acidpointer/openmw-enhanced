@@ -4,6 +4,7 @@
 #include <chrono>
 #include <gtest/gtest.h>
 #include <osg/Geometry>
+#include <sqlite3.h>
 #include <thread>
 
 namespace
@@ -60,6 +61,29 @@ namespace
         OcclusionCulling::OcclusionStorage storage(path);
         OcclusionCulling::OccluderMesh restored;
         EXPECT_FALSE(storage.get(Model.value(), 12, 900000, restored));
+    }
+
+    TEST(OcclusionStorageTest, proxiesFromBeforeHiddenGeometryFilteringAreNotReused)
+    {
+        const auto path = (TestingOpenMW::currentTestDirPath() / "cache.sqlite").string();
+        {
+            OcclusionCulling::OcclusionStorage storage(path);
+            storage.put(Model.value(), 12, 900000, triangle());
+        }
+        {
+            sqlite3* database = nullptr;
+            const auto result = sqlite3_open(path.c_str(), &database);
+            const std::unique_ptr<sqlite3, decltype(&sqlite3_close)> owner(database, &sqlite3_close);
+            ASSERT_EQ(result, SQLITE_OK);
+            ASSERT_EQ(sqlite3_exec(database, "UPDATE occlusion_meshes SET model_path = 'mesh-v3:meshes/test.nif'",
+                          nullptr, nullptr, nullptr),
+                SQLITE_OK);
+        }
+        OcclusionCulling::OcclusionStorage storage(path);
+        OcclusionCulling::OccluderMesh restored;
+        EXPECT_FALSE(storage.get(Model.value(), 12, 900000, restored));
+        storage.put(Model.value(), 12, 900000, triangle());
+        EXPECT_TRUE(storage.get(Model.value(), 12, 900000, restored));
     }
     TEST(OcclusionStorageTest, denseLoadEventuallyPreparesOverflowRequests)
     {

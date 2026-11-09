@@ -33,6 +33,8 @@ namespace SceneUtil::Enhanced
     float occlusionOccluderShrinkFactor();
     int occlusionOccluderMeshResolution();
     int occlusionOccluderMaxMeshResolution();
+    // Legacy value retained by the launcher; triangle occluders no longer use
+    // camera-inside-AABB rejection.
     float occlusionOccluderInsideThreshold();
     float occlusionOccluderMaxDistance();
     bool occlusionDebugOverlay();

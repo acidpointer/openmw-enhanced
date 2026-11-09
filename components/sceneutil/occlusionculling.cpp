@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
 
 #include <osg/FrameStamp>
@@ -43,7 +44,7 @@ namespace SceneUtil
     }
 
     void OcclusionCuller::beginFrame(
-        const osg::Matrixd& viewMatrix, const osg::Matrixd& projectionMatrix, float nearClip)
+        const osg::Matrixd& viewMatrix, const osg::Matrixd& projectionMatrix, float nearClip, bool retainDepth)
     {
         mVisitor.store(nullptr, std::memory_order_release);
         mFrameActive = false;
@@ -56,9 +57,8 @@ namespace SceneUtil
             mMOCTerrainOnly->SetNearClipPlane(mNearClip);
         if (!mViewInverse.invert(viewMatrix))
             return;
-        mMOC->ClearBuffer();
-        if (mMOCTerrainOnly)
-            mMOCTerrainOnly->ClearBuffer();
+        if (!retainDepth)
+            clearDepth();
         mViewProjection = viewMatrix * projectionMatrix;
         mProjection = projectionMatrix;
 
@@ -99,6 +99,14 @@ namespace SceneUtil
         mTerrainPagedOccluded = 0;
         mStaticRasterBudgetBaselineMs = 0.0;
         mFrameActive = true;
+    }
+
+    void OcclusionCuller::clearDepth()
+    {
+        if (mMOC)
+            mMOC->ClearBuffer();
+        if (mMOCTerrainOnly)
+            mMOCTerrainOnly->ClearBuffer();
     }
 
     void OcclusionCuller::bindVisitor(osgUtil::CullVisitor& visitor)
@@ -148,7 +156,7 @@ namespace SceneUtil
         for (const auto& v : worldPositions)
         {
             float w = mVPFloat[3] * v.x() + mVPFloat[7] * v.y() + mVPFloat[11] * v.z() + mVPFloat[15];
-            if (!std::isfinite(w) || std::abs(w) < 1e-6f)
+            if (!std::isfinite(w))
                 return;
         }
 #endif
@@ -197,12 +205,12 @@ namespace SceneUtil
                 return;
         }
 
-        // Pre-transform check: skip triangles with vertices that would produce
-        // extreme clip-space coordinates (w near zero after VP transform).
+        // Non-finite coordinates are invalid. Finite near-plane crossings,
+        // including w == 0, are handled by MOC's homogeneous triangle clipper.
         for (const auto& v : worldPositions)
         {
             float w = transform[3] * v.x() + transform[7] * v.y() + transform[11] * v.z() + transform[15];
-            if (!std::isfinite(w) || std::abs(w) < 1e-6f)
+            if (!std::isfinite(w))
                 return;
         }
 #endif
@@ -252,6 +260,40 @@ namespace SceneUtil
         projected.maxX = std::min(projected.maxX, 1.f);
         projected.maxY = std::min(projected.maxY, 1.f);
         return projected.minX < projected.maxX && projected.minY < projected.maxY;
+    }
+
+    bool OcclusionCuller::projectOccluderBounds(const osg::BoundingBox& worldBB, ProjectedBounds& projected) const
+    {
+        if (projectBounds(worldBB, projected))
+            return true;
+        if (!mFrameActive || !worldBB.valid())
+            return false;
+        osg::Vec3f corners[8];
+        for (unsigned int i = 0; i < 8; ++i)
+            corners[i] = worldBB.corner(i);
+        float clip[8 * 4];
+        MaskedOcclusionCulling::TransformVertices(mVPFloat, reinterpret_cast<const float*>(corners), clip, 8);
+        bool outside[5] = { true, true, true, true, true };
+        bool crossesNear = false;
+        for (unsigned int i = 0; i < 8; ++i)
+        {
+            const float x = clip[i * 4], y = clip[i * 4 + 1], w = clip[i * 4 + 3];
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(w))
+                return false;
+            crossesNear |= w <= mNearClip;
+            outside[0] &= w <= mNearClip;
+            outside[1] &= x < -w;
+            outside[2] &= x > w;
+            outside[3] &= y < -w;
+            outside[4] &= y > w;
+        }
+        if (!crossesNear || std::any_of(std::begin(outside), std::end(outside), [](bool value) { return value; }))
+            return false;
+        // Conservative importance only: do not divide through a near-plane
+        // crossing. Rasterization still uses the original opaque triangles,
+        // with all clipping planes enabled, never this screen rectangle.
+        projected = { -1, -1, 1, 1, mNearClip };
+        return true;
     }
 
     bool OcclusionCuller::testVisibleAABBImpl(MaskedOcclusionCulling* moc, const ProjectedBounds& projected) const

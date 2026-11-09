@@ -1,4 +1,5 @@
 #version 120
+#pragma import_defines(OMW_WRITE_NORMALS)
 
 #if @useGPUShader4
     #extension GL_EXT_gpu_shader4: require
@@ -87,7 +88,7 @@ void main()
     gl_FragData[0].xyz *= lighting;
     gl_FragData[0] = applyFogAtDist(gl_FragData[0], passViewPos, euclideanDepth, linearDepth, near, far);
 
-#if !@disableNormals
+#if !@disableNormals && defined(OMW_WRITE_NORMALS) && OMW_WRITE_NORMALS
     gl_FragData[1].xyz = viewNormal * 0.5 + 0.5;
 #endif
 

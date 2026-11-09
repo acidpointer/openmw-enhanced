@@ -1,0 +1,23 @@
+name = "postprocess-known-source-optimizations"
+status = "active"
+implementation = "components/fx/shadercompatibility.cpp"
+normalization = "Strip UTF-8 BOM and normalize CRLF to LF before matching."
+matching = "Exact normalized byte count plus FNV-1a-64 fingerprint; filename alone never selects a patch."
+notes = "Transforms VFS-selected source in memory; never edits mod files or changes data-directory priority. Unknown and edited revisions pass through. No complete third-party shader sources are redistributed here."
+
+[[shader]]
+name = "godrays"
+version = "1.2"
+authors = "Phal, Hrnchamd, Dexter, Wazabear (source metadata)"
+bytes = 11472
+fnv1a64 = "682586990b4b6c5c"
+changes = "Zero-strength early-out; two explicit packed R8 masks with the original pixel density and guard band. Preserve sun-disc combine and saved iteration count."
+fallback = "Use original mask layout for non-UBO contexts, multiview, and surfaces smaller than 128 pixels on either axis."
+
+[[shader]]
+name = "depth_of_field"
+version = "1.0"
+authors = "akortunov, MGE team (source metadata)"
+bytes = 4328
+fnv1a64 = "57eef2c877769e03"
+changes = "Initialize circle of confusion when focus blur is disabled; skip noise and 12 repeated samples at exactly zero radius."

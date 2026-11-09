@@ -33,8 +33,12 @@ namespace SceneUtil
         ~OcclusionCuller();
 
         /// Call at the start of each frame's cull traversal.
-        /// Clears the depth buffer and stores the view-projection matrix.
-        void beginFrame(const osg::Matrixd& viewMatrix, const osg::Matrixd& projectionMatrix, float nearClip = 0.1f);
+        /// Stores the view-projection matrix and clears depth by default.
+        /// Retaining depth requires its owner to validate the complete view and
+        /// occluder set, then clear invalid depth before binding a visitor.
+        void beginFrame(const osg::Matrixd& viewMatrix, const osg::Matrixd& projectionMatrix, float nearClip = 0.1f,
+            bool retainDepth = false);
+        void clearDepth();
         void bindVisitor(osgUtil::CullVisitor& visitor);
         bool isFrameActiveFor(osgUtil::CullVisitor& visitor) const;
 
@@ -48,19 +52,22 @@ namespace SceneUtil
         void rasterizeOccluder(const std::vector<osg::Vec3f>& positions, const std::vector<unsigned int>& indices,
             const osg::Matrixf* modelToWorld = nullptr, bool backfaceCull = true);
 
-        /// Test against the terrain-only depth buffer.
-        /// Use for cells and buildings — prevents buildings from false-occluding each other.
+        /// Conservative projection for visibility queries. Near crossings fail open.
         struct ProjectedBounds
         {
             float minX, minY, maxX, maxY, minW;
             double screenRatio() const { return static_cast<double>((maxX - minX) * (maxY - minY)) * 0.25; }
         };
         bool projectBounds(const osg::BoundingBox& worldBB, ProjectedBounds& projected) const;
+        /// Candidate ranking may include opaque triangles crossing the near
+        /// plane. MOC clips those triangles; their AABB is not an occludee.
+        bool projectOccluderBounds(const osg::BoundingBox& worldBB, ProjectedBounds& projected) const;
+        /// Terrain-only depth is used for coarse traversal and candidate selection.
         bool testVisibleAABBTerrainOnly(const osg::BoundingBox& worldBB) const;
         bool testVisibleAABBTerrainOnly(const ProjectedBounds& projected) const;
 
         /// Test against the full depth buffer (terrain + buildings).
-        /// Use for small objects in Pass 2.
+        /// Use for conservative object and drawable bounds of any size.
         bool testVisibleAABB(const osg::BoundingBox& worldBB) const;
 
         bool isActive() const { return mMOC != nullptr; }
@@ -125,6 +132,12 @@ namespace SceneUtil
             ++mNumBuildingOccluders;
             mNumBuildingTris += tris;
             mNumBuildingVerts += verts;
+        }
+        void setBuildingOccluderCounts(unsigned int meshes, unsigned int triangles, unsigned int vertices)
+        {
+            mNumBuildingOccluders = meshes;
+            mNumBuildingTris = triangles;
+            mNumBuildingVerts = vertices;
         }
         void incrementStaticOccluderCandidates() { ++mStaticOccluderCandidates; }
         void incrementStaticOccludersSkippedBudget() { ++mStaticOccludersSkippedBudget; }

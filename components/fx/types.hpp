@@ -1,7 +1,9 @@
 #ifndef OPENMW_COMPONENTS_FX_TYPES_HPP
 #define OPENMW_COMPONENTS_FX_TYPES_HPP
 
+#include <cmath>
 #include <format>
+#include <limits>
 #include <optional>
 #include <variant>
 
@@ -25,20 +27,17 @@ namespace Fx
 
             std::tuple<int, int> get(int width, int height) const
             {
-                int scaledWidth = width;
-                int scaledHeight = height;
-
-                if (mWidthRatio)
-                    scaledWidth = static_cast<int>(width * mWidthRatio.value());
-                else if (mWidth)
-                    scaledWidth = mWidth.value();
-
-                if (mHeightRatio > 0.f)
-                    scaledHeight = static_cast<int>(height * mHeightRatio.value());
-                else if (mHeight)
-                    scaledHeight = mHeight.value();
-
-                return std::make_tuple(scaledWidth, scaledHeight);
+                const auto dimension = [](int base, const auto& ratio, const auto& absolute) {
+                    if ((ratio && (!std::isfinite(*ratio) || *ratio <= 0)) || (absolute && *absolute <= 0))
+                        throw std::runtime_error("invalid postprocess render-target size");
+                    // Preserve float multiplication/truncation for valid legacy ratios.
+                    const double value = ratio ? static_cast<double>(std::max(1, base) * *ratio)
+                                               : static_cast<double>(absolute.value_or(std::max(1, base)));
+                    if (!std::isfinite(value) || value >= static_cast<double>(std::numeric_limits<int>::max()))
+                        throw std::runtime_error("postprocess render-target size exceeds integer range");
+                    return value < 1 ? 1 : static_cast<int>(value);
+                };
+                return std::make_tuple(dimension(width, mWidthRatio, mWidth), dimension(height, mHeightRatio, mHeight));
             }
         };
 

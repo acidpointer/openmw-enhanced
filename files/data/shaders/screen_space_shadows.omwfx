@@ -312,6 +312,9 @@ fragment shadow_raw(target=RT_ShadowRaw) {
         {
             float sequence = fract(stablePhase + float(i) * 0.61803398875);
             float stepPosition = (float(i) + mix(0.5, sequence, saturate(stability))) / float(SHADOW_STEPS);
+            float distanceWeight = 1.0 - smoothstep(0.05, 0.92, stepPosition);
+            if (distanceWeight <= 0.0)
+                continue;
             float curvedStep = stepPosition * stepPosition;
             float rayDistance = startDistance + maxDistance * curvedStep;
             float raySpan = maxDistance * max(1.0 / float(SHADOW_STEPS), 2.0 * stepPosition / float(SHADOW_STEPS));
@@ -324,10 +327,13 @@ fragment shadow_raw(target=RT_ShadowRaw) {
                 sampleUv, rayView, originWorld, normalWorld, toLightWorld, rayDistance, raySpan, maxDistance,
                 receiverDepth, receiverLinearDepth);
 
-            float distanceWeight = 1.0 - smoothstep(0.05, 0.92, stepPosition);
             float sampleWeight = mix(0.65, 1.35, stepPosition);
             integrated += hit * distanceWeight * sampleWeight;
             strongest = max(strongest, hit * distanceWeight);
+            // Remaining contributions are nonnegative. Use the original final
+            // arithmetic to test saturation, retaining its 64-step normalization.
+            if ((integrated / float(SHADOW_STEPS)) * 8.5 * 1.8 >= 1.0)
+                return lit;
         }
 
         float averageHit = integrated / float(SHADOW_STEPS);

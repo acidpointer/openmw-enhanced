@@ -194,6 +194,12 @@ namespace SceneUtil
                 "screenRes", osg::Vec2f(static_cast<float>(mTextureWidth), static_cast<float>(mTextureHeight))));
 
             setDefaults(camera);
+            // Do not inherit the main camera's normals output into color-only
+            // views. Preserve explicit secondary targets and subclass overrides.
+            if (!camera->getOrCreateStateSet()->getDefinePair("OMW_WRITE_NORMALS"))
+                camera->getOrCreateStateSet()->setDefine(
+                    "OMW_WRITE_NORMALS", camera->getBufferAttachmentMap().count(osg::Camera::COLOR_BUFFER1) ? "1" : "0",
+                    osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
 
             if (camera->getBufferAttachmentMap().count(osg::Camera::COLOR_BUFFER))
                 vdd->mColorTexture = camera->getBufferAttachmentMap()[osg::Camera::COLOR_BUFFER]._texture;

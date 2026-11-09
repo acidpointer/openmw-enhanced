@@ -3,6 +3,20 @@
 #include <algorithm>
 #include <array>
 
+#include <osg/GLExtensions>
+#include <osg/GraphicsContext>
+#include <osg/ValueObject>
+
+#ifndef GL_FRAMEBUFFER_RENDERABLE
+#define GL_FRAMEBUFFER_RENDERABLE 0x8289
+#endif
+#ifndef GL_FRAMEBUFFER_BLEND
+#define GL_FRAMEBUFFER_BLEND 0x828B
+#endif
+#ifndef GL_NUM_SAMPLE_COUNTS
+#define GL_NUM_SAMPLE_COUNTS 0x9380
+#endif
+
 namespace SceneUtil
 {
 
@@ -114,6 +128,82 @@ namespace SceneUtil
 
     namespace Color
     {
+        namespace
+        {
+            constexpr auto NormalFormatKey = "OpenMW Normals Internal Format";
+            constexpr auto NormalSamplesKey = "OpenMW Normals Samples";
+        }
+
+        bool NormalFormatSupport::supports(int samples) const
+        {
+            return mRenderable && mBlendable
+                && (samples <= 1 || std::find(mSamples.begin(), mSamples.end(), samples) != mSamples.end());
+        }
+
+        GLenum selectNormalInternalFormat(const NormalFormatSupport& rgb, const NormalFormatSupport& rgba, int samples)
+        {
+            return !rgb.supports(samples) && rgba.supports(samples) ? GL_RGBA16F : GL_RGB16F;
+        }
+
+        GLenum normalInternalFormat(const osg::GraphicsContext* context, int samples)
+        {
+            unsigned int format = GL_RGB16F;
+            int cachedSamples = 0;
+            if (!context || !context->getUserValue(NormalSamplesKey, cachedSamples) || cachedSamples != samples
+                || !context->getUserValue(NormalFormatKey, format) || (format != GL_RGB16F && format != GL_RGBA16F))
+                return GL_RGB16F;
+            return format;
+        }
+
+        void SelectNormalFormatOperation::operator()(osg::GraphicsContext* context)
+        {
+            if (!context)
+                return;
+            context->setUserValue(NormalFormatKey, unsigned(GL_RGB16F));
+            context->setUserValue(NormalSamplesKey, mSamples);
+            if (!context->valid() || !context->isCurrent() || !context->getState())
+                return;
+            // Viewer::realize makes this context current before running its
+            // realization operations. PostProcessor construction does not.
+            const auto* extensions = context->getState()->get<osg::GLExtensions>();
+            using Query = void(GL_APIENTRY*)(GLenum, GLenum, GLenum, GLsizei, GLint*);
+            Query query = nullptr;
+            const unsigned int id = context->getState()->getContextID();
+            if ((extensions->glDisablei || extensions->glDisableIndexedEXT)
+                && (extensions->glslLanguageVersion >= 4.3f
+                    || osg::isGLExtensionSupported(id, "GL_ARB_internalformat_query2")))
+                osg::setGLExtensionFuncPtr(query, "glGetInternalformativ");
+
+            unsigned int format = GL_RGB16F;
+            if (query)
+            {
+                const auto support = [&](GLenum internalFormat) {
+                    NormalFormatSupport result;
+                    GLint renderable = GL_NONE, blendable = GL_NONE;
+                    query(GL_TEXTURE_2D, internalFormat, GL_FRAMEBUFFER_RENDERABLE, 1, &renderable);
+                    query(GL_TEXTURE_2D, internalFormat, GL_FRAMEBUFFER_BLEND, 1, &blendable);
+                    result.mRenderable = renderable != GL_NONE;
+                    result.mBlendable = blendable != GL_NONE;
+                    if (mSamples > 1 && result.mRenderable && result.mBlendable)
+                    {
+                        GLint count = 0;
+                        query(GL_RENDERBUFFER, internalFormat, GL_NUM_SAMPLE_COUNTS, 1, &count);
+                        std::array<GLint, 64> samples{};
+                        if (count > 0 && count <= static_cast<GLint>(samples.size()))
+                        {
+                            query(GL_RENDERBUFFER, internalFormat, GL_SAMPLES, count, samples.data());
+                            result.mSamples.assign(samples.begin(), samples.begin() + count);
+                        }
+                    }
+                    return result;
+                };
+                const auto rgb = support(GL_RGB16F);
+                const auto rgba = support(GL_RGBA16F);
+                format = selectNormalInternalFormat(rgb, rgba, mSamples);
+            }
+            context->setUserValue(NormalFormatKey, format);
+        }
+
         GLenum sColorInternalFormat;
         GLenum sColorSourceFormat;
         GLenum sColorSourceType;

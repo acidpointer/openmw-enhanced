@@ -59,14 +59,12 @@ namespace MWRender
 
         void getPagedRefnums(const osg::Vec4i& activeGrid, std::vector<ESM::RefNum>& out);
 
-        void setOcclusionCuller(
-            SceneUtil::OcclusionCuller* culler, unsigned int maxTriangles, OcclusionCulling::OcclusionStorage* storage);
+        void setOcclusionCuller(SceneUtil::OcclusionCuller* culler, OcclusionCulling::OcclusionStorage* storage);
 
     private:
         Resource::SceneManager* mSceneManager;
         osg::ref_ptr<SceneUtil::OcclusionCuller> mOcclusionCuller;
         OcclusionCulling::OcclusionStorage* mOcclusionStorage = nullptr;
-        unsigned int mMaxTriangles = 30000;
         bool mActiveGrid;
         bool mDebugBatches;
         float mMergeFactor;

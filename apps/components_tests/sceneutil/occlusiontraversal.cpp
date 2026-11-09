@@ -46,6 +46,17 @@ namespace
         EXPECT_TRUE(visible());
     }
 
+    TEST_F(OcclusionTraversalTest, occluder_roots_respect_small_feature_culling_without_mutating_masks)
+    {
+        mCulling.setCullingMask(osg::CullingSet::SMALL_FEATURE_CULLING);
+        mCulling.getPixelSizeVector().set(0, 0, 0, 1);
+        mCulling.getSmallFeatureCullingPixelSize() = 2;
+        const osg::BoundingSphere small({ 0, 0, 0 }, 1);
+        EXPECT_FALSE(SceneUtil::maySubmitOccluderSphere(small, mCulling));
+        mCulling.getSmallFeatureCullingPixelSize() = .5;
+        EXPECT_TRUE(SceneUtil::maySubmitOccluderSphere(small, mCulling));
+    }
+
     TEST_F(OcclusionTraversalTest, does_not_change_sibling_plane_masks)
     {
         auto& frustum = mCulling.getFrustum();

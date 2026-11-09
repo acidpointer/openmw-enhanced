@@ -141,7 +141,7 @@ add_component_dir (sceneutil
     lightmanager lightboundsindex lightutil positionattitudetransform workqueue pathgridutil waterutil writescene serialize optimizer
     detourdebugdraw navmesh agentpath animblendrules shadow mwshadowtechnique recastmesh shadowsbin osgacontroller rtt
     screencapture depth color riggeometryosgaextension extradata unrefqueue lightcommon clearcolor
-    enhancedsettings occlusiontraversal
+    enhancedsettings occlusiontraversal screencoverage occlusioncallback occlusionorder occlusionplan viewpreparation paginganalysis renderstageinventory occlusionpreparation
     cullsafeboundsvisitor keyframe nodecallback templateref textkeymap userdata glextensions fog texmat material occlusionculling
     )
 
@@ -175,7 +175,7 @@ add_component_dir(esm attr common defs gameformat esmcommon records util luascri
     exteriorcelllocation
     )
 
-add_component_dir(fx pass technique lexer lexertypes parseconstants widgets stateupdater)
+add_component_dir(fx pass technique lexer lexertypes parseconstants widgets stateupdater executionplan shadercompatibility scratchrouting)
 
 add_component_dir(std140 ubo)
 
@@ -374,6 +374,7 @@ add_component_dir (sdlutil
     sdlinputwrapper
     sdlmappings
     sdlvideowrapper
+    startupsignals
     vsyncmode
     )
 

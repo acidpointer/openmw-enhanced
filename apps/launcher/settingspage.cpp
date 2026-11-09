@@ -303,18 +303,22 @@ void Launcher::SettingsPage::setupEnhancedTab()
     mEnhancedOcclusionOccluderMaxRadius = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
         tr("Occluder max radius"), tr("Maximum bounding sphere radius for unpaged occluder candidates."), 9, 500.0,
         100000.0, 1);
-    mEnhancedOcclusionOccluderShrinkFactor = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
-        tr("Occluder shrink factor"), tr("Shrink factor applied to occluder meshes toward their centroid."), 10, 0.1,
-        2.0, 2);
-    mEnhancedOcclusionOccluderMeshResolution = addSpinBoxRow(*occlusionLayout, occlusionGroup,
-        tr("Occluder mesh resolution"), tr("Base grid resolution for vertex clustering of occluder meshes."), 11, 4,
-        32);
-    mEnhancedOcclusionOccluderMaxMeshResolution = addSpinBoxRow(*occlusionLayout, occlusionGroup,
-        tr("Occluder max mesh resolution"), tr("Maximum grid resolution for adaptive scaling of large occluders."), 12,
-        4, 64);
-    mEnhancedOcclusionOccluderInsideThreshold = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
-        tr("Inside threshold"), tr("Scale factor for the AABB used to detect if the camera is inside an occluder."), 13,
-        0.1, 5.0, 2);
+    mEnhancedOcclusionOccluderShrinkFactor
+        = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup, tr("Occluder shrink factor"),
+            tr("Shrink each retained opaque triangle toward its own centroid. Values of 1 or greater preserve it."), 10,
+            0.1, 2.0, 2);
+    mEnhancedOcclusionOccluderMeshResolution
+        = addSpinBoxRow(*occlusionLayout, occlusionGroup, tr("Occluder mesh resolution"),
+            tr("Controls the number of original opaque triangles retained as occluders."), 11, 4, 32);
+    mEnhancedOcclusionOccluderMaxMeshResolution
+        = addSpinBoxRow(*occlusionLayout, occlusionGroup, tr("Occluder max mesh resolution"),
+            tr("Maximum resolution when adapting the triangle budget to large occluders."), 12, 4, 64);
+    mEnhancedOcclusionOccluderInsideThreshold
+        = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup, tr("Inside threshold (legacy)"),
+            tr("Retained for configuration compatibility. Opaque triangle occluders use clipping and remain usable "
+               "from inside their model bounds."),
+            13, 0.1, 5.0, 2);
+    mEnhancedOcclusionOccluderInsideThreshold->setEnabled(false);
     mEnhancedOcclusionOccluderMaxDistance = addDoubleSpinBoxRow(*occlusionLayout, occlusionGroup,
         tr("Occluder max distance"), tr("Maximum distance for rasterizing a building as an occluder."), 14, 1000.0,
         100000.0, 1);

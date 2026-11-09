@@ -1,3 +1,8 @@
+uniform_vec4 enhancedDistortionCoverage {
+    default = vec4(0.0, 0.0, 1.0, 1.0);
+    static = false;
+}
+
 fragment main {
 
     omw_In vec2 omw_TexCoord;
@@ -5,6 +10,13 @@ fragment main {
     void main()
     {
         const float multiplier = 0.14;
+
+        if (any(lessThan(omw_TexCoord, enhancedDistortionCoverage.xy))
+            || any(greaterThan(omw_TexCoord, enhancedDistortionCoverage.zw)))
+        {
+            omw_FragColor = omw_GetLastShader(omw_TexCoord);
+            return;
+        }
 
         vec2 offset = omw_GetDistortion(omw_TexCoord).rg;
         offset *= multiplier;

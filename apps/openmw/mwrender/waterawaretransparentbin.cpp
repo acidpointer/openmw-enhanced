@@ -4,9 +4,11 @@
 
 #include <osg/BoundingBox>
 #include <osg/ClipPlane>
+#include <osg/FrameStamp>
 #include <osg/Plane>
 #include <osg/State>
 #include <osg/StateSet>
+#include <osg/Stats>
 #include <osgUtil/RenderStage>
 #include <osgUtil/StateGraph>
 
@@ -107,6 +109,10 @@ namespace MWRender
 
     void WaterAwareTransparentBin::drawImplementation(osg::RenderInfo& renderInfo, osgUtil::RenderLeaf*& previous)
     {
+        if (isSceneCamera())
+            if (auto* stats = getStage()->getCamera()->getStats(); stats && stats->collectStats("rendering"))
+                stats->setAttribute(renderInfo.getState()->getFrameStamp()->getFrameNumber(),
+                    "Water clipped replay leaves", mWaterLeaves.empty() ? 0 : mStraddlingLeaves.size());
         // Fallback to standard draw order for anything other then the scene camera and when there is no water plane
         if (!isSceneCamera() || mWaterLeaves.empty())
         {

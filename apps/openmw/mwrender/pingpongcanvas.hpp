@@ -13,10 +13,12 @@
 #include <osg/Texture2D>
 #include <osg/buffered_value>
 
+#include <components/fx/executionplan.hpp>
 #include <components/fx/technique.hpp>
 
 #include "distortion.hpp"
 #include "luminancecalculator.hpp"
+#include "postprocessscratch.hpp"
 
 namespace Shader
 {
@@ -29,13 +31,15 @@ namespace MWRender
     {
     public:
         PingPongCanvas(Shader::ShaderManager& shaderManager,
-            const std::shared_ptr<LuminanceCalculator>& luminanceCalculator, DistortionCallback* distortionCallback);
+            const std::shared_ptr<LuminanceCalculator>& luminanceCalculator, DistortionCallback* distortionCallback,
+            PostprocessScratch* scratch);
 
         void drawGeometry(osg::RenderInfo& renderInfo) const;
 
         void drawImplementation(osg::RenderInfo& renderInfo) const override;
 
         void resizeGLObjectBuffers(unsigned int maxSize) override;
+        void releaseGLObjects(osg::State* state = nullptr) const override;
 
         void dirty() { mDirty = true; }
 
@@ -73,6 +77,9 @@ namespace MWRender
         bool mPostprocessing = false;
 
         Fx::DispatchArray mPasses;
+        mutable Fx::ExecutionPlan mExecutionPlan;
+        mutable bool mExecutionPlanDirty = true;
+        mutable std::vector<std::size_t> mFiltered;
         Fx::FlagsType mMask = 0;
 
         osg::ref_ptr<osg::Program> mFallbackProgram;
@@ -102,7 +109,7 @@ namespace MWRender
         mutable osg::ref_ptr<osg::Viewport> mRenderViewport;
         mutable osg::ref_ptr<osg::FrameBufferObject> mMultiviewResolveFramebuffer;
         mutable osg::ref_ptr<osg::FrameBufferObject> mDestinationFBO;
-        mutable std::array<osg::ref_ptr<osg::FrameBufferObject>, 3> mFbos;
+        osg::ref_ptr<PostprocessScratch> mScratch;
         mutable std::shared_ptr<LuminanceCalculator> mLuminanceCalculator;
         mutable osg::buffered_object<osg::State::UniformMap> mEmptyUniformStacks;
     };

@@ -19,6 +19,7 @@
 #include <components/vfs/manager.hpp>
 
 #include "parseconstants.hpp"
+#include "shadercompatibility.hpp"
 
 namespace
 {
@@ -125,56 +126,77 @@ namespace Fx
         {
             std::string source(std::istreambuf_iterator<char>(*mVFS.get(getFileName())), {});
 
-            parse(std::move(source));
+            const auto prepare = [&](std::string text) {
+                clear();
+                parse(std::move(text));
 
-            if (mPassKeys.empty())
-                error("no pass list found, ensure you define one in a 'technique' block");
+                if (mPassKeys.empty())
+                    error("no pass list found, ensure you define one in a 'technique' block");
 
-            int swaps = 0;
+                int swaps = 0;
 
-            for (auto& name : mPassKeys)
+                for (auto& name : mPassKeys)
+                {
+                    auto it = mPassMap.find(name);
+
+                    if (it == mPassMap.end())
+                        error(
+                            std::format("pass '{}' was found in the pass list, but there was no matching 'fragment', "
+                                        "'vertex' or 'compute' block",
+                                name));
+
+                    if (mLastAppliedType != Pass::Type::None && mLastAppliedType != it->second->mType)
+                    {
+                        swaps++;
+                        if (swaps == 2)
+                            Log(Debug::Warning)
+                                << "compute and pixel shaders are being swapped multiple times in shader "
+                                   "chain, this can lead to serious performance drain.";
+                    }
+                    else
+                        mLastAppliedType = it->second->mType;
+
+                    if (Stereo::getMultiview())
+                    {
+                        mGLSLExtensions.insert("GL_OVR_multiview");
+                        mGLSLExtensions.insert("GL_OVR_multiview2");
+                        mGLSLExtensions.insert("GL_EXT_texture_array");
+                    }
+
+                    it->second->compile(*this, mShared);
+
+                    if (!it->second->mTarget.empty())
+                    {
+                        auto rtIt = mRenderTargets.find(it->second->mTarget);
+                        if (rtIt == mRenderTargets.end())
+                            error(std::format("target '{}' not defined", it->second->mTarget));
+                    }
+
+                    mPasses.emplace_back(it->second);
+                }
+
+                if (mPasses.empty())
+                    error("invalid pass list, no passes defined for technique");
+
+                mValid = true;
+            };
+            if (auto optimized = optimizeLegacyShader(
+                    mName, source, mUBO && !Stereo::getMultiview() && mWidth >= 128 && mHeight >= 128))
             {
-                auto it = mPassMap.find(name);
-
-                if (it == mPassMap.end())
-                    error(
-                        std::format("pass '{}' was found in the pass list, but there was no matching 'fragment', "
-                                    "'vertex' or 'compute' block",
-                            name));
-
-                if (mLastAppliedType != Pass::Type::None && mLastAppliedType != it->second->mType)
+                try
                 {
-                    swaps++;
-                    if (swaps == 2)
-                        Log(Debug::Warning) << "compute and pixel shaders are being swapped multiple times in shader "
-                                               "chain, this can lead to serious performance drain.";
+                    prepare(std::move(optimized->mSource));
+                    Log(Debug::Info) << "Postprocess compatibility: " << mFilePath << " (" << optimized->mRevision
+                                     << ")";
                 }
-                else
-                    mLastAppliedType = it->second->mType;
-
-                if (Stereo::getMultiview())
+                catch (const std::runtime_error& error)
                 {
-                    mGLSLExtensions.insert("GL_OVR_multiview");
-                    mGLSLExtensions.insert("GL_OVR_multiview2");
-                    mGLSLExtensions.insert("GL_EXT_texture_array");
+                    Log(Debug::Warning) << "Postprocess compatibility fallback: " << mFilePath << ": " << error.what();
+                    prepare(std::move(source));
                 }
-
-                it->second->compile(*this, mShared);
-
-                if (!it->second->mTarget.empty())
-                {
-                    auto rtIt = mRenderTargets.find(it->second->mTarget);
-                    if (rtIt == mRenderTargets.end())
-                        error(std::format("target '{}' not defined", it->second->mTarget));
-                }
-
-                mPasses.emplace_back(it->second);
             }
-
-            if (mPasses.empty())
-                error("invalid pass list, no passes defined for technique");
-
-            mValid = true;
+            else
+                prepare(std::move(source));
         }
         catch (const std::runtime_error& e)
         {
@@ -192,6 +214,17 @@ namespace Fx
     std::string Technique::getName() const
     {
         return mName;
+    }
+
+    void Technique::setRenderSize(int width, int height)
+    {
+        const bool compactBefore = mWidth >= 128 && mHeight >= 128;
+        mWidth = width;
+        mHeight = height;
+        // The packed-mask guard band must contain every blur/filter footprint.
+        // Very small render surfaces keep the original full-size mask routing.
+        if (mName == "godrays" && compactBefore != (width >= 128 && height >= 128))
+            compile();
     }
 
     bool Technique::setLastModificationTime(std::filesystem::file_time_type timeStamp)
@@ -286,6 +319,7 @@ namespace Fx
         rt.mTarget->setWrap(osg::Texture::WRAP_S, osg::Texture::CLAMP_TO_EDGE);
         rt.mTarget->setWrap(osg::Texture::WRAP_T, osg::Texture::CLAMP_TO_EDGE);
         rt.mTarget->setName(std::string(mBlockName));
+        rt.mTarget->setResizeNonPowerOfTwoHint(false);
 
         while (!isNext<Lexer::Close_bracket>() && !isNext<Lexer::Eof>())
         {
@@ -327,6 +361,7 @@ namespace Fx
             expect<Lexer::SemiColon>();
         }
 
+        rt.mSize.get(mWidth, mHeight); // Validate before this target can reach GL.
         mRenderTargets.emplace(mBlockName, std::move(rt));
     }
 

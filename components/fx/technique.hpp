@@ -40,6 +40,10 @@ namespace Fx
         DispatchNode(const DispatchNode& other, const osg::CopyOp& copyOp = osg::CopyOp::SHALLOW_COPY)
             : mHandle(other.mHandle)
             , mFlags(other.mFlags)
+            , mHDR(other.mHDR)
+            , mNormals(other.mNormals)
+            , mLights(other.mLights)
+            , mInternalDistortion(other.mInternalDistortion)
             , mRootStateSet(other.mRootStateSet)
         {
             mPasses.reserve(other.mPasses.size());
@@ -98,6 +102,11 @@ namespace Fx
         std::shared_ptr<Fx::Technique> mHandle = nullptr;
 
         FlagsType mFlags = 0;
+        // Immutable requirements captured while constructing the dispatch node.
+        bool mHDR = false;
+        bool mNormals = false;
+        bool mLights = false;
+        bool mInternalDistortion = false;
 
         std::vector<SubPass> mPasses;
 
@@ -145,6 +154,7 @@ namespace Fx
             std::string name, int width, int height, bool ubo, bool supportsNormals);
 
         bool compile();
+        void setRenderSize(int width, int height);
 
         std::string getName() const;
 

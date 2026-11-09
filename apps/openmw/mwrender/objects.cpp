@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <components/debug/debuglog.hpp>
 #include <components/resource/scenemanager.hpp>
+#include <components/sceneutil/occlusioncallback.hpp>
 
 namespace MWRender
 {
@@ -45,9 +46,8 @@ namespace MWRender
 
     osg::ref_ptr<CellOcclusionCallback> Objects::makeCellOcclusionCallback() const
     {
-        return new CellOcclusionCallback(mOcclusionCuller, mOccluderMinRadius, mOccluderMaxRadius,
-            mOccluderShrinkFactor, mOccluderMeshResolution, mOccluderMaxMeshResolution, mOccluderInsideThreshold,
-            mOccluderMaxDistance, mEnableStaticOccluders, mMaxTriangles, mOcclusionStorage);
+        return new CellOcclusionCallback(mOcclusionCuller, mOccluderMinRadius, mOccluderMaxRadius, mOccluderMaxDistance,
+            mEnableStaticOccluders, mOcclusionStorage);
     }
 
     void Objects::insertBegin(const MWWorld::Ptr& ptr)
@@ -112,6 +112,13 @@ namespace MWRender
         bool skip = false;
         ptr.getRefData().getBaseNode()->getUserValue("skipOcclusion", skip);
         const bool isStatic = ptr.getType() == ESM::REC_STAT || ptr.getType() == ESM::REC_STAT4;
+        if (mOcclusionCuller && isStatic && !animated && !skip)
+        {
+            // A visible room/building root can contain many hidden drawables.
+            // Reject those independently rather than submitting the whole model.
+            SceneUtil::InstallOcclusionDrawables install(mOcclusionCuller);
+            ptr.getRefData().getBaseNode()->accept(install);
+        }
         if (mOcclusionStorage && mEnableStaticOccluders && isStatic && !animated && !skip && !mesh.empty()
             && radius >= mOccluderMinRadius && radius <= mOccluderMaxRadius)
         {
@@ -123,7 +130,15 @@ namespace MWRender
                     mOccluderMeshResolution, mOccluderMaxMeshResolution);
                 mOcclusionStorage->prepare(std::string(model.value()),
                     mResourceSystem->getSceneManager()->getTemplate(model, false), resolution, mOccluderShrinkFactor);
-                ptr.getRefData().getBaseNode()->setUserValue("staticOccluderEligible", true);
+                osg::ref_ptr<StaticOccluderData> data = new StaticOccluderData;
+                data->mModel = model.value();
+                data->mResolution = resolution;
+                data->mShrink = OcclusionStorage::makeShrinkKey(mOccluderShrinkFactor);
+                data->mVisual = mObjects.at(ptr.mRef)->getObjectRoot();
+                auto* base = ptr.getRefData().getBaseNode();
+                base->getOrCreateUserDataContainer()->addUserObject(data);
+                if (auto* callback = dynamic_cast<CellOcclusionCallback*>(base->getParent(0)->getCullCallback()))
+                    callback->registerOccluder(base, data);
             }
             catch (const std::exception& error)
             {
@@ -268,6 +283,12 @@ namespace MWRender
             objectNode->getParent(0)->removeChild(objectNode);
         cellnode->addChild(objectNode);
 
+        if (auto* data = dynamic_cast<StaticOccluderData*>(objectNode->getUserDataContainer()
+                    ? objectNode->getUserDataContainer()->getUserObject("OpenMW Static Occluder")
+                    : nullptr))
+            if (auto* callback = dynamic_cast<CellOcclusionCallback*>(cellnode->getCullCallback()))
+                callback->registerOccluder(objectNode, data);
+
         PtrAnimationMap::iterator iter = mObjects.find(old.mRef);
         if (iter != mObjects.end())
             iter->second->updatePtr(cur);
@@ -293,8 +314,7 @@ namespace MWRender
 
     void Objects::setOcclusionCuller(SceneUtil::OcclusionCuller* culler, float occluderMinRadius,
         float occluderMaxRadius, float occluderShrinkFactor, int occluderMeshResolution, int occluderMaxMeshResolution,
-        float occluderInsideThreshold, float occluderMaxDistance, bool enableStaticOccluders,
-        unsigned int maxTriangles, OcclusionStorage* storage)
+        float occluderMaxDistance, bool enableStaticOccluders, OcclusionStorage* storage)
     {
         mOcclusionCuller = culler;
         mOccluderMinRadius = occluderMinRadius;
@@ -302,11 +322,12 @@ namespace MWRender
         mOccluderShrinkFactor = occluderShrinkFactor;
         mOccluderMeshResolution = occluderMeshResolution;
         mOccluderMaxMeshResolution = occluderMaxMeshResolution;
-        mOccluderInsideThreshold = occluderInsideThreshold;
         mOccluderMaxDistance = occluderMaxDistance;
         mEnableStaticOccluders = enableStaticOccluders;
-        mMaxTriangles = maxTriangles;
         mOcclusionStorage = storage;
+        for (auto& [cell, node] : mCellSceneNodes)
+            if (auto* callback = dynamic_cast<CellOcclusionCallback*>(node->getCullCallback()))
+                callback->setStorage(storage);
     }
 
 }

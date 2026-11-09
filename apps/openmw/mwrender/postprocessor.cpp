@@ -5,6 +5,7 @@
 #include <chrono>
 #include <thread>
 
+#include <osg/GLExtensions>
 #include <osg/Texture1D>
 #include <osg/Texture2D>
 #include <osg/Texture2DArray>
@@ -145,11 +146,16 @@ namespace MWRender
 
         auto& shaderManager = mRendering.getResourceSystem()->getSceneManager()->getShaderManager();
 
+        // Capabilities are cached while the context is current during realize.
+        // Establish the target format before constructing either frame's FBOs.
+        mNormalInternalFormat = SceneUtil::Color::normalInternalFormat(gc, mSamples);
+
         std::shared_ptr<LuminanceCalculator> luminanceCalculator = std::make_shared<LuminanceCalculator>(shaderManager);
 
+        osg::ref_ptr<PostprocessScratch> scratch = new PostprocessScratch;
         for (auto& canvas : mCanvases)
         {
-            canvas = new PingPongCanvas(shaderManager, luminanceCalculator, mDistortionCallback);
+            canvas = new PingPongCanvas(shaderManager, luminanceCalculator, mDistortionCallback, scratch);
             canvas->setGpuTimingStats(mViewer->getViewerStats());
         }
 
@@ -171,6 +177,7 @@ namespace MWRender
         mTransparentDepthPostPass
             = new TransparentDepthBinCallback(mRendering.getResourceSystem()->getSceneManager()->getShaderManager(),
                 Settings::postProcessing().mTransparentPostpass);
+        mTransparentDepthPostPass->setColorOnlyCompositor(mHUDCamera);
         mOpaqueColorResolve = new OpaqueColorBinCallback;
         osg::ref_ptr<osgUtil::RenderBin> opaqueResolveBin
             = new osgUtil::RenderBin(osgUtil::RenderBin::SORT_FRONT_TO_BACK);
@@ -203,7 +210,6 @@ namespace MWRender
 
         auto defines = shaderManager.getGlobalDefines();
         defines["distorionRTRatio"] = std::to_string(DistortionRatio);
-        shaderManager.setGlobalDefines(defines);
 
         createObjectsForFrame(0);
         createObjectsForFrame(1);
@@ -228,6 +234,12 @@ namespace MWRender
             mNormalsSupported = true;
         else
             Log(Debug::Error) << "'glDisablei' unsupported, pass normals will not be available to shaders.";
+
+        // Output variants are scoped to cameras. Keep the global capability
+        // constant rather than rewriting every scene shader on each toggle.
+        defines["disableNormals"] = mNormalsSupported ? "0" : "1";
+        shaderManager.setGlobalDefines(defines);
+        mViewer->getCamera()->getOrCreateStateSet()->setDefine("OMW_WRITE_NORMALS", "0");
 
         mGLSLVersion = static_cast<int>(ext->glslLanguageVersion * 100);
         mUBO = ext->isUniformBufferObjectSupported && mGLSLVersion >= 330;
@@ -264,18 +276,26 @@ namespace MWRender
 
     void PostProcessor::resize()
     {
-        mHUDCamera->resize(mWidth, mHeight);
         mViewer->getCamera()->resize(mWidth, mHeight);
         if (Stereo::getStereo())
             Stereo::Manager::instance().screenResolutionChanged();
+        mRendering.updateProjectionMatrix();
+        resizeRenderTargets();
+    }
 
+    void PostProcessor::resizeRenderTargets()
+    {
+        mHUDCamera->resize(mWidth, mHeight);
         size_t frameId = frame() % 2;
 
         createObjectsForFrame(frameId);
 
-        mRendering.updateProjectionMatrix();
         mRendering.setScreenRes(renderWidth(), renderHeight());
 
+        for (const auto& technique : mTemplates)
+            technique->setRenderSize(renderWidth(), renderHeight());
+        for (const auto& technique : mQueuedTemplates)
+            technique->setRenderSize(renderWidth(), renderHeight());
         dirtyTechniques(true);
 
         mDirty = true;
@@ -334,6 +354,13 @@ namespace MWRender
 
         const Camera* activeCamera = mRendering.getCamera();
         const bool enhancedFirstPerson = activeCamera && activeCamera->getMode() == Camera::Mode::FirstPerson;
+        const auto mask = Fx::Technique::getEnvironmentMask(mUnderwater, mExteriorFlag);
+        const auto& passes = mCanvases[frameId]->getPasses();
+        const bool effectsNeedDepth = mUsePostProcessing
+            && std::any_of(passes.begin(), passes.end(),
+                [mask](const auto& pass) { return !(pass.mFlags & mask) && !pass.mPasses.empty(); });
+        mWorldDepthNeeded[frameId] = enhancedFirstPerson && effectsNeedDepth;
+        mTransparentDepthPostPass->setEffectConsumer(frameId, effectsNeedDepth);
 
         mCanvases[frameId]->setTextureScene(getTexture(Tex_Scene, frameId));
         mCanvases[frameId]->setTextureDepth(getTexture(Tex_OpaqueDepth, frameId));
@@ -419,7 +446,7 @@ namespace MWRender
         mReload = false;
 
         loadChain();
-        resize();
+        resizeRenderTargets();
     }
 
     void PostProcessor::update(size_t frameId)
@@ -455,14 +482,8 @@ namespace MWRender
 
             mViewer->stopThreading();
 
-            if (mNormalsSupported)
-            {
-                auto& shaderManager
-                    = MWBase::Environment::get().getResourceSystem()->getSceneManager()->getShaderManager();
-                auto defines = shaderManager.getGlobalDefines();
-                defines["disableNormals"] = mNormals ? "0" : "1";
-                shaderManager.setGlobalDefines(defines);
-            }
+            mViewer->getCamera()->getOrCreateStateSet()->setDefine(
+                "OMW_WRITE_NORMALS", mNormals && mNormalsSupported ? "1" : "0");
 
             mRendering.getLightRoot()->setCollectPPLights(mPassLights);
             mStateUpdater->bindPointLights(mPassLights ? mRendering.getLightRoot()->getPPLightsBuffer() : nullptr);
@@ -479,27 +500,18 @@ namespace MWRender
 
     void PostProcessor::updateBufferRequirements()
     {
-        // A technique kept in the chain may be disabled in this environment. Its
-        // inactive passes must not force normals output, light collection, or HDR
-        // luminance calculation. Re-evaluate on transitions and on the global toggle.
-        mHDR = false;
-        mNormals = false;
-        mPassLights = false;
-
-        if (!mUsePostProcessing)
-            return;
-
-        const Fx::FlagsType mask = Fx::Technique::getEnvironmentMask(mUnderwater, mExteriorFlag);
-
-        for (const auto& node : mTemplateData)
+        const auto mask = Fx::Technique::getEnvironmentMask(mUnderwater, mExteriorFlag);
+        if (mExecutionPlanDirty || mExecutionPlan.mMask != mask || mExecutionPlan.mEnabled != mUsePostProcessing)
         {
-            if (node.mFlags & mask)
-                continue;
-
-            mHDR |= node.mHandle->getHDR();
-            mNormals |= node.mHandle->getNormals();
-            mPassLights |= node.mHandle->getLights();
+            mExecutionPlan = Fx::makeExecutionPlan(mTemplateData, mask, mUsePostProcessing);
+            mExecutionPlanDirty = false;
+            Log(Debug::Info) << "Postprocess effective candidates: " << mExecutionPlan.mNodes.size()
+                             << " enabled=" << mUsePostProcessing << " hdr=" << mExecutionPlan.mHDR
+                             << " normals=" << mExecutionPlan.mNormals << " lights=" << mExecutionPlan.mLights;
         }
+        mHDR = mExecutionPlan.mHDR;
+        mNormals = mExecutionPlan.mNormals;
+        mPassLights = mExecutionPlan.mLights;
     }
 
     void PostProcessor::createObjectsForFrame(size_t frameId)
@@ -522,9 +534,9 @@ namespace MWRender
             {
                 case Tex_Normal:
                     // Preserve half-float precision for additive terrain-normal blending.
-                    sourceFormat = GL_RGB;
+                    sourceFormat = mNormalInternalFormat == GL_RGB16F ? GL_RGB : GL_RGBA;
                     sourceType = GL_HALF_FLOAT;
-                    internalFormat = GL_RGB16F;
+                    internalFormat = mNormalInternalFormat;
                     break;
                 case Tex_Distortion:
                     sourceFormat = GL_RGB;
@@ -658,6 +670,7 @@ namespace MWRender
         mDirtyFrameId = !frameId;
 
         mTemplateData = {};
+        mExecutionPlanDirty = true;
 
         bool sunglare = true;
         mHDR = false;
@@ -681,6 +694,10 @@ namespace MWRender
             Fx::DispatchNode node;
 
             node.mFlags = technique->getFlags();
+            node.mHDR = technique->getHDR();
+            node.mNormals = technique->getNormals();
+            node.mLights = technique->getLights();
+            node.mInternalDistortion = technique->getInternal() && technique->getName() == "internal_distortion";
 
             if (technique->getHDR())
                 mHDR = true;

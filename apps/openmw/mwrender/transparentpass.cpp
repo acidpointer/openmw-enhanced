@@ -7,6 +7,7 @@
 #include <osg/AlphaFunc>
 #include <osg/BlendFunc>
 #include <osg/ColorMask>
+#include <osg/Stats>
 #include <osg/Texture2D>
 #include <osg/Texture2DArray>
 
@@ -17,10 +18,12 @@
 
 #include <components/sceneutil/depth.hpp>
 #include <components/sceneutil/material.hpp>
+#include <components/sceneutil/renderstageinventory.hpp>
 #include <components/shader/shadermanager.hpp>
 #include <components/stereo/multiview.hpp>
 #include <components/stereo/stereomanager.hpp>
 
+#include "renderbin.hpp"
 #include "vismask.hpp"
 
 namespace MWRender
@@ -88,6 +91,10 @@ namespace MWRender
 
         bool validFbo = false;
         unsigned int frameId = state.getFrameStamp()->getFrameNumber() % 2;
+        auto* stats = bin->getStage()->getCamera() ? bin->getStage()->getCamera()->getStats() : nullptr;
+        const bool inventory = stats && stats->collectStats("rendering");
+        if (inventory)
+            stats->setAttribute(state.getFrameStamp()->getFrameNumber(), "Transparent depth replay leaves", 0);
 
         const auto& fbo = mFbo[frameId];
         const auto& msaaFbo = mMsaaFbo[frameId];
@@ -115,6 +122,16 @@ namespace MWRender
         if (!mPostPass)
             return;
 
+        // Water already consumed opaque depth during the color pass above.
+        // Keep replay for effects and any later scene geometry (hands, distortion
+        // or custom bins), which may sample it. Never gate just on the PP switch.
+        if (!mEffectConsumer[frameId] && bin->getParent() == bin->getStage()
+            && bin->getBinNum() == RenderBin_DepthSorted
+            && !SceneUtil::hasLaterSubmissions(
+                *bin->getStage(), RenderBin_DepthSorted, { RenderBin_OcclusionQuery, RenderBin_SunGlare })
+            && !SceneUtil::hasUnknownCameraConsumers(*bin->getStage(), mColorOnlyCompositor.get()))
+            return;
+
         const osg::Drawable* waterDrawable = mWater ? mWater->getDrawable() : nullptr;
         const auto shouldReplay = [waterDrawable](osgUtil::RenderLeaf* leaf) {
             return shouldReplayTransparentLeaf(leaf) && leaf->_drawable.get() != waterDrawable;
@@ -134,6 +151,7 @@ namespace MWRender
         unsigned int insertStateSetPosition = state.getStateSetStackSize() - numToPop;
 
         state.insertStateSet(insertStateSetPosition, mStateSet);
+        std::size_t replayed = 0;
         for (auto rit = first; rit != leaves.end(); ++rit)
         {
             osgUtil::RenderLeaf* rl = *rit;
@@ -142,9 +160,12 @@ namespace MWRender
                 continue;
 
             rl->render(renderInfo, previous);
+            ++replayed;
             previous = rl;
         }
         state.removeStateSet(insertStateSetPosition);
+        if (inventory)
+            stats->setAttribute(state.getFrameStamp()->getFrameNumber(), "Transparent depth replay leaves", replayed);
 
         msaaFbo ? msaaFbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER)
                 : fbo->apply(state, osg::FrameBufferObject::DRAW_FRAMEBUFFER);

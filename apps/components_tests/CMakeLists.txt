@@ -75,6 +75,7 @@ file(GLOB UNITTEST_SRC_FILES
 
     fx/lexer.cpp
     fx/technique.cpp
+    fx/renderplan.cpp
 
     esm3/readerscache.cpp
     esm3/testsaveload.cpp
@@ -94,11 +95,20 @@ file(GLOB UNITTEST_SRC_FILES
     vfs/testpathutil.cpp
 
     sceneutil/osgacontroller.cpp
+    sceneutil/color.cpp
     sceneutil/lightmanager.cpp
     sceneutil/userdata.cpp
     sceneutil/occlusionbudget.cpp
     sceneutil/occlusionquery.cpp
+    sceneutil/occlusiondispatch.cpp
+    # Exercise the production preparation/visibility callbacks without linking the game executable.
+    ../openmw/mwrender/occlusionculling.cpp
+    sceneutil/occlusionplan.cpp
+    sceneutil/paginganalysis.cpp
     sceneutil/occlusiontraversal.cpp
+    sceneutil/screencoverage.cpp
+
+    sdlutil/startupsignals.cpp
 
     terrain/terrainoccluder.cpp
 

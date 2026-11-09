@@ -60,6 +60,7 @@ namespace Terrain
         if (mCacheValid && cellPos == mCachedCellPos && radiusCells == mCachedRadius)
             return;
 
+        ++mRevision;
         outPositions.clear();
         outIndices.clear();
 

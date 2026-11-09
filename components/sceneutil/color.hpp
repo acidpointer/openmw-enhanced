@@ -2,6 +2,7 @@
 #define OPENMW_COMPONENTS_SCENEUTIL_COLOR_H
 
 #include <osg/GraphicsThread>
+#include <vector>
 
 namespace SceneUtil
 {
@@ -15,6 +16,33 @@ namespace SceneUtil
         GLenum colorSourceFormat();
         GLenum colorSourceType();
         GLenum colorInternalFormat();
+
+        struct NormalFormatSupport
+        {
+            bool mRenderable = false;
+            bool mBlendable = false;
+            std::vector<int> mSamples;
+            bool supports(int samples) const;
+        };
+
+        GLenum selectNormalInternalFormat(const NormalFormatSupport& rgb, const NormalFormatSupport& rgba, int samples);
+        // Reads CPU metadata only. A missing or mismatched realization keeps
+        // the legacy RGB16F format; never issue GL calls from a constructor.
+        GLenum normalInternalFormat(const osg::GraphicsContext* context, int samples);
+
+        class SelectNormalFormatOperation final : public osg::GraphicsOperation
+        {
+        public:
+            explicit SelectNormalFormatOperation(int samples)
+                : GraphicsOperation("SelectNormalFormatOperation", false)
+                , mSamples(samples)
+            {
+            }
+            void operator()(osg::GraphicsContext* context) override;
+
+        private:
+            int mSamples;
+        };
 
         class SelectColorFormatOperation final : public osg::GraphicsOperation
         {

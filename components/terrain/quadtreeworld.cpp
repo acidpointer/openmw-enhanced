@@ -13,6 +13,7 @@
 #include <components/resource/resourcesystem.hpp>
 #include <components/sceneutil/material.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
+#include <components/sceneutil/viewpreparation.hpp>
 
 #include "chunkmanager.hpp"
 #include "compositemaprenderer.hpp"
@@ -474,10 +475,14 @@ namespace Terrain
     void QuadTreeWorld::accept(osg::NodeVisitor& nv)
     {
         bool isCullVisitor = nv.getVisitorType() == osg::NodeVisitor::CULL_VISITOR;
-        if (!isCullVisitor && nv.getVisitorType() != osg::NodeVisitor::INTERSECTION_VISITOR)
+        auto* preparation = dynamic_cast<SceneUtil::ViewPreparationVisitor*>(&nv);
+        if (!isCullVisitor && !preparation && nv.getVisitorType() != osg::NodeVisitor::INTERSECTION_VISITOR)
             return;
 
-        osg::Object* viewer = isCullVisitor ? static_cast<osgUtil::CullVisitor*>(&nv)->getCurrentCamera() : nullptr;
+        auto* cv = preparation ? &preparation->cullVisitor()
+            : isCullVisitor    ? static_cast<osgUtil::CullVisitor*>(&nv)
+                               : nullptr;
+        osg::Object* viewer = cv ? cv->getCurrentCamera() : nullptr;
         bool needsUpdate = true;
         osg::Vec3f viewPoint = viewer ? nv.getViewPoint() : nv.getEyePoint();
         ViewData* vd = mViewDataMap->getViewData(viewer, viewPoint, mActiveGrid, needsUpdate);
@@ -495,8 +500,12 @@ namespace Terrain
         {
             ViewDataEntry& entry = vd->getEntry(i);
             loadRenderingNode(entry, vd, cellWorldSize, mActiveGrid, false);
-            entry.mRenderingNode->accept(nv);
         }
+
+        // All selected chunks exist before metadata preparation or submission.
+        // A preparation visitor never invokes cull callbacks or draws geometry.
+        for (unsigned int i = 0; i < vd->getNumEntries(); ++i)
+            vd->getEntry(i).mRenderingNode->accept(nv);
 
         if (mHeightCullCallback && isCullVisitor)
             updateWaterCullingView(mHeightCullCallback, vd, static_cast<osgUtil::CullVisitor*>(&nv),

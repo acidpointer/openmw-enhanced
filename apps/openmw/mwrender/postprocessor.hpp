@@ -16,6 +16,7 @@
 #include <osgViewer/Viewer>
 
 #include <components/debug/debuglog.hpp>
+#include <components/fx/executionplan.hpp>
 #include <components/fx/stateupdater.hpp>
 #include <components/fx/technique.hpp>
 #include <components/misc/strings/algorithm.hpp>
@@ -138,6 +139,8 @@ namespace MWRender
 
         const auto& getTechniqueFiles() const { return mTechniqueFiles; }
 
+        // Real window resize. Reloading effects refreshes targets independently
+        // and must not resize the scene camera or rebuild its projection.
         void resize();
 
         Status enableTechnique(std::shared_ptr<Fx::Technique> technique, std::optional<int> location = std::nullopt);
@@ -187,6 +190,9 @@ namespace MWRender
         TechniqueList getChain();
 
         bool isEnabled() const { return mUsePostProcessing; }
+        // Cull-time snapshots: the draw thread may still be rendering the
+        // previous frame while update changes the effective effect plan.
+        bool needsWorldDepth(std::size_t frameId) const { return mWorldDepthNeeded[frameId]; }
 
         void disable();
 
@@ -216,6 +222,7 @@ namespace MWRender
         size_t frame() const { return mViewer->getFrameStamp()->getFrameNumber(); }
 
         void createObjectsForFrame(size_t frameId);
+        void resizeRenderTargets();
 
         void dirtyTechniques(bool dirtyAttachments = false);
 
@@ -263,7 +270,9 @@ namespace MWRender
         bool mPrevNormals = false;
         bool mExteriorFlag = false;
         bool mNormalsSupported = false;
+        GLint mNormalInternalFormat = GL_RGB16F;
         bool mPrevPassLights = false;
+        std::array<bool, 2> mWorldDepthNeeded{};
 
         int mGLSLVersion;
         int mWidth;
@@ -278,6 +287,8 @@ namespace MWRender
         osg::ref_ptr<DistortionCallback> mDistortionCallback;
 
         Fx::DispatchArray mTemplateData;
+        Fx::ExecutionPlan mExecutionPlan;
+        bool mExecutionPlanDirty = true;
     };
 }
 

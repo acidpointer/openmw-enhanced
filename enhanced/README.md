@@ -4,6 +4,44 @@ This directory contains fork-owned infrastructure. The goal is to keep upstream
 OpenMW easy to update while still letting developers work with normal source
 files and Git branches.
 
+## Startup regression audit (2026-11-09)
+
+The rendering changes remain applied. The audit found an unsafe new startup
+path: `PostProcessor` queried `glGetInternalformativ` directly from its
+constructor. That constructor does not acquire the graphics context, whereas
+OSG's [realization code](https://github.com/openscenegraph/OpenSceneGraph/blob/OpenSceneGraph-3.6/src/osgViewer/Viewer.cpp)
+explicitly makes a context current for realization operations, releases it,
+and configures rendering threads before returning. A cached context ID or
+extension function pointer does not establish ownership of a current context.
+
+The normal-format probe now runs as a realization operation. It publishes the
+result on that specific context, keyed by the requested MSAA count. The
+postprocessor reads only this CPU metadata, before constructing either frame's
+textures/FBOs. Missing or mismatched metadata keeps the legacy RGB16F format.
+The RGBA16F compatibility fallback and all rendering optimizations are retained.
+
+The inability to terminate ordinary startup hangs has a separate established
+mechanism: [SDL's SIGINT/SIGTERM handlers](https://github.com/libsdl-org/SDL/blob/SDL2/src/events/SDL_quit.c)
+defer termination until event pumping. Bootstrap can block before the event
+loop starts. During `prepareEngine`, a scoped guard restores default termination
+for those two signals, retaining inherited ignores. On POSIX it preserves and
+restores the complete original actions, including masks and flags. Normal SDL
+event handling resumes after initialization. Fatal-signal crash-reporting
+handlers and the separate exit-crash fixes are unchanged.
+
+The available failed-run log ends during OpenAL initialization, before content
+loading and postprocessor construction. Its final line and the later PulseAudio
+stream timeout do not identify the blocked instruction. Consequently, the
+context-ownership defect is confirmed in source, but attributing that particular
+hang to it is not established. These fixes must not be represented as runtime
+proof that the complete startup regression is resolved.
+
+Regression sources cover normal-format/MSAA selection, context-local metadata
+reads without GL operations, and startup signal restoration, inherited ignores,
+exception paths, and preservation of fatal handlers/POSIX masks. Verification
+here is C++ frontend/static checks only; no build, test executable, game, or GPU
+run was performed, in accordance with `AGENTS.md`.
+
 ## Source Layout
 
 This repository is the actual OpenMW fork. Upstream OpenMW source lives at the
@@ -496,11 +534,10 @@ object occlusion solely from switching the toggle on.
 
 ## Rendering optimization implementation plan
 
-Status: proposed work, based on the static audit above. Existing uncommitted
-rendering changes are the starting point and still require runtime validation;
-their presence does not establish that the FPS regression is fixed. Each work
-package should be independently reviewable. Packaging, release automation,
-crash handling, and the separate exit-crash work remain outside this plan.
+Status: the implementation below is now present, with terrain batching gated
+pending image validation. Static validation passes; FPS and GPU image results
+remain unmeasured. Packaging, release automation, crash handling, and the
+separate exit-crash work remain outside this change.
 
 Preserve effect selection, user configuration/data precedence, effect settings,
 sample sequences, normal-map detail, resolution, and default quality. A faster
@@ -678,6 +715,367 @@ Separate read/write targets remain the default: the
 [OpenGL texture-barrier specification](https://registry.khronos.org/OpenGL/extensions/ARB/ARB_texture_barrier.txt)
 places specific restrictions on framebuffer feedback, and barriers are not a
 general license to run neighborhood filters in place.
+
+## Implemented rendering changes and verification
+
+The renderer and canvas now use a shared `Fx::ExecutionPlan` implementation.
+Dispatch nodes capture immutable requirements at construction; filtered lists
+and requirements are rebuilt on chain/environment/toggle changes rather than
+allocating and consulting mutable technique requirements on every draw.
+Current-frame distortion eligibility remains a draw-time refinement. Effective
+candidate counts and resource requirements are logged when the plan changes.
+
+`PostprocessScratch` shares up to three transient scene images per GL context
+between alternating canvases, rather than keeping independent sets of three.
+`ScratchRouting` explicitly retains last-shader and last-pass inputs while
+selecting a different output slot. Descriptor changes invalidate scratch;
+chain reordering alone does not. Named and temporal targets remain separate.
+Allocated images are initialized before use, and context resize/release hooks
+are forwarded to the pool. The pool retains its bounded allocation for reuse.
+
+Scene shaders select normals output through the camera-scoped
+`OMW_WRITE_NORMALS` define. Ordinary RTT cameras default to disabling it, with
+an explicit subclass opt-in for a normal target. Normal-requirement changes no
+longer regenerate every scene shader globally. RGB16F stays the default; cached
+context-realization capability checks can select RGBA16F when RGB16F lacks required
+rendering/blending/MSAA support and RGBA16F provides it. This is a precision-
+preserving compatibility fallback, not an assumed speed advantage. Query
+semantics follow the
+[ARB_internalformat_query2 specification](https://registry.khronos.org/OpenGL/extensions/ARB/ARB_internalformat_query2.txt).
+
+The owned shadow shader omits zero-weight ray steps and exits once the existing
+result is guaranteed saturated, retaining the original sequence and denominator.
+The known-source compatibility helper applies the god-rays and DOF changes
+described in the plan. It also initializes the DOF circle of confusion that was
+otherwise read uninitialized when out-of-focus blur was disabled. Revisions,
+source fingerprints, and normalization are recorded in
+`enhanced/patches/catalog/shader-compatibility.toml`. Unknown/edited sources are
+untouched; a metadata/parse failure falls back to the original source. Runtime
+driver compilation and image equivalence have not been verified. The existing
+saved god-rays setting is N=50, not its default N=20; it is preserved, and can
+submit up to 259.2 million ray iterations/frame at 2880×1800 before rejection.
+
+God-rays compact masks use the same packed pixel grid and 0.55 guard band in R8,
+and keep the ray and sun-disc stages at the original size. Tiny surfaces,
+non-UBO contexts, and multiview keep the old mask layout. Resize across the tiny-
+surface boundary recompiles the layout. The two mask images occupy about
+2.99 MiB at 2880×1800. These explicit images are additional to the shared scene
+pool, so their 36.56 MiB reduction relative to two old destinations must not be
+added to the pool's 59.33 MiB saving as an independent allocation saving.
+
+Distortion coverage uses conservative projected drawable bounds with padding.
+Dynamic/uncertain bounds, child bins, unsorted state graphs, and stereo use the
+full-screen fallback. Outside known coverage, the internal effect writes the
+original scene sample without further distortion fetches. Every output pixel
+is still written; there is no scissor-only stale-output path or visibility wait.
+
+Terrain has an experimental two-layer batch path for adjacent ordinary diffuse
+layers. Normal-mapped, specular, parallax, ESM4, composite, and sampler-budget
+incompatible cases retain their original passes. The shader preserves weighted
+color/normal sums and squared-alpha accumulation. It stays disabled by default
+because per-layer framebuffer rounding needs automated GPU image comparisons.
+The explicit experimental setting is `[Terrain] batch texture layers = true` in
+`openmw-enhanced.cfg`; no user setting is changed automatically.
+
+Static scene validation also exposed and fixed a duplicate `viewNormal`
+declaration in the unlit BS shader with soft particles and normals both enabled.
+Derived render-target sizes are now at least one pixel, invalid/overflowing
+sizes are rejected, and explicit targets keep non-power-of-two dimensions.
+
+Verification performed:
+
+- C++20 syntax checks pass for all changed C++ implementations and new test
+  sources. Formatting and whitespace checks pass for the changed code.
+- The reusable `python3 enhanced/scripts/check-rendering-shaders.py` checks the
+  owned effect shaders and representative scene-fragment feature combinations.
+  Supply `--godrays <original-godrays.omwfx> --depth-of-field <original-depth_of_field.omwfx>`
+  to also validate the reviewed compatibility revisions. That mode uses C++20
+  constant evaluation of the actual compatibility implementation to verify the
+  generated source fingerprints before validating GLSL. It requires GCC and
+  `glslangValidator`, creates no executable, and does not launch the engine.
+- With the reviewed mod sources, 276 effect-stage variants and 52 scene-fragment
+  variants pass static GLSL checks, covering constants/uniforms, reverse-Z,
+  normals, supported effect multiview syntax, and the gated terrain batches.
+  The legacy EXT_gpu_shader4 feature bodies are additionally checked as GLSL
+  330 core-language features because this validator lacks the extension.
+- New component regressions cover environment filtering, empty/disabled plans,
+  live scratch input exclusion, context isolation, descriptor invalidation,
+  source passthrough, real FX parsing of an R8 target, dimension edge cases,
+  terrain eligibility, and projected coverage fallbacks. Test binaries were not
+  built or executed, as required by `AGENTS.md`.
+
+Engine builds, automated GPU image comparisons, MSAA/stereo driver checks, and
+performance measurements remain pending. No new user replay was requested.
+
+## Occlusion traversal audit and changes
+
+The November audit found missing rejection paths, independently of the remaining
+post-processing slowdown. The latest available log confirms the earlier FX
+compatibility and execution-plan changes were loaded; their presence does not
+establish an FPS benefit. No new timing capture was requested.
+
+- The adaptive policy previously disabled both static occluder construction and
+  object visibility queries for 120 frames after two low-benefit samples. With
+  no terrain indoors, this could remove virtually all useful occlusion. It now
+  reduces the static preparation/raster budget while keeping fresh occluders and
+  visibility tests active. Explicit user enable/disable settings still apply.
+- Large cell objects were traversed before static depth was complete and were
+  exempt from the second visibility pass. All eligible object sizes now wait
+  until the cell's occluders are rasterized, then test before descending into
+  lighting callbacks, skeleton traversal, skinning, and render submission.
+- A visible paged chunk previously admitted all its drawables, even those hidden
+  by buildings. Paged models and ordinary static model instances now receive
+  drawable rejection after geometry merging. Merged batches remain intact;
+  their bounds, rather than every constituent triangle, determine visibility.
+  Callback-bearing drawable copies own their user data and retain the immutable
+  source arrays' lifetime without modifying shared resource templates.
+- Groundcover chunks now test their conservative animated/instanced bounds
+  before building per-object light lists or submitting grass.
+- Main-camera cell traversal now keeps the terrain/paging phase first, then
+  visits cells near to far. Update traversal and other cameras keep graph order.
+- Camera-containing and near-plane-crossing model bounds were rejected during
+  occluder selection. Opaque wall triangles remain useful from inside a room.
+  Candidate projection now permits those bounds with conservative importance;
+  rasterization still clips the original triangle subset against all MOC clip
+  planes. Visibility queries retain their near-plane fail-open behavior. The
+  former inside-threshold setting is retained as a disabled legacy launcher
+  field. Existing distance, radius, screen-size, time, and triangle limits still
+  constrain occluder selection.
+
+The drawable callback uses OSG's boolean `Drawable::CullCallback` contract. A
+generic node callback on a drawable cannot suppress the render leaf: OSG calls
+it and then continues submission, as shown in
+[CullVisitor::apply(Drawable&)](https://github.com/openscenegraph/OpenSceneGraph/blob/master/src/osgUtil/CullVisitor.cpp).
+Clipping and conservative depth semantics follow the vendored
+[MaskedOcclusionCulling API](https://github.com/GameTechDev/MaskedOcclusionCulling/blob/master/MaskedOcclusionCulling.h).
+Uncertain bounds, explicit exclusions, disabled culling, absolute transforms,
+and unrelated cameras remain visible. Hidden light origins are not removed
+from update-time light collection: they can illuminate visible surfaces.
+Gameplay, AI, and animation-event simulation continue independently of rendering.
+
+New regression sources inspect actual OSG render leaves and nested callback
+execution, including hidden versus visible drawables, transformed bounds,
+frustum misses, callback cloning, shared-template ownership, camera isolation,
+cell order, adaptive budgets, self-occlusion, and camera-containing occluders.
+Renderer implementations and these test sources pass C++20 syntax checks.
+Tests and the engine have not been built or executed under the repository's
+agent rules; FPS improvement and visual correctness remain unverified.
+
+## Drawable-count regression: research and implementation plan
+
+The latest user comparison is the same view with post-processing toggled:
+approximately 1,400 fast drawables at 100–110 FPS with it off, versus 6,000 at
+56 FPS with it on. This is roughly 4.3 times the counted geometry entries and
+an increase from 9.1–10.0 ms to 17.9 ms per frame. It is the primary regression
+to explain. It does not by itself establish which thread or GPU stage dominates.
+
+OSG's [RenderBin statistics implementation](https://github.com/openscenegraph/OpenSceneGraph/blob/OpenSceneGraph-3.6/src/osgUtil/RenderBin.cpp)
+counts geometry render leaves; it does not report unique world objects or exact
+OpenGL draw calls. [RenderStage statistics](https://github.com/openscenegraph/OpenSceneGraph/blob/OpenSceneGraph-3.6/src/osgUtil/RenderStage.cpp)
+also include dependent pre/post camera stages. Conversely, manually replaying a
+render leaf inside a draw callback does not create another leaf for this count.
+Both counted geometry and extra draw-time replays therefore need attribution.
+
+### Findings and confidence before implementation
+
+| Finding | Source | Assessment |
+| --- | --- | --- |
+| Main and terrain-only software depth are cleared every frame; candidate collection and rasterization share wall-clock budgets. Adaptive throttling still reduces that budget. | `OcclusionCuller::beginFrame`, budget predicates, `SceneOcclusionCallback` | Confirmed timing-dependent coverage; a candidate for the toggle regression, not a proven explanation. |
+| Paged chunks rasterize their own occluders and immediately traverse their drawables. Later chunks/cells have not contributed their walls yet. Near-to-far ordering of cells does not fix ordering inside the paging phase. | `PagedOccluderCallback`, `CellOcclusionCallback`, `QuadTreeWorld::accept` | Confirmed incomplete coverage at submission time. |
+| The paging analyser calls `traverse(child)` for selected Switch/LOD/Sequence children, bypassing dispatch on the child itself. Direct geometry children can be missed. It also fails to restore inherited material state across siblings and ignores a geometry's own StateSet when counting materials. | `ObjectPaging::AnalyzeVisitor` | Confirmed inaccurate batching estimates; independent of the PP toggle. |
+| The compositor has one world-root child and two alternating fullscreen canvases, one active per frame. Ordinary FX passes draw through the canvas rather than attaching another world scene. | `PostProcessor` construction/update/traverse, `PingPongCanvas::drawImplementation` | No direct world-duplication mechanism identified here. Preserve and test this invariant. |
+| The transparent depth replay is configured independently of runtime PP enablement, and reflection cameras use separate views without main-view MOC. | `TransparentDepthBinCallback`, `Reflection`, `SceneOcclusionCallback` | Potential additional cost/coverage gaps; neither alone proves the reported toggle-dependent count increase. |
+
+The earlier culling fixes remain useful foundations. They do not establish that
+the regression is fixed, and a larger architectural change must not be described
+as the measured root cause without a reproducing regression test.
+
+### Primary change: prepare visibility before submitting world geometry
+
+1. **Publish immutable ready occluders.** Maintain placement records for eligible
+   nonpaged objects and paged chunks, containing stable instance identity,
+   immutable mesh handles, conservative bounds, transform, masks, and revision.
+   Register/unregister on insertion, replacement, disable/enable, movement,
+   cell changes, and paging revision changes. Resolve worker completion outside
+   the inner per-object cull loop. Avoid repeated model-path construction,
+   ready-cache locking, and mesh lookups for unchanged placements. Missing or
+   invalid data stays visible. Do not retain live scene instances in build jobs.
+
+2. **Separate view preparation from drawing.** Split `QuadTreeWorld::accept`'s
+   selected-entry preparation from its `entry.mRenderingNode->accept` loop.
+   Use the existing `ViewData` selection and world-update revision to expose
+   only the chunks selected for this view, including current masks, LOD, active
+   grid, disabled references, and paging replacements. Combine their ready
+   occluders with eligible cell objects. Rasterize terrain and a globally ranked
+   static set before accepting the first world drawable. This is CPU software
+   depth preparation; it must not issue another GL world draw or run a second
+   cull traversal that performs skinning, lighting, or leaf submission. Keep
+   intersection visitors and water-height selection semantics intact.
+
+3. **Make the completed depth read-only during world traversal.** Paged and cell
+   callbacks become visibility consumers rather than incremental producers of
+   static depth. Retain the existing early node and drawable rejection, including
+   groundcover bounds. Test hidden subtrees before nested lighting callbacks or
+   skinning. Preserve doors/exclusions, conservative original-triangle occluders,
+   near-plane visibility fallbacks, and gameplay/update-time light collection.
+   This follows MOC's [front-to-back and conservative-coverage guidance](https://github.com/GameTechDev/MaskedOcclusionCulling).
+
+4. **Stabilize selection and reuse valid software depth.** Use a latched, bounded
+   occluder plan with deterministic priorities and tie-breaking. A later timer
+   sample must not discard an already valid plan for the same unchanged view.
+   Candidate preparation and optional enrichment can be deferred; preserve the
+   user's radius/distance/triangle limits and the raster time target, including
+   the existing possibility that one bounded operation finishes over target.
+   Do not set the budget to unlimited or introduce unbounded mandatory work.
+   Reuse completed software depth only when the camera/view/projection, clip
+   planes, viewport, near clip, software-buffer dimensions, worldspace, settings,
+   selected LOD/chunks, placements, and occluder-data revisions match exactly.
+   HDR/normals/compositor enablement and alternating framebuffer identity are
+   not visibility inputs and must not invalidate this cache. Invalidation must
+   precede querying moved, disabled, removed, or replaced occluders. NPC movement
+   still produces fresh occludee queries. Uncertain invalidation means rebuild
+   or fail open, never stale depth that can hide visible geometry.
+
+View ownership must use camera/view identity and matrices, rather than a camera
+name plus frame number. Keep main, reflection, shadow, and stereo-eye ownership
+separate. Additional views require their own valid depth or a conservative
+fallback; never reuse main-camera depth to cull reflected geometry. Bound cache
+retention and keep ownership free of scene/callback cycles. Preserve the separate
+exit-crash work and normal configuration/save locations.
+
+### Post-processing contract and automated acceptance
+
+Add a small render-stage inventory to the regression infrastructure. Attribute
+world leaves, distinct instances, repeated submissions, material/primitive sets,
+fullscreen geometry, and explicit transparent replays to their camera and pass.
+Record culling bypass reasons in optional statistics. These checks accompany
+the structural fixes; they are not a request for another manual debug capture.
+
+For fixed camera, scene, selected LOD, and warmed ready meshes, main-world leaf
+identities and multiplicities must remain equal across PP off, enabled-empty,
+identity effect, HDR, normals-requiring effect, and repeated off/on transitions.
+Hold visibility inputs constant and exclude intentional sky-sunglare changes
+from the world comparison. Check both alternating framebuffer slots, MSAA
+on/off, nested cameras, and supported stereo modes. Fullscreen effects may add
+their own draws, but must not attach additional world traversal or silently
+change culling masks, frustum, near/far settings, LOD, or batching.
+
+Use the inventory to distinguish two failure modes. If world leaves increase,
+fix the visibility/selection or traversal ownership that admitted them. If only
+dependent-stage totals increase, fix the stage lifecycle or unintended scene
+attachment responsible. If counts are unchanged but draw calls increase, audit
+the explicit replay paths. Do not remove a legitimate reflection or change HUD
+accounting merely to make the reported number smaller. The source audit has not
+yet identified which of these explains the user's complete 4.3x increase.
+
+Keep scene traversal, visibility ownership, and framebuffer routing distinct in
+the frame plan. Effect requirements may select attachments and shader variants;
+they must not alter the world graph. Exercise actual cull visitors/render leaves
+in component fixtures. Add an offscreen integration fixture for the real
+compositor and render callbacks, because tests of flags alone cannot establish
+the traversal contract. Maintainer/CI execution is required by `AGENTS.md`.
+
+### Separate drawable-reduction and replay changes
+
+Correct the paging analyser using scoped inherited state, geometry-local state,
+and `accept` on selected children. Match the paging copy rules for masks, LOD,
+Switch, Sequence, and supported static source geometry. Test sibling-state
+restoration and direct geometry under each selector. Then evaluate actual
+merge-compatible opaque batches within bounded spatial chunks. Preserve
+transparent sorting, dynamic controllers, refnum picking, primitive attributes,
+template ownership, and conservative bounds. Avoid merging a whole area into
+one enormous drawable: that defeats the occlusion work above. This package
+reduces baseline submission work; it is not a substitute for fixing the toggle
+invariant.
+
+Audit transparent depth replay and scene-color/depth copies against their real
+consumers, then gate only passes with no consumer in the effective frame plan.
+Water, distortion, first-person depth, and soft particles still have consumers
+with PP disabled, so blanket removal is unsafe. Account for water straddlers
+and other draw-time repeats separately from OSG's leaf statistics. Leave further
+shader tuning and experimental terrain batching behind these structural tasks.
+
+### Delivery order and completion criteria
+
+Prepare the stage/visibility regression fixtures first, then deliver the ready
+registry, complete CPU occluder phase, and stable-plan/cache invalidation as one
+coherent change. Pair that with any compositor/view-ownership repair revealed
+by the invariance fixtures. Deliver the analyser/batching correction separately,
+followed by consumer-proven replay elimination. Keep each package reviewable;
+do not ship another counters-only patch as the performance fix.
+
+Acceptance requires stable world submissions under PP toggles; no second world
+submission from the preparation phase; correct removal/movement/LOD/cache
+invalidation; preserved visible images, particles, water and first-person depth;
+bounded CPU work and cache memory; and no added GPU readback or synchronization.
+The same hidden-geometry scene must cull correctly with occluders in later
+chunks/cells and with different traversal insertion orders. Test reused and
+rebuilt software depth against equivalent fresh-depth visibility results.
+
+Agents perform static review and allowed C++/GLSL frontend checks only. CI or a
+maintainer must execute component fixtures, offscreen image comparisons, and
+fixed-scene performance comparisons on the target GPU classes. Manual replay
+collection remains deferred. Counts and source invariants can establish the
+structural repair; restored FPS remains a separate runtime acceptance result.
+
+### Implemented structural repair
+
+The renderer now prepares selected terrain/paging entries and eligible cell
+occluders before submitting world geometry. This uses a metadata visitor sharing
+the real camera's `ViewData`, masks, and distance LOD selection. It is not another
+cull traversal: it does not invoke skinning or light-list callbacks and cannot
+submit render leaves. Cell and page cull callbacks consume the resulting depth;
+hidden paged roots can be rejected before their nested lighting callbacks.
+Whole-cell rejection retains terrain-only depth and explicit object exclusions.
+
+Cell sources use a placement registry with weak scene references and shared
+immutable ready meshes. Membership checks inspect the object's parent list,
+avoiding a scan of the whole cell for each source. Ready placements avoid repeated
+model-path construction and storage lookups. Removal, disabled masks, movement,
+fading, missing/replaced visual roots, and changes to the selected source set
+invalidate coverage before visibility queries. Page proximity queries use a
+conservative BVH and distance to mesh bounds, retaining large nearby walls whose
+centers lie outside the distance limit.
+
+A globally ranked plan replaces traversal-order rasterization. An exact view,
+terrain revision, settings, and placement-set match retains valid software depth.
+Incomplete plans accumulate coverage on subsequent unchanged frames instead of
+discarding it because a later timer sample ran out. The triangle cap remains
+hard; the time target permits one bounded mesh operation to make progress and
+defers subsequent operations when exhausted. Cache retention is limited to the
+last owned view, and ownership guards prevent another camera from querying it.
+Framebuffer slot, HDR, and normal-output format are not visibility inputs.
+
+Effect-chain reload now refreshes effect targets without resizing the main
+camera or rebuilding its projection. Actual window resize still performs those
+operations. Current canvas passes determine the frame's depth consumers. The
+separate world-depth copy is omitted when unused; transparent replay is omitted
+only when effects, later geometry, and unknown cameras have no consumer. The
+first-person depth replay remains intact. Optional rendering statistics separate
+world submissions, dependent-camera geometry, and explicit depth/water replays.
+
+The paging analyser now dispatches selected children with `accept`, restores
+inherited material state across siblings, and includes geometry-local state.
+This repairs estimates used by existing spatially bounded opaque merging.
+Occluder construction also excludes update-only hidden/collision geometry, which
+must never close visible openings. The `mesh-v4` cache key automatically prevents
+reuse of older proxies; ready geometry is regenerated without manual deletion.
+
+Regression sources exercise the production cell/page callbacks and real OSG
+render leaves, including a later cell's wall hiding an earlier actor, traversal
+order, zero preparation submissions, placement invalidation, progressive depth,
+view/settings changes, nested stages, and output-format/normal-define changes.
+They also cover selector/material analysis, nearby large walls, hidden geometry,
+and incompatible cached proxies. These fixtures are CPU/source coverage; they
+do not instantiate the full compositor, validate GPU images, or establish the
+entire PP toggle contract for MSAA/stereo.
+
+Verification performed here is limited to C++ frontend checks and static diff
+checks, as required by `AGENTS.md`. No build, component-test binary, engine, or
+GPU run was executed. Component-fixture execution, real-compositor offscreen
+comparisons, and target-GPU performance acceptance remain pending. These source
+repairs do not establish that the reported 4.3x drawable increase or FPS loss is
+fully resolved. Manual debug replay collection remains deferred.
 
 ## Lighting spatial index and render-target reuse
 

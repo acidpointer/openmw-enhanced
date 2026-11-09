@@ -4,6 +4,7 @@
 #include <array>
 #include <osg/FrameBufferObject>
 #include <osg/StateSet>
+#include <osg/observer_ptr>
 
 #include <osgUtil/RenderBin>
 
@@ -22,6 +23,8 @@ namespace MWRender
         TransparentDepthBinCallback(Shader::ShaderManager& shaderManager, bool postPass);
 
         void setWater(const Water* water) { mWater = water; }
+        void setEffectConsumer(std::size_t frameId, bool value) { mEffectConsumer[frameId] = value; }
+        void setColorOnlyCompositor(osg::Camera* camera) { mColorOnlyCompositor = camera; }
 
         void drawImplementation(
             osgUtil::RenderBin* bin, osg::RenderInfo& renderInfo, osgUtil::RenderLeaf*& previous) override;
@@ -33,6 +36,8 @@ namespace MWRender
     private:
         osg::ref_ptr<osg::StateSet> mStateSet;
         bool mPostPass;
+        std::array<bool, 2> mEffectConsumer{ true, true };
+        osg::observer_ptr<osg::Camera> mColorOnlyCompositor;
         const Water* mWater = nullptr;
     };
 
