@@ -118,10 +118,25 @@ add_openmw_dir (mwbase
 
 # Main executable
 
+list(APPEND OPENMW_FILES
+    mwrender/opengl/framedriver.cpp
+    mwrender/opengl/framedriver.hpp
+    mwrender/vulkan/framedriver.cpp
+    mwrender/vulkan/framedriver.hpp
+    mwrender/vulkan/effects.cpp
+    mwrender/vulkan/effects.hpp
+    mwrender/vulkan/statsoverlay.cpp
+    mwrender/vulkan/statsoverlay.hpp
+)
+
 add_library(openmw-lib STATIC
     ${OPENMW_FILES}
     ${OPENMW_SOURCES}
 )
+
+if(OPENMW_BUILD_VULKAN_RENDERER)
+    add_subdirectory(mwrender/vulkan)
+endif()
 
 if (MSVC)
     # these TUs take a lot of memory for codegen

@@ -73,10 +73,11 @@ namespace
 namespace Resource
 {
 
-    ImageManager::ImageManager(const VFS::Manager* vfs, double expiryDelay)
+    ImageManager::ImageManager(const VFS::Manager* vfs, double expiryDelay, bool checkOpenGLSupport)
         : ResourceManager(vfs, expiryDelay)
         , mWarningImage(createWarningImage())
         , mOptions(new osgDB::Options("dds_dxt1_detect_rgba ignoreTga2Fields"))
+        , mCheckOpenGLSupport(checkOpenGLSupport)
     {
     }
 
@@ -150,7 +151,7 @@ namespace Resource
             osg::ref_ptr<osg::Image> image = result.getImage();
 
             image->setFileName(std::string(path.value()));
-            if (!checkSupported(image))
+            if (mCheckOpenGLSupport && !checkSupported(image))
             {
                 static bool uncompress = (getenv("OPENMW_DECOMPRESS_TEXTURES") != nullptr);
                 if (!uncompress)
@@ -222,7 +223,7 @@ namespace Resource
 
     void ImageManager::reportStats(unsigned int frameNumber, osg::Stats* stats) const
     {
-        Resource::reportStats("Image", frameNumber, mCache->getStats(), *stats);
+        Resource::reportStats(mCheckOpenGLSupport ? "Image" : "Render image", frameNumber, mCache->getStats(), *stats);
     }
 
 }

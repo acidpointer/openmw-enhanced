@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <future>
 #include <system_error>
 
@@ -24,11 +25,13 @@
 #include <components/vfs/manager.hpp>
 #include <components/vfs/registerarchives.hpp>
 
+#include <components/sdlutil/drawablesize.hpp>
 #include <components/sdlutil/imagetosurface.hpp>
 #include <components/sdlutil/sdlgraphicswindow.hpp>
 #include <components/sdlutil/sdlinputwrapper.hpp>
 #include <components/sdlutil/startupsignals.hpp>
 
+#include <components/render/presentation.hpp>
 #include <components/resource/resourcesystem.hpp>
 #include <components/resource/scenemanager.hpp>
 #include <components/resource/stats.hpp>
@@ -76,6 +79,9 @@
 #include "mwworld/class.hpp"
 #include "mwworld/datetimemanager.hpp"
 #include "mwworld/worldimp.hpp"
+
+#include "mwrender/opengl/framedriver.hpp"
+#include "mwrender/vulkan/framedriver.hpp"
 
 #include "mwrender/vismask.hpp"
 
@@ -380,11 +386,11 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
     {
         Debug::Trace::Scope trace("Event traversal", frameNumber);
-        mViewer->eventTraversal();
+        mFrameDriver->processEvents();
     }
     {
         Debug::Trace::Scope trace("Update traversal", frameNumber);
-        mViewer->updateTraversal();
+        mFrameDriver->updateScene();
     }
 
     // update focus object for GUI
@@ -398,7 +404,7 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
     {
         Debug::Trace::Scope trace("Rendering traversal and synchronization", frameNumber);
-        mViewer->renderingTraversals();
+        mFrameDriver->renderFrame();
     }
 
     {
@@ -453,7 +459,9 @@ OMW::Engine::~Engine()
 {
     // Cull/draw callbacks retain world resources. Join graphics threads before
     // destroying the world, occlusion workers, and resource managers below.
-    if (mViewer)
+    if (mFrameDriver)
+        mFrameDriver->stop();
+    else if (mViewer)
         mViewer->stopThreading();
 
     if (mScreenCaptureOperation != nullptr)
@@ -482,6 +490,7 @@ OMW::Engine::~Engine()
     mUnrefQueue = nullptr;
     mWorkQueue = nullptr;
 
+    mFrameDriver.reset();
     mViewer = nullptr;
 
     mResourceSystem.reset();
@@ -493,6 +502,8 @@ OMW::Engine::~Engine()
         SDL_DestroyWindow(mWindow);
         mWindow = nullptr;
     }
+    if (mCompatibilityWindow)
+        SDL_DestroyWindow(mCompatibilityWindow);
 
     SDL_Quit();
 
@@ -553,7 +564,7 @@ void OMW::Engine::createWindow()
     const Settings::WindowMode windowMode = Settings::video().mWindowMode;
     const bool windowBorder = Settings::video().mWindowBorder;
     const SDLUtil::VSyncMode vsync = Settings::video().mVsyncMode;
-    unsigned antialiasing = static_cast<unsigned>(Settings::video().mAntialiasing);
+    unsigned antialiasing = mUseVulkan ? 0 : static_cast<unsigned>(Settings::video().mAntialiasing);
 
     int posX = SDL_WINDOWPOS_CENTERED_DISPLAY(screen);
     int posY = SDL_WINDOWPOS_CENTERED_DISPLAY(screen);
@@ -569,6 +580,9 @@ void OMW::Engine::createWindow()
         flags |= SDL_WINDOW_FULLSCREEN;
     else if (windowMode == Settings::WindowMode::WindowedFullscreen)
         flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+    const Uint32 vulkanFlags = (flags & ~SDL_WINDOW_OPENGL) | SDL_WINDOW_VULKAN;
+    if (mUseVulkan)
+        flags = SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN | SDL_WINDOW_ALLOW_HIGHDPI;
 
     // Allows for Windows snapping features to properly work in borderless window
     SDL_SetHint("SDL_BORDERLESS_WINDOWED_STYLE", "1");
@@ -592,13 +606,15 @@ void OMW::Engine::createWindow()
         checkSDLError(SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1));
         checkSDLError(SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, antialiasing));
     }
+    else if (mUseVulkan)
+        checkSDLError(SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 0));
 
     osg::ref_ptr<SDLUtil::GraphicsWindowSDL2> graphicsWindow;
     while (!graphicsWindow || !graphicsWindow->valid())
     {
         while (!mWindow)
         {
-            mWindow = SDL_CreateWindow("OpenMW", posX, posY, width, height, flags);
+            mWindow = SDL_CreateWindow("OpenMW", posX, posY, mUseVulkan ? 16 : width, mUseVulkan ? 16 : height, flags);
             if (!mWindow)
             {
                 // Try with a lower AA
@@ -626,7 +642,7 @@ void OMW::Engine::createWindow()
         SDL_GetWindowSize(mWindow, &w, &h);
         int dw, dh;
         SDL_GL_GetDrawableSize(mWindow, &dw, &dh);
-        if (dw != w || dh != h)
+        if (!mUseVulkan && (dw != w || dh != h))
         {
             SDL_SetWindowSize(mWindow, width / (dw / w), height / (dh / h));
         }
@@ -640,9 +656,9 @@ void OMW::Engine::createWindow()
         traits->windowDecoration = !(SDL_GetWindowFlags(mWindow) & SDL_WINDOW_BORDERLESS);
         traits->screenNum = SDL_GetWindowDisplayIndex(mWindow);
         traits->vsync = 0;
-        traits->inheritedWindowData = new SDLUtil::GraphicsWindowSDL2::WindowData(mWindow);
+        traits->inheritedWindowData = new SDLUtil::GraphicsWindowSDL2::WindowData(mWindow, mUseVulkan);
 
-        graphicsWindow = new SDLUtil::GraphicsWindowSDL2(traits, vsync);
+        graphicsWindow = new SDLUtil::GraphicsWindowSDL2(traits, mUseVulkan ? SDLUtil::VSyncMode::Disabled : vsync);
         if (!graphicsWindow->valid())
             throw std::runtime_error("Failed to create GraphicsContext");
 
@@ -752,6 +768,43 @@ void OMW::Engine::createWindow()
 
     mViewer->getEventQueue()->getCurrentEventState()->setWindowRectangle(
         0, 0, graphicsWindow->getTraits()->width, graphicsWindow->getTraits()->height);
+    if (mUseVulkan)
+    {
+        // GL-only capability services retain a hidden compatibility context
+        // during migration. It never presents or draws the visible world.
+        mCompatibilityWindow = mWindow;
+        mWindow = SDL_CreateWindow("OpenMW — Vulkan (experimental)", posX, posY, width, height,
+            windowBorder ? vulkanFlags : vulkanFlags | SDL_WINDOW_BORDERLESS);
+        if (!mWindow)
+            throw std::runtime_error("Failed to create Vulkan window: " + std::string(SDL_GetError()));
+        int nativeWidth = width;
+        int nativeHeight = height;
+        SDLUtil::getDrawableSize(mWindow, nativeWidth, nativeHeight);
+        int logicalWidth = 0;
+        int logicalHeight = 0;
+        SDL_GetWindowSize(mWindow, &logicalWidth, &logicalHeight);
+        if (windowMode == Settings::WindowMode::Windowed && nativeWidth > 0 && nativeHeight > 0 && logicalWidth > 0
+            && logicalHeight > 0)
+        {
+            SDL_SetWindowSize(mWindow, std::max(1, static_cast<int>(double(width) * logicalWidth / nativeWidth)),
+                std::max(1, static_cast<int>(double(height) * logicalHeight / nativeHeight)));
+            SDLUtil::getDrawableSize(mWindow, nativeWidth, nativeHeight);
+        }
+        graphicsWindow->resized(0, 0, nativeWidth, nativeHeight);
+        camera->setViewport(0, 0, nativeWidth, nativeHeight);
+        mViewer->getEventQueue()->getCurrentEventState()->setWindowRectangle(0, 0, nativeWidth, nativeHeight);
+        setWindowIcon();
+        Render::BackendOptions options;
+        options.mWindow = mWindow;
+        options.mShaderPath = mResDir / "shaders" / "vulkan";
+        options.mPipelineCachePath = mCfgMgr.getCachePath() / "vulkan-pipelines.bin";
+        if (const char* selectedGpu = std::getenv("OPENMW_RENDER_GPU"))
+            options.mDevicePciAddress = selectedGpu;
+        options.mPresentMode = vsync == SDLUtil::VSyncMode::Disabled ? Render::PresentMode::Immediate
+            : vsync == SDLUtil::VSyncMode::Adaptive                  ? Render::PresentMode::Adaptive
+                                                                     : Render::PresentMode::Fifo;
+        mFrameDriver = std::make_unique<MWRender::VulkanFrameDriver>(*mViewer, options);
+    }
 }
 
 void OMW::Engine::setWindowIcon()
@@ -784,7 +837,8 @@ void OMW::Engine::prepareEngine()
     mStateManager = std::make_unique<MWState::StateManager>(mCfgMgr.getUserDataPath() / "saves", mContentFiles);
     mEnvironment.setStateManager(*mStateManager);
 
-    const bool stereoEnabled = Settings::stereo().mStereoEnabled || osg::DisplaySettings::instance().get()->getStereo();
+    const bool stereoEnabled
+        = !mUseVulkan && (Settings::stereo().mStereoEnabled || osg::DisplaySettings::instance().get()->getStereo());
     mStereoManager = std::make_unique<Stereo::Manager>(
         mViewer, stereoEnabled, Settings::camera().mNearClip, Settings::camera().mViewingDistance);
 
@@ -798,7 +852,7 @@ void OMW::Engine::prepareEngine()
     VFS::registerArchives(mVFS.get(), mFileCollections, mArchives, true, &mEncoder.get()->getStatelessEncoder());
 
     mResourceSystem = std::make_unique<Resource::ResourceSystem>(
-        mVFS.get(), Settings::cells().mCacheExpiryDelay, &mEncoder.get()->getStatelessEncoder());
+        mVFS.get(), Settings::cells().mCacheExpiryDelay, &mEncoder.get()->getStatelessEncoder(), !mUseVulkan);
     mResourceSystem->getSceneManager()->getShaderManager().setMaxTextureUnits(mGlMaxTextureImageUnits);
     mResourceSystem->getSceneManager()->setUnRefImageDataAfterApply(
         false); // keep to Off for now to allow better state sharing
@@ -885,6 +939,21 @@ void OMW::Engine::prepareEngine()
     mEnvironment.setWindowManager(*mWindowManager);
 
     auto takeScreenshot = [this] {
+        if (mUseVulkan)
+        {
+            auto* presentation = dynamic_cast<Render::Presentation*>(mViewer->getCamera()->getRenderer());
+            if (!presentation)
+                throw std::runtime_error("Vulkan screenshot service is unavailable");
+            const auto pixels = presentation->capture();
+            if (!pixels.mWidth || !pixels.mHeight)
+                throw std::runtime_error("Vulkan renderer returned an empty screenshot");
+            osg::ref_ptr<osg::Image> image = new osg::Image;
+            image->allocateImage(pixels.mWidth, pixels.mHeight, 1, GL_RGBA, GL_UNSIGNED_BYTE);
+            image->setOrigin(osg::Image::TOP_LEFT);
+            std::memcpy(image->data(), pixels.mRgba.data(), pixels.mRgba.size());
+            (*mScreenCaptureOperation)(*image, 0);
+            return;
+        }
         mScreenCaptureHandler->setFramesToCapture(1);
         mScreenCaptureHandler->captureNextFrame(*mViewer);
     };
@@ -1017,6 +1086,11 @@ void OMW::Engine::go()
     // Create encoder
     mEncoder = std::make_unique<ToUTF8::Utf8Encoder>(mEncoding);
 
+    const auto& renderer = Settings::video().mRenderer.get();
+    if (renderer != "opengl" && renderer != "vulkan")
+        throw std::runtime_error("Unknown renderer setting: " + renderer);
+    mUseVulkan = renderer == "vulkan";
+
     // Setup viewer
     mViewer = new osgViewer::Viewer;
     mViewer->getCamera()->getOrCreateStateSet()->removeAttribute(osg::StateAttribute::MATERIAL);
@@ -1025,6 +1099,7 @@ void OMW::Engine::go()
 
     // Do not try to outsmart the OS thread scheduler (see bug #4785).
     mViewer->setUseConfigureAffinity(false);
+    mFrameDriver = std::make_unique<MWRender::OpenGLFrameDriver>(mViewer);
 
     mEnvironment.setFrameRateLimit(Settings::video().mFramerateLimit);
 
@@ -1103,16 +1178,16 @@ void OMW::Engine::go()
     MWWorld::DateTimeManager& timeManager = *mWorld->getTimeManager();
     Misc::FrameRateLimiter frameRateLimiter = Misc::makeFrameRateLimiter(mEnvironment.getFrameRateLimit());
     const std::chrono::steady_clock::duration maxSimulationInterval(std::chrono::milliseconds(200));
-    while (!mViewer->done() && !mStateManager->hasQuitRequest())
+    while (!mFrameDriver->isDone() && !mStateManager->hasQuitRequest())
     {
         const double dt = std::chrono::duration_cast<std::chrono::duration<double>>(
                               std::min(frameRateLimiter.getLastFrameDuration(), maxSimulationInterval))
                               .count()
             * timeManager.getSimulationTimeScale();
 
-        mViewer->advance(timeManager.getRenderingSimulationTime());
+        mFrameDriver->advance(timeManager.getRenderingSimulationTime());
 
-        const unsigned frameNumber = mViewer->getFrameStamp()->getFrameNumber();
+        const unsigned frameNumber = mFrameDriver->frameNumber();
         Debug::Trace::Scope loopTrace("Main loop", frameNumber);
 
         if (!frame(frameNumber, static_cast<float>(dt)))
@@ -1138,7 +1213,7 @@ void OMW::Engine::go()
             {
                 // Viewer frame number can be different from frameNumber because of loading screens which render new
                 // frames inside a simulation frame.
-                const unsigned currentFrameNumber = mViewer->getFrameStamp()->getFrameNumber();
+                const unsigned currentFrameNumber = mFrameDriver->frameNumber();
                 for (unsigned i = frameNumber; i <= currentFrameNumber; ++i)
                     reportStats(i - statsReportDelay, *mViewer, stats);
             }

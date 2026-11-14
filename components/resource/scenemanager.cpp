@@ -998,6 +998,27 @@ namespace Resource
         return static_cast<osg::Node*>(mErrorMarker->clone(osg::CopyOp::DEEP_COPY_ALL));
     }
 
+    osg::ref_ptr<osg::Node> SceneManager::readModel(VFS::Path::NormalizedView path, ImageManager& images) const
+    {
+        osg::ref_ptr<osg::Node> model;
+        if (Misc::getFileExtension(path.value()) == "nif")
+        {
+            const auto file = mNifFileManager->get(path);
+            model = NifOsg::Loader::load(*file, &images, mBgsmFileManager);
+        }
+        else
+        {
+            const auto stream = mVFS->get(path);
+            model = loadNonNif(path, *stream, &images);
+        }
+        if (model)
+        {
+            SetFilterSettingsVisitor filters(mMinFilter, mMagFilter, mMaxAnisotropy);
+            model->accept(filters);
+        }
+        return model;
+    }
+
     osg::ref_ptr<const osg::Node> SceneManager::getTemplate(VFS::Path::NormalizedView path, bool compile)
     {
         osg::ref_ptr<osg::Object> obj = mCache->getRefFromObjectCache(path);

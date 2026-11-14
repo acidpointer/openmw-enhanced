@@ -142,6 +142,16 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 # working AppImage intact if deployment or validation fails.
 export OUTPUT="${DIST_DIR}/.OpenMW-Enhanced-x86_64.AppImage.pending"
 
+renderer_dependency_args=()
+if [[ -f "${APPDIR}/usr/bin/openmw-renderer-vulkan.so" ]]; then
+    renderer_dependency_args+=(--deploy-deps-only "${APPDIR}/usr/bin/openmw-renderer-vulkan.so")
+    # User OMWFX sources are compiled when first enabled. Keep the compiler
+    # and its dependencies inside the AppImage instead of requiring a host SDK.
+    effect_compiler="$(command -v glslangValidator)"
+    cp -L "${effect_compiler}" "${APPDIR}/usr/bin/glslangValidator"
+    renderer_dependency_args+=(--deploy-deps-only "${APPDIR}/usr/bin/glslangValidator")
+fi
+
 "${LINUXDEPLOY}" \
     --appdir "${APPDIR}" \
     --desktop-file "${APPDIR}/usr/share/applications/openmw-enhanced.desktop" \
@@ -149,6 +159,7 @@ export OUTPUT="${DIST_DIR}/.OpenMW-Enhanced-x86_64.AppImage.pending"
     --executable "${APPDIR}/usr/bin/openmw-launcher" \
     --executable "${APPDIR}/usr/bin/openmw" \
     "${osg_dependency_args[@]}" \
+    "${renderer_dependency_args[@]}" \
     --deploy-deps-only "${OSG_PLUGIN_DEST}" \
     --plugin qt \
     --output appimage

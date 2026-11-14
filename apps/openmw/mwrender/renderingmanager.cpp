@@ -239,7 +239,8 @@ namespace MWRender
         // Ultimately dependent on support for various OpenGL extensions.
         osg::ref_ptr<SceneUtil::LightManager> sceneRoot = new SceneUtil::LightManager(
             SceneUtil::LightSettings{
-                .mClusteredLighting = Settings::shaders().mClusteredLighting,
+                .mClusteredLighting = !resourceSystem->getSceneManager()->usesNativeRendering()
+                    && Settings::shaders().mClusteredLighting,
                 .mMaxLights = Settings::shaders().mMaxLights,
                 .mMaximumLightDistance = Settings::shaders().mMaximumLightDistance,
                 .mLightFadeStart = Settings::shaders().mLightFadeStart,
@@ -250,7 +251,8 @@ namespace MWRender
         resourceSystem->getSceneManager()->setSupportsClusteredLighting(sceneRoot->isClusteredSupported());
 
         // Sync clustered lighting setting so it's more intuitive when viewed in the in-game setting panel
-        Settings::shaders().mClusteredLighting.set(sceneRoot->getClusteredLighting());
+        if (!resourceSystem->getSceneManager()->usesNativeRendering())
+            Settings::shaders().mClusteredLighting.set(sceneRoot->getClusteredLighting());
 
         sceneRoot->setLightingMask(Mask_Lighting);
         mSceneRoot = sceneRoot;
@@ -272,7 +274,8 @@ namespace MWRender
 
         mShadowManager = std::make_unique<SceneUtil::ShadowManager>(sceneRoot, mRootNode, getOutdoorShadowCastingMask(),
             getIndoorShadowCastingMask(), Mask_Terrain | Mask_Object | Mask_Static, Settings::shadows(),
-            mResourceSystem->getSceneManager()->getShaderManager());
+            mResourceSystem->getSceneManager()->getShaderManager(),
+            mResourceSystem->getSceneManager()->usesNativeRendering());
 
         Shader::ShaderManager::DefineMap globalDefines = Shader::getDefaultDefines();
         mAppliedShadowDefines = mShadowManager->getShadowDefines(Settings::shadows());
@@ -317,7 +320,7 @@ namespace MWRender
 
         mObjects = std::make_unique<Objects>(mResourceSystem, sceneContentRoot, unrefQueue);
 
-        if (getenv("OPENMW_DONT_PRECOMPILE") == nullptr)
+        if (Settings::video().mRenderer.get() != "vulkan" && getenv("OPENMW_DONT_PRECOMPILE") == nullptr)
         {
             mViewer->setIncrementalCompileOperation(new osgUtil::IncrementalCompileOperation);
             mViewer->getIncrementalCompileOperation()->setTargetFrameRate(Settings::cells().mTargetFramerate);

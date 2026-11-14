@@ -17,6 +17,7 @@
 #include <components/resource/resourcesystem.hpp>
 #include <components/sceneutil/clusteredlighting.hpp>
 #include <components/sceneutil/lightboundsindex.hpp>
+#include <components/sceneutil/lightstatecache.hpp>
 #include <components/sceneutil/nodecallback.hpp>
 
 namespace SceneUtil
@@ -241,7 +242,8 @@ namespace SceneUtil
             const osg::RefMatrix* viewMatrix, size_t frameNum, const LightBoundsIndex** index = nullptr);
 
         osg::ref_ptr<osg::StateSet> getLightListStateSet(
-            const LightList& lightList, size_t frameNum, const osg::RefMatrix* viewMatrix);
+            const LightList& lightList, size_t frameNum, const osg::RefMatrix* viewMatrix, osg::Camera* camera = nullptr);
+        const LightStateCache::Stats& getLightStateCacheStats() const { return mLightStateCache.stats(); }
 
         void setSunlight(std::shared_ptr<Light> sun);
         const std::shared_ptr<Light>& getSunlight() const;
@@ -295,9 +297,8 @@ namespace SceneUtil
         };
         std::map<osg::observer_ptr<osg::Camera>, LightsInView> mLightsInViewSpace;
 
-        using LightListKey = std::pair<const osg::RefMatrix*, std::vector<int>>;
-        LightListKey mLightListKey;
-        std::map<LightListKey, osg::ref_ptr<osg::StateSet>> mLightListStateSets;
+        std::vector<int> mLightListKey;
+        LightStateCache mLightStateCache;
 
         size_t mLightingMask;
 

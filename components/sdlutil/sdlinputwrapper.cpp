@@ -1,4 +1,5 @@
 #include "sdlinputwrapper.hpp"
+#include "drawablesize.hpp"
 
 #include <components/debug/debuglog.hpp>
 #include <components/settings/values.hpp>
@@ -45,9 +46,11 @@ namespace SDLUtil
         int w, h;
         SDL_GetWindowSize(mSDLWindow, &w, &h);
         int dw, dh;
-        SDL_GL_GetDrawableSize(mSDLWindow, &dw, &dh);
-        mScaleX = static_cast<Uint16>(dw / w);
-        mScaleY = static_cast<Uint16>(dh / h);
+        getDrawableSize(mSDLWindow, dw, dh);
+        if (w <= 0 || h <= 0 || dw <= 0 || dh <= 0)
+            return;
+        mScaleX = static_cast<float>(dw) / w;
+        mScaleY = static_cast<float>(dh) / h;
     }
 
     void InputWrapper::capture(bool windowEventsOnly)
@@ -242,6 +245,8 @@ namespace SDLUtil
 
     void InputWrapper::handleWindowEvent(const SDL_Event& evt)
     {
+        if (evt.window.windowID != SDL_GetWindowID(mSDLWindow))
+            return;
         switch (evt.window.event)
         {
             case SDL_WINDOWEVENT_ENTER:
@@ -258,7 +263,7 @@ namespace SDLUtil
                 break;
             case SDL_WINDOWEVENT_SIZE_CHANGED:
                 int w, h;
-                SDL_GL_GetDrawableSize(mSDLWindow, &w, &h);
+                getDrawableSize(mSDLWindow, w, h);
                 int x, y;
                 SDL_GetWindowPosition(mSDLWindow, &x, &y);
 

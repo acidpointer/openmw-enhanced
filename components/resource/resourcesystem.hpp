@@ -24,6 +24,7 @@ namespace Resource
 {
 
     class SceneManager;
+    class RenderModelManager;
     class ImageManager;
     class BgsmFileManager;
     class NifFileManager;
@@ -37,11 +38,12 @@ namespace Resource
     class ResourceSystem
     {
     public:
-        explicit ResourceSystem(
-            const VFS::Manager* vfs, double expiryDelay, const ToUTF8::StatelessUtf8Encoder* encoder);
+        explicit ResourceSystem(const VFS::Manager* vfs, double expiryDelay,
+            const ToUTF8::StatelessUtf8Encoder* encoder, bool checkOpenGLSupport = true);
         ~ResourceSystem();
 
         SceneManager* getSceneManager();
+        RenderModelManager* getRenderModelManager();
         ImageManager* getImageManager();
         BgsmFileManager* getBgsmFileManager();
         NifFileManager* getNifFileManager();
@@ -77,6 +79,8 @@ namespace Resource
 
     private:
         std::unique_ptr<SceneManager> mSceneManager;
+        std::unique_ptr<ImageManager> mRenderImageManager;
+        std::unique_ptr<RenderModelManager> mRenderModelManager;
         std::unique_ptr<ImageManager> mImageManager;
         std::unique_ptr<BgsmFileManager> mBgsmFileManager;
         std::unique_ptr<NifFileManager> mNifFileManager;

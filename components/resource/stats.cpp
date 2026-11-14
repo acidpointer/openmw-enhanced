@@ -18,6 +18,7 @@
 #include <osgViewer/Renderer>
 #include <osgViewer/Viewer>
 
+#include <components/render/presentation.hpp>
 #include <components/sceneutil/util.hpp>
 #include <components/vfs/manager.hpp>
 
@@ -294,14 +295,29 @@ namespace Resource
     {
         osgViewer::ViewerBase* viewer = nullptr;
 
-        bool handled = StatsHandler::handle(ea, aa);
-        if (_initialized && !mInitFonts)
-            setUpFonts();
-
         auto* view = dynamic_cast<osgViewer::View*>(&aa);
-        if (view)
-            viewer = view->getViewerBase();
-
+        auto* presentation = view ? dynamic_cast<Render::Presentation*>(view->getCamera()->getRenderer()) : nullptr;
+        bool handled = false;
+        if (presentation)
+        {
+            if (!ea.getHandled() && ea.getEventType() == osgGA::GUIEventAdapter::KEYDOWN
+                && ea.getKey() == getKeyEventTogglesOnScreenStats())
+            {
+                _statsType = (_statsType + 1) % StatsHandler::LAST;
+                presentation->setStatsLevel(_statsType);
+                handled = true;
+            }
+            if (view)
+                viewer = view->getViewerBase();
+        }
+        else
+        {
+            handled = StatsHandler::handle(ea, aa);
+            if (_initialized && !mInitFonts)
+                setUpFonts();
+            if (view)
+                viewer = view->getViewerBase();
+        }
         if (viewer != nullptr)
         {
             // Add/remove openmw stats to the osd as necessary

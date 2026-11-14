@@ -37,6 +37,14 @@ namespace NifOsg
 
         void setQuota(int quota);
 
+        // Native renderers submit particle vertices without drawImplementation.
+        // Preserve the existing updater's freeze-when-culled bookkeeping.
+        void markRendered(unsigned frame) const
+        {
+            _last_frame = frame;
+            _dirty_dt = true;
+        }
+
         void drawImplementation(osg::RenderInfo& renderInfo) const override;
 
     private:

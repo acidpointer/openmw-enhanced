@@ -322,7 +322,7 @@ namespace MWRender
             mCuller->resetStaticRasterBudgetBaseline();
             mPlan.rasterize(*mCuller);
             mBeginCallbackMs = osg::Timer::instance()->delta_m(beginStart, osg::Timer::instance()->tick());
-            if (auto* stats = cam->getStats(); stats && stats->collectStats("rendering"))
+            if (stats && stats->collectStats("rendering"))
             {
                 stats->setAttribute(frameNumber, "Occlusion depth reused", reused);
                 stats->setAttribute(frameNumber, "Occlusion plan complete", mPlan.complete());

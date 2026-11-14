@@ -16,6 +16,7 @@ RUN apt-get update \
         curl \
         file \
         git \
+        glslang-tools \
         libavcodec-dev \
         libavformat-dev \
         libavutil-dev \
@@ -42,6 +43,7 @@ RUN apt-get update \
         libswscale-dev \
         libtinyxml-dev \
         libunshield-dev \
+        libvulkan-dev \
         libyaml-cpp-dev \
         mold \
         ninja-build \

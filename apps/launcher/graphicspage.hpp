@@ -47,6 +47,7 @@ namespace Launcher
         Config::LauncherSettings& mLauncherSettings;
         QVector<Config::RenderGpu> mGpus;
         QComboBox* mGpuSelector;
+        QComboBox* mRendererSelector;
         QLabel* mLastRenderer;
         QString mLogPath;
         QVector<QStringList> mResolutionsPerScreen;

@@ -32,7 +32,8 @@ namespace SceneUtil
 
         explicit ShadowManager(osg::ref_ptr<osg::Group> sceneRoot, osg::ref_ptr<osg::Group> rootNode,
             unsigned int outdoorShadowCastingMask, unsigned int indoorShadowCastingMask, unsigned int worldMask,
-            const Settings::ShadowsCategory& settings, Shader::ShaderManager& shaderManager);
+            const Settings::ShadowsCategory& settings, Shader::ShaderManager& shaderManager,
+            bool nativeRendering = false);
         ~ShadowManager();
 
         void setupShadowSettings(const Settings::ShadowsCategory& settings, Shader::ShaderManager& shaderManager);
@@ -53,6 +54,7 @@ namespace SceneUtil
         static ShadowManager* sInstance;
 
         bool mEnableShadows;
+        bool mNativeRendering;
 
         osg::ref_ptr<osgShadow::ShadowedScene> mShadowedScene;
         osg::ref_ptr<osgShadow::ShadowSettings> mShadowSettings;

@@ -468,6 +468,26 @@ de ordinarie fonterna i Morrowind. Bocka denna ruta om du ändå föredrar ordin
         <source>Not recorded yet</source>
         <translation type="unfinished"></translation>
     </message>
+    <message>
+        <source>OpenGL</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Vulkan (experimental)</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>The Vulkan renderer module is not installed with this build.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Applies the next time you launch the game. Vulkan currently uses a basic material pipeline.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Renderer</source>
+        <translation type="unfinished"></translation>
+    </message>
 </context>
 <context>
     <name>Launcher::ImportPage</name>

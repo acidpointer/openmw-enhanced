@@ -256,7 +256,9 @@ namespace Terrain
 
         geometry->addPrimitiveSet(mBufferCache.getIndexBuffer(numVerts, lodFlags));
 
-        bool useCompositeMap = chunkSize >= mCompositeMapLevel;
+        // Both backends cache distant material layers in a composite texture.
+        // Native rendering bakes it before the first dependent scene pass.
+        const bool useCompositeMap = chunkSize >= mCompositeMapLevel;
         unsigned int numUvSets = useCompositeMap ? 1 : 2;
 
         geometry->setTexCoordArrayList(osg::Geometry::ArrayList(numUvSets, mBufferCache.getUVBuffer(numVerts)));
@@ -270,7 +272,8 @@ namespace Terrain
             if (templateGeometry->getCompositeMap())
             {
                 geometry->setCompositeMap(templateGeometry->getCompositeMap());
-                geometry->setCompositeMapRenderer(mCompositeMapRenderer);
+                if (!mSceneManager->usesNativeRendering())
+                    geometry->setCompositeMapRenderer(mCompositeMapRenderer);
             }
             geometry->setPasses(templateGeometry->getPasses());
         }
@@ -283,10 +286,12 @@ namespace Terrain
 
                 createCompositeMapGeometry(chunkSize, chunkCenter, osg::Vec4f(0, 0, 1, 1), *compositeMap);
 
-                mCompositeMapRenderer->addCompositeMap(compositeMap, false);
+                if (!mSceneManager->usesNativeRendering())
+                    mCompositeMapRenderer->addCompositeMap(compositeMap, false);
 
                 geometry->setCompositeMap(compositeMap);
-                geometry->setCompositeMapRenderer(mCompositeMapRenderer);
+                if (!mSceneManager->usesNativeRendering())
+                    geometry->setCompositeMapRenderer(mCompositeMapRenderer);
 
                 TextureLayer layer;
                 layer.mDiffuseMap = compositeMap->mTexture;

@@ -315,4 +315,99 @@ namespace
         ASSERT_TRUE(secondState->getUniform("LightBuffer")->getElement(0, light));
         EXPECT_FLOAT_EQ(light(0, 0), 8);
     }
+
+    TEST_F(LightListTest, retained_state_updates_all_parameters_and_keeps_previous_frame_immutable)
+    {
+        auto* source = addLight(2, 10);
+        auto* light = source->getLight(1);
+        light->setAmbient({ .1f, .2f, .3f, 1 });
+        light->setDiffuse({ -.4f, -.5f, -.6f, 1 }); // negative lights retain their semantics
+        light->setSpecular({ .7f, .8f, .9f, 1 });
+        light->setConstantAttenuation(2);
+        light->setLinearAttenuation(3);
+        light->setQuadraticAttenuation(4);
+        const auto stateForFrame = [&](std::size_t frame) {
+            const auto* view = mStage->getInitialViewMatrix();
+            const auto& lights = mManager->getLightsInViewSpace(&mVisitor, view, frame);
+            return mManager->getLightListStateSet({ &lights.at(0) }, frame, view, mCamera);
+        };
+        const auto first = stateForFrame(1);
+        osg::Matrixf original;
+        ASSERT_TRUE(first->getUniform("LightBuffer")->getElement(0, original));
+        EXPECT_FLOAT_EQ(original(0, 0), 2);
+        EXPECT_FLOAT_EQ(original(1, 0), .1f);
+        EXPECT_FLOAT_EQ(original(2, 0), -.4f);
+        EXPECT_FLOAT_EQ(original(3, 0), .7f);
+        EXPECT_FLOAT_EQ(original(0, 3), 2);
+        EXPECT_FLOAT_EQ(original(1, 3), 3);
+        EXPECT_FLOAT_EQ(original(2, 3), 4);
+        EXPECT_FLOAT_EQ(original(3, 3), 10);
+
+        for (std::size_t frame = 2; frame <= 3; ++frame)
+        {
+            mManager->update(frame);
+            mVisitor.setTraversalNumber(frame);
+            source->setRadius(10 + frame);
+            mManager->addLight(source, osg::Matrixf::translate(frame + 2, 0, -10), frame);
+            source->getLight(frame)->setDiffuse({ float(frame), 0, 0, 1 });
+            const auto current = stateForFrame(frame);
+            osg::Matrixf actual;
+            ASSERT_TRUE(current->getUniform("LightBuffer")->getElement(0, actual));
+            EXPECT_FLOAT_EQ(actual(0, 0), frame + 2);
+            EXPECT_FLOAT_EQ(actual(2, 0), frame);
+            EXPECT_FLOAT_EQ(actual(3, 3), 10 + frame);
+            if (frame == 2)
+            {
+                EXPECT_NE(first, current);
+                osg::Matrixf previous;
+                ASSERT_TRUE(first->getUniform("LightBuffer")->getElement(0, previous));
+                EXPECT_EQ(previous, original);
+            }
+            else
+                EXPECT_EQ(first, current);
+        }
+        EXPECT_EQ(mManager->getLightStateCacheStats().mCreatedStates, 2);
+    }
+
+    TEST_F(LightListTest, shared_lights_are_packed_once_per_view_for_multiple_object_lists)
+    {
+        addLight(2, 10);
+        addLight(8, 10);
+        const auto* view = mStage->getInitialViewMatrix();
+        const auto& lights = mManager->getLightsInViewSpace(&mVisitor, view, 1);
+        const auto a = mManager->getLightListStateSet({ &lights[0] }, 1, view, mCamera);
+        const auto b = mManager->getLightListStateSet({ &lights[0], &lights[1] }, 1, view, mCamera);
+        EXPECT_NE(a, b);
+        EXPECT_EQ(mManager->getLightStateCacheStats().mPackedLights, 2);
+        osg::ref_ptr<osg::RefMatrix> reflected = new osg::RefMatrix(osg::Matrixd::translate(30, 0, 0));
+        const auto c = mManager->getLightListStateSet({ &lights[0] }, 1, reflected, mCamera);
+        osg::Matrixf original, transformed;
+        ASSERT_TRUE(a->getUniform("LightBuffer")->getElement(0, original));
+        ASSERT_TRUE(c->getUniform("LightBuffer")->getElement(0, transformed));
+        EXPECT_FLOAT_EQ(original(0, 0), 2);
+        EXPECT_FLOAT_EQ(transformed(0, 0), 32);
+        EXPECT_EQ(mManager->getLightStateCacheStats().mPackedLights, 3);
+    }
+
+    TEST_F(LightListTest, setting_changes_invalidate_retained_parameters_and_uniform_layout)
+    {
+        addLight(2, 10);
+        const auto* view = mStage->getInitialViewMatrix();
+        const auto& lights = mManager->getLightsInViewSpace(&mVisitor, view, 1);
+        const SceneUtil::LightManager::LightList list{ &lights[0] };
+        const auto first = mManager->getLightListStateSet(list, 1, view, mCamera);
+        mManager->processChangedSettings(2, 0, 1);
+        const auto updated = mManager->getLightListStateSet(list, 1, view, mCamera);
+        EXPECT_NE(first, updated);
+        osg::Matrixf before, after;
+        ASSERT_TRUE(first->getUniform("LightBuffer")->getElement(0, before));
+        ASSERT_TRUE(updated->getUniform("LightBuffer")->getElement(0, after));
+        EXPECT_FLOAT_EQ(before(3, 3), 10);
+        EXPECT_FLOAT_EQ(after(3, 3), 20);
+        mManager->updateMaxLights(4);
+        const auto resized = mManager->getLightListStateSet(list, 1, view, mCamera);
+        EXPECT_NE(updated, resized);
+        EXPECT_EQ(resized->getUniform("LightBuffer")->getNumElements(), 4);
+        EXPECT_EQ(updated->getUniform("LightBuffer")->getNumElements(), 2);
+    }
 }

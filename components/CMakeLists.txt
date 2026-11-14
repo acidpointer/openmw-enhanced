@@ -1,5 +1,7 @@
 project (Components)
 
+add_subdirectory(render)
+
 if(APPLE)
     set(BUNDLE_RESOURCES_DIR "${APP_BUNDLE_DIR}/Contents/Resources")
     set(OPENMW_RESOURCES_ROOT ${BUNDLE_RESOURCES_DIR})
@@ -128,7 +130,7 @@ add_component_dir (vfs
     )
 
 add_component_dir (resource
-    scenemanager keyframemanager imagemanager animblendrulesmanager bulletshapemanager bulletshape niffilemanager objectcache resourcesystem
+    scenemanager keyframemanager imagemanager rendermodelmanager animblendrulesmanager bulletshapemanager bulletshape niffilemanager objectcache resourcesystem
     resourcemanager stats animation foreachbulletobject errormarker selectionmarker cachestats bgsmfilemanager
     )
 
@@ -136,9 +138,18 @@ add_component_dir (shader
     shadermanager shadervisitor removedalphafunc
     )
 
+add_component_dir (render
+    backend resourcepool allocationranges module
+    )
+
+add_component_dir (renderassets
+    model osgimporter osgstate particles effectshader
+    )
+list(APPEND COMPONENT_FILES renderassets/meshkey.hpp)
+
 add_component_dir (sceneutil
     clone attach visitor util statesetupdater stateupdater controller skeleton riggeometry morphgeometry lightcontroller
-    lightmanager lightboundsindex lightutil positionattitudetransform workqueue pathgridutil waterutil writescene serialize optimizer
+    lightmanager lightboundsindex lightstatecache lightutil positionattitudetransform workqueue pathgridutil waterutil writescene serialize optimizer
     detourdebugdraw navmesh agentpath animblendrules shadow mwshadowtechnique recastmesh shadowsbin osgacontroller rtt
     screencapture depth color riggeometryosgaextension extradata unrefqueue lightcommon clearcolor
     enhancedsettings occlusiontraversal screencoverage occlusioncallback occlusionorder occlusionplan viewpreparation paginganalysis renderstageinventory occlusionpreparation
@@ -366,7 +377,7 @@ add_component_dir (fontloader
     )
 
 add_component_dir (sdlutil
-    events
+    events drawablesize
     gl4esinit
     imagetosurface
     sdlcursormanager
@@ -594,6 +605,7 @@ if (OPENMW_USE_SYSTEM_SQLITE3)
 endif()
 
 add_library(components STATIC ${COMPONENT_FILES})
+target_link_libraries(components openmw-render-core)
 
 if (ANDROID)
     set_property(TARGET components PROPERTY POSITION_INDEPENDENT_CODE ON)

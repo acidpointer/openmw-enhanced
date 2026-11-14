@@ -21,6 +21,11 @@ namespace Resource
     class ResourceSystem;
 }
 
+namespace Render
+{
+    class FrameDriver;
+}
+
 namespace SceneUtil
 {
     class WorkQueue;
@@ -132,6 +137,8 @@ namespace OMW
     class Engine
     {
         SDL_Window* mWindow;
+        SDL_Window* mCompatibilityWindow = nullptr;
+        bool mUseVulkan = false;
         std::unique_ptr<VFS::Manager> mVFS;
         std::unique_ptr<Resource::ResourceSystem> mResourceSystem;
         std::shared_ptr<SceneUtil::WorkQueue> mWorkQueue;
@@ -157,6 +164,7 @@ namespace OMW
         std::vector<std::string> mArchives;
         std::filesystem::path mResDir;
         osg::ref_ptr<osgViewer::Viewer> mViewer;
+        std::unique_ptr<Render::FrameDriver> mFrameDriver;
         osg::ref_ptr<osgViewer::ScreenCaptureHandler> mScreenCaptureHandler;
         osg::ref_ptr<SceneUtil::AsyncScreenCaptureOperation> mScreenCaptureOperation;
         osg::ref_ptr<SceneUtil::SelectDepthFormatOperation> mSelectDepthFormatOperation;

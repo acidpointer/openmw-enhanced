@@ -452,7 +452,10 @@ namespace MyGUIPlatform
         if (mInjectState)
             batch.mStateSet = mInjectState;
 
-        mDrawable->addBatch(batch);
+        if (mDrawSink)
+            mDrawSink->drawGui(*batch.mArray, count, batch.mTexture, batch.mStateSet);
+        else
+            mDrawable->addBatch(batch);
     }
 
     void RenderManager::setInjectState(osg::StateSet* stateSet)

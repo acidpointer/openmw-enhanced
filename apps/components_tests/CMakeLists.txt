@@ -30,6 +30,15 @@ file(GLOB UNITTEST_SRC_FILES
     misc/testresourcehelpers.cpp
     misc/teststringops.cpp
 
+    render/resources.cpp
+    render/scene.cpp
+    render/texture.cpp
+    render/osgimporter.cpp
+    render/particles.cpp
+    render/uploadpages.cpp
+    render/cachesweep.cpp
+    render/effectshader.cpp
+
     nifloader/testbulletnifloader.cpp
 
     detournavigator/navigator.cpp
@@ -97,6 +106,7 @@ file(GLOB UNITTEST_SRC_FILES
     sceneutil/osgacontroller.cpp
     sceneutil/color.cpp
     sceneutil/lightmanager.cpp
+    sceneutil/lightstatecache.cpp
     sceneutil/userdata.cpp
     sceneutil/occlusionbudget.cpp
     sceneutil/occlusionquery.cpp

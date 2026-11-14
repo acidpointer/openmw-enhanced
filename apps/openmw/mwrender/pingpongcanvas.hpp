@@ -66,6 +66,9 @@ namespace MWRender
 
         void setCalculateAvgLum(bool enabled) { mAvgLum = enabled; }
 
+        bool getPostProcessing() const { return mPostprocessing; }
+        Fx::FlagsType getMask() const { return mMask; }
+
         void setPostProcessing(bool enabled) { mPostprocessing = enabled; }
 
         void setGpuTimingStats(osg::Stats* stats) { mGpuTimingStats = stats; }

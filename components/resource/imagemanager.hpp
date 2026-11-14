@@ -22,7 +22,7 @@ namespace Resource
     class ImageManager : public ResourceManager<osg::ref_ptr<osg::Image>>
     {
     public:
-        explicit ImageManager(const VFS::Manager* vfs, double expiryDelay);
+        explicit ImageManager(const VFS::Manager* vfs, double expiryDelay, bool checkOpenGLSupport = true);
         ~ImageManager();
 
         /// Create or retrieve an Image
@@ -36,6 +36,7 @@ namespace Resource
     private:
         osg::ref_ptr<osg::Image> mWarningImage;
         osg::ref_ptr<osgDB::Options> mOptions;
+        bool mCheckOpenGLSupport;
 
         ImageManager(const ImageManager&);
         void operator=(const ImageManager&);

@@ -8,20 +8,25 @@
 #include "imagemanager.hpp"
 #include "keyframemanager.hpp"
 #include "niffilemanager.hpp"
+#include "rendermodelmanager.hpp"
 #include "scenemanager.hpp"
 
 namespace Resource
 {
 
-    ResourceSystem::ResourceSystem(
-        const VFS::Manager* vfs, double expiryDelay, const ToUTF8::StatelessUtf8Encoder* encoder)
+    ResourceSystem::ResourceSystem(const VFS::Manager* vfs, double expiryDelay,
+        const ToUTF8::StatelessUtf8Encoder* encoder, bool checkOpenGLSupport)
         : mVFS(vfs)
     {
         mNifFileManager = std::make_unique<NifFileManager>(vfs, encoder);
         mBgsmFileManager = std::make_unique<BgsmFileManager>(vfs, expiryDelay);
-        mImageManager = std::make_unique<ImageManager>(vfs, expiryDelay);
+        mImageManager = std::make_unique<ImageManager>(vfs, expiryDelay, checkOpenGLSupport);
         mSceneManager = std::make_unique<SceneManager>(
             vfs, mImageManager.get(), mNifFileManager.get(), mBgsmFileManager.get(), expiryDelay);
+        mSceneManager->setNativeRendering(!checkOpenGLSupport);
+        mRenderImageManager = std::make_unique<ImageManager>(vfs, expiryDelay, false);
+        mRenderModelManager
+            = std::make_unique<RenderModelManager>(vfs, *mSceneManager, *mRenderImageManager, expiryDelay);
         mKeyframeManager = std::make_unique<KeyframeManager>(vfs, mSceneManager.get(), expiryDelay, encoder);
         mAnimBlendRulesManager = std::make_unique<AnimBlendRulesManager>(vfs, expiryDelay);
 
@@ -30,6 +35,8 @@ namespace Resource
         addResourceManager(mKeyframeManager.get());
         // note, scene references images so add images afterwards for correct implementation of updateCache()
         addResourceManager(mSceneManager.get());
+        addResourceManager(mRenderModelManager.get());
+        addResourceManager(mRenderImageManager.get());
         addResourceManager(mImageManager.get());
         addResourceManager(mAnimBlendRulesManager.get());
     }
@@ -44,6 +51,11 @@ namespace Resource
     SceneManager* ResourceSystem::getSceneManager()
     {
         return mSceneManager.get();
+    }
+
+    RenderModelManager* ResourceSystem::getRenderModelManager()
+    {
+        return mRenderModelManager.get();
     }
 
     ImageManager* ResourceSystem::getImageManager()
@@ -74,7 +86,7 @@ namespace Resource
     void ResourceSystem::setExpiryDelay(double expiryDelay)
     {
         for (std::vector<BaseResourceManager*>::iterator it = mResourceManagers.begin(); it != mResourceManagers.end();
-             ++it)
+            ++it)
             (*it)->setExpiryDelay(expiryDelay);
 
         // NIF files aren't needed any more once the converted objects are cached in SceneManager / BulletShapeManager,
@@ -86,14 +98,14 @@ namespace Resource
     {
         Debug::Trace::Scope trace("Resource cache maintenance");
         for (std::vector<BaseResourceManager*>::iterator it = mResourceManagers.begin(); it != mResourceManagers.end();
-             ++it)
+            ++it)
             (*it)->updateCache(referenceTime);
     }
 
     void ResourceSystem::clearCache()
     {
         for (std::vector<BaseResourceManager*>::iterator it = mResourceManagers.begin(); it != mResourceManagers.end();
-             ++it)
+            ++it)
             (*it)->clearCache();
     }
 
@@ -118,14 +130,14 @@ namespace Resource
     void ResourceSystem::reportStats(unsigned int frameNumber, osg::Stats* stats) const
     {
         for (std::vector<BaseResourceManager*>::const_iterator it = mResourceManagers.begin();
-             it != mResourceManagers.end(); ++it)
+            it != mResourceManagers.end(); ++it)
             (*it)->reportStats(frameNumber, stats);
     }
 
     void ResourceSystem::releaseGLObjects(osg::State* state)
     {
         for (std::vector<BaseResourceManager*>::const_iterator it = mResourceManagers.begin();
-             it != mResourceManagers.end(); ++it)
+            it != mResourceManagers.end(); ++it)
             (*it)->releaseGLObjects(state);
     }
 

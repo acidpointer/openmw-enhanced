@@ -421,6 +421,7 @@ namespace SceneUtil
     void LightManager::setMaxLights(int value)
     {
         mMaxLights = value;
+        mLightStateCache.clear();
     }
 
     Shader::ShaderManager::DefineMap LightManager::getLightDefines() const
@@ -456,6 +457,7 @@ namespace SceneUtil
         if (mPointLightFadeEnd > 0)
             mPointLightFadeStart = mPointLightFadeEnd * lightFadeStart;
         mCullCallback->reset();
+        mLightStateCache.clear();
     }
 
     void LightManager::enableClustered(bool enabled)
@@ -484,6 +486,7 @@ namespace SceneUtil
     {
         mClusteredLighting = true;
         mCullCallback->reset();
+        mLightStateCache.clear();
     }
 
     void LightManager::setLightingMask(size_t mask)
@@ -515,7 +518,7 @@ namespace SceneUtil
                 ++it;
             }
         }
-        mLightListStateSets.clear();
+        mLightStateCache.beginFrame(frameNum);
     }
 
     void LightManager::addLight(LightSource* lightSource, const osg::Matrixf& worldMat, size_t frameNum)
@@ -540,26 +543,15 @@ namespace SceneUtil
     }
 
     osg::ref_ptr<osg::StateSet> LightManager::getLightListStateSet(
-        const LightList& lightList, size_t frameNum, const osg::RefMatrix* viewMatrix)
+        const LightList& lightList, size_t frameNum, const osg::RefMatrix* viewMatrix, osg::Camera* camera)
     {
-        mLightListKey.first = viewMatrix;
-        auto& lightIds = mLightListKey.second;
+        auto& lightIds = mLightListKey;
         lightIds.clear();
         lightIds.reserve(lightList.size());
         for (const LightSourceViewBound* light : lightList)
             lightIds.push_back(light->mLightSource->getId());
 
-        // Reuse key storage on a hit. try_emplace copies the lvalue key only
-        // when inserting, so cached StateSets keep independent immutable keys.
-        auto [found, inserted] = mLightListStateSets.try_emplace(mLightListKey);
-        if (!inserted)
-            return found->second;
-
-        osg::ref_ptr<osg::StateSet> stateset = new osg::StateSet;
-        osg::ref_ptr<osg::Uniform> data = generateLightBufferUniform();
-
-        for (size_t i = 0; i < lightList.size(); ++i)
-        {
+        return mLightStateCache.get(camera, *viewMatrix, frameNum, lightIds, getMaxLights(), [&](std::size_t i) {
             auto* light = lightList[i]->mLightSource->getLight(frameNum);
             osg::Matrixf lightMat;
             configurePosition(lightMat, light->getPosition() * (*viewMatrix));
@@ -570,14 +562,8 @@ namespace SceneUtil
                 light->getQuadraticAttenuation(),
                 lightList[i]->mLightSource->getRadius() * mPointLightRadiusMultiplier);
 
-            data->setElement(static_cast<unsigned int>(i), lightMat);
-        }
-
-        stateset->addUniform(data);
-        stateset->addUniform(new osg::Uniform("PointLightCount", static_cast<int>(lightList.size())));
-
-        found->second = stateset;
-        return stateset;
+            return lightMat;
+        });
     }
 
     const std::vector<LightManager::LightSourceViewBound>& LightManager::getLightsInViewSpace(
@@ -802,7 +788,8 @@ namespace SceneUtil
 
         if (!mLightList.empty())
         {
-            cv->pushStateSet(mLightManager->getLightListStateSet(mLightList, mLastFrameNumber, viewMatrix));
+            cv->pushStateSet(
+                mLightManager->getLightListStateSet(mLightList, mLastFrameNumber, viewMatrix, cv->getCurrentCamera()));
             return true;
         }
         return false;

@@ -92,6 +92,7 @@ namespace SDLUtil
 
         WindowData* inheritedWindowData = dynamic_cast<WindowData*>(_traits->inheritedWindowData.get());
         mWindow = inheritedWindowData ? inheritedWindowData->mWindow : nullptr;
+        mOffscreen = inheritedWindowData && inheritedWindowData->mOffscreen;
 
         mOwnsWindow = (mWindow == nullptr);
         if (mOwnsWindow)
@@ -196,7 +197,8 @@ namespace SDLUtil
         if (!mValid)
             return false;
 
-        SDL_ShowWindow(mWindow);
+        if (!mOffscreen)
+            SDL_ShowWindow(mWindow);
 
         getEventQueue()->syncWindowRectangleWithGraphicsContext();
 
@@ -243,7 +245,7 @@ namespace SDLUtil
 
     void GraphicsWindowSDL2::swapBuffersImplementation()
     {
-        if (!mRealized)
+        if (!mRealized || mOffscreen)
             return;
 
         const auto* stamp = getState() ? getState()->getFrameStamp() : nullptr;

@@ -1,7 +1,11 @@
 #include "screenshotmanager.hpp"
 
+#include <algorithm>
 #include <condition_variable>
+#include <cstring>
 #include <mutex>
+
+#include <components/render/presentation.hpp>
 
 #include <components/stereo/multiview.hpp>
 #include <components/stereo/stereomanager.hpp>
@@ -38,7 +42,7 @@ namespace MWRender
             std::unique_lock<std::mutex> lock(mMutex);
             if (mDone)
                 return;
-            mCondition.wait(lock);
+            mCondition.wait(lock, [this] { return mDone; });
         }
 
         void reset(unsigned int frame)
@@ -99,6 +103,29 @@ namespace MWRender
 
     void ScreenshotManager::screenshot(osg::Image* image, int w, int h)
     {
+        if (w <= 0 || h <= 0)
+            throw std::invalid_argument("Screenshot dimensions must be positive");
+        if (auto* presentation = dynamic_cast<Render::Presentation*>(mViewer->getCamera()->getRenderer()))
+        {
+            // Native frames never execute GL draw callbacks. In particular,
+            // waiting for NotifyDrawCompletedCallback here would deadlock saves.
+            auto pixels = presentation->capture(false);
+            if (!pixels.mWidth || !pixels.mHeight)
+                throw std::runtime_error("Native renderer returned an empty screenshot");
+            const auto cropWidth = std::clamp<std::uint64_t>(std::uint64_t(pixels.mHeight) * w / h, 1, pixels.mWidth);
+            const auto cropHeight = std::clamp<std::uint64_t>(std::uint64_t(pixels.mWidth) * h / w, 1, pixels.mHeight);
+            const auto left = (pixels.mWidth - cropWidth) / 2;
+            const auto top = (pixels.mHeight - cropHeight) / 2;
+            image->allocateImage(cropWidth, cropHeight, 1, GL_RGBA, GL_UNSIGNED_BYTE);
+            image->setOrigin(osg::Image::TOP_LEFT);
+            for (std::uint32_t row = 0; row < cropHeight; ++row)
+                std::memcpy(image->data(0, row),
+                    pixels.mRgba.data() + (std::size_t(top + row) * pixels.mWidth + left) * 4,
+                    std::size_t(cropWidth) * 4);
+            image->scaleImage(w, h, 1);
+            mViewer->advance(mViewer->getFrameStamp()->getSimulationTime());
+            return;
+        }
         osg::Camera* camera = MWBase::Environment::get().getWorld()->getPostProcessor()->getHUDCamera();
         osg::ref_ptr<osg::Drawable> tempDrw = new osg::Drawable;
         tempDrw->setDrawCallback(new ReadImageFromFramebufferCallback(image, w, h));

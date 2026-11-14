@@ -1,12 +1,16 @@
 #include "sdlvideowrapper.hpp"
+#include "drawablesize.hpp"
 
 #include <components/debug/debuglog.hpp>
+#include <components/render/presentation.hpp>
 #include <components/sdlutil/sdlgraphicswindow.hpp>
 #include <components/settings/settings.hpp>
 
 #include <osgViewer/Viewer>
 
 #include <SDL_video.h>
+
+#include <algorithm>
 
 namespace SDLUtil
 {
@@ -36,6 +40,13 @@ namespace SDLUtil
 
     void VideoWrapper::setSyncToVBlank(VSyncMode vsyncMode)
     {
+        if (auto* presentation = dynamic_cast<Render::Presentation*>(mViewer->getCamera()->getRenderer()))
+        {
+            presentation->setPresentMode(vsyncMode == VSyncMode::Disabled ? Render::PresentMode::Immediate
+                    : vsyncMode == VSyncMode::Adaptive                    ? Render::PresentMode::Adaptive
+                                                                          : Render::PresentMode::Fifo);
+            return;
+        }
         osgViewer::Viewer::Windows windows;
         mViewer->getWindows(windows);
         mViewer->stopThreading();
@@ -89,21 +100,24 @@ namespace SDLUtil
         int w, h;
         SDL_GetWindowSize(mWindow, &w, &h);
         int dw, dh;
-        SDL_GL_GetDrawableSize(mWindow, &dw, &dh);
+        getDrawableSize(mWindow, dw, dh);
+        const double scaleX = w > 0 && dw > 0 ? double(dw) / w : 1;
+        const double scaleY = h > 0 && dh > 0 ? double(dh) / h : 1;
 
         if (windowMode == Settings::WindowMode::Fullscreen || windowMode == Settings::WindowMode::WindowedFullscreen)
         {
             SDL_DisplayMode mode;
             SDL_GetWindowDisplayMode(mWindow, &mode);
-            mode.w = width / (dw / w);
-            mode.h = height / (dh / h);
+            mode.w = std::max(1, static_cast<int>(width / scaleX));
+            mode.h = std::max(1, static_cast<int>(height / scaleY));
             SDL_SetWindowDisplayMode(mWindow, &mode);
             SDL_SetWindowFullscreen(mWindow,
                 windowMode == Settings::WindowMode::Fullscreen ? SDL_WINDOW_FULLSCREEN : SDL_WINDOW_FULLSCREEN_DESKTOP);
         }
         else
         {
-            SDL_SetWindowSize(mWindow, width / (dw / w), height / (dh / h));
+            SDL_SetWindowSize(
+                mWindow, std::max(1, static_cast<int>(width / scaleX)), std::max(1, static_cast<int>(height / scaleY)));
             SDL_SetWindowBordered(mWindow, windowBorder ? SDL_TRUE : SDL_FALSE);
 
             centerWindow();

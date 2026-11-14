@@ -28,7 +28,7 @@ namespace SceneUtil
     void ShadowManager::setupShadowSettings(
         const Settings::ShadowsCategory& settings, Shader::ShaderManager& shaderManager)
     {
-        mEnableShadows = settings.mEnableShadows;
+        mEnableShadows = settings.mEnableShadows && !mNativeRendering;
 
         if (mEnableShadows)
             mShadowTechnique->enableShadows();
@@ -73,7 +73,8 @@ namespace SceneUtil
         mShadowTechnique->setSplitPointDeltaBias(settings.mSplitPointBias);
 
         mShadowTechnique->setShadowUpdateInterval(settings.mShadowUpdateInterval);
-        mShadowTechnique->setFrustumExpansion(settings.mShadowFrustumExpansionBase, settings.mShadowFrustumExpansionPerSkip);
+        mShadowTechnique->setFrustumExpansion(
+            settings.mShadowFrustumExpansionBase, settings.mShadowFrustumExpansionPerSkip);
 
         mShadowTechnique->setPolygonOffset(settings.mPolygonOffsetFactor, settings.mPolygonOffsetUnits);
 
@@ -116,7 +117,7 @@ namespace SceneUtil
         fakeShadowMapTexture->setShadowComparison(true);
         fakeShadowMapTexture->setShadowCompareFunc(osg::Texture::ShadowCompareFunc::ALWAYS);
         for (unsigned int i = mShadowSettings->getBaseShadowTextureUnit();
-             i < mShadowSettings->getBaseShadowTextureUnit() + mShadowSettings->getNumShadowMapsPerLight(); ++i)
+            i < mShadowSettings->getBaseShadowTextureUnit() + mShadowSettings->getNumShadowMapsPerLight(); ++i)
         {
             stateset.setTextureAttribute(i, fakeShadowMapTexture,
                 osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
@@ -130,8 +131,9 @@ namespace SceneUtil
 
     ShadowManager::ShadowManager(osg::ref_ptr<osg::Group> sceneRoot, osg::ref_ptr<osg::Group> rootNode,
         unsigned int outdoorShadowCastingMask, unsigned int indoorShadowCastingMask, unsigned int worldMask,
-        const Settings::ShadowsCategory& settings, Shader::ShaderManager& shaderManager)
-        : mShadowedScene(new osgShadow::ShadowedScene)
+        const Settings::ShadowsCategory& settings, Shader::ShaderManager& shaderManager, bool nativeRendering)
+        : mNativeRendering(nativeRendering)
+        , mShadowedScene(new osgShadow::ShadowedScene)
         , mShadowTechnique(new MWShadowTechnique)
         , mOutdoorShadowCastingMask(outdoorShadowCastingMask)
         , mIndoorShadowCastingMask(indoorShadowCastingMask)
@@ -166,7 +168,7 @@ namespace SceneUtil
 
     Shader::ShaderManager::DefineMap ShadowManager::getShadowDefines(const Settings::ShadowsCategory& settings) const
     {
-        if (!settings.mEnableShadows)
+        if (!settings.mEnableShadows || mNativeRendering)
             return getShadowsDisabledDefines();
 
         Shader::ShaderManager::DefineMap definesWithShadows;

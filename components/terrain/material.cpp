@@ -189,7 +189,7 @@ namespace Terrain
         std::vector<osg::ref_ptr<osg::StateSet>> passes;
 
         // Gated until image comparisons cover intermediate framebuffer rounding.
-        const bool batchLayers = !isComposite && !esm4terrain && !blendmaps.empty()
+        const bool batchLayers = !sceneManager->usesNativeRendering() && !isComposite && !esm4terrain && !blendmaps.empty()
             && shaderManager.getAvailableTextureUnits() >= 4
             && SceneUtil::Enhanced::settingBool("Terrain", "batch texture layers", false);
         unsigned int blendmapIndex = 0;

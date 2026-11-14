@@ -78,8 +78,8 @@ namespace SDLUtil
         bool mWindowHasFocus;
         bool mMouseInWindow;
 
-        Uint16 mScaleX;
-        Uint16 mScaleY;
+        float mScaleX = 1;
+        float mScaleY = 1;
     };
 
 }

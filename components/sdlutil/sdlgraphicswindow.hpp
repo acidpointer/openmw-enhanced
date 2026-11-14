@@ -18,6 +18,7 @@ namespace SDLUtil
         bool mValid;
         bool mRealized;
         bool mOwnsWindow;
+        bool mOffscreen = false;
         VSyncMode mVSyncMode;
 
         void init();
@@ -82,12 +83,14 @@ namespace SDLUtil
         /** WindowData is used to pass in the SDL2 window handle attached to the GraphicsContext::Traits structure. */
         struct WindowData : public osg::Referenced
         {
-            WindowData(SDL_Window* window)
+            WindowData(SDL_Window* window, bool offscreen = false)
                 : mWindow(window)
+                , mOffscreen(offscreen)
             {
             }
 
             SDL_Window* mWindow;
+            bool mOffscreen;
         };
 
     private:

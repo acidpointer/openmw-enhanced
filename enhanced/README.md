@@ -1295,3 +1295,277 @@ check interiors/doors/worldspace transitions and shutdown, and record the CPU/GP
 and occlusion statistics described above. Further batching, shadow submission,
 lighting, and driver/swap work should follow the timings. Mod effects remain
 outside the optimization scope.
+
+## Follow-up optimization plan after drawable reduction
+
+Status: L1 source implementation and regression fixtures are present; build,
+fixture execution and runtime validation remain pending. L2 through C1 below
+remain planned. This section records both delivery status and remaining work.
+The user reports a large reduction in fast drawables, steadier FPS and improved
+input response, but only approximately 1–5 FPS improvement. This establishes
+useful visibility/submission savings; it does not establish the remaining CPU
+versus GPU bottleneck. All current rendering and startup fixes stay applied.
+Changes are forward fixes, with no rollback or hidden quality-setting changes.
+The separate exit-crash work, user configuration, mods and saves remain intact.
+
+The saved settings provide prioritization context, not a live frame capture:
+forced per-pixel lighting, the default nonclustered backend and 16-light limit,
+2880x1800 output, shader water/refraction with reflection detail 2, and enabled
+NPC collision avoidance. Reflection detail 2 excludes actor geometry. Shadows
+are disabled in the saved file. Live F2 effects and toggles can differ.
+
+### Evidence and delivery order
+
+| Package | Source evidence | Intended result |
+| --- | --- | --- |
+| L1: lighting state/data reuse | `LightManager::update` clears `mLightListStateSets`; cache misses allocate StateSets, uniforms and a light matrix per selected light. | Reuse bounded frame-safe objects and pack each light once per view. |
+| L2: reusable light broad phase | Per-camera spatial indices are invalidated every update; dense queries fall back after at most 64 candidates. | Retain unchanged spatial structure and avoid rebuilding equivalent trees for multiple cameras. |
+| S1: skinned geometry | `RigGeometry::accept` enters CPU skinning directly; skinning allocates a bone-matrix vector and dirties dynamic arrays. | Reject eligible hidden parts before deformation and reuse scratch storage. |
+| A1: actor avoidance | `predictAndAvoidCollisions` scans actor pairs before its 100/200-unit distance rejection; `getObjectsInRange` is also linear. | Replace the avoidance broad phase with exact local-neighbour enumeration. |
+| G1: unused lighting calculations | Object/terrain fragment paths calculate specular light before material multiplication; terrain repeats lighting per layer. | Omit only proven zero-contribution lighting work without altering materials or layer blending. |
+| W1: water shader and copies | Above-water shading checks a 3x3 depth neighbourhood; opaque resolve copies colour and depth, including another resolve after far-side transparent draws. | Preserve the water result while avoiding unnecessary samples and unused attachment copies. |
+| O1: preparation overhead | `OcclusionPlan::prepare` sorts before checking depth reuse; detailed rectangle-query clocks run without a statistics requirement. | Preserve coverage while reducing repeated selection and diagnostic overhead. |
+| W2: reflection visibility | Reflection accepts the world through a separate camera; the software-occlusion scene callback admits only the main camera. | Give reflections independent conservative visibility, preserving main-view cache reuse. |
+| C1: clustered-light correctness | `cull.comp` increments `g_Count` before checking 512-entry capacity, then copies and publishes that uncapped count. | Remove out-of-bounds accesses and preserve illumination on overflow. |
+
+Deliver L1, L2, S1 and A1 as separately reviewable changes first. G1 and W1
+follow with shader/image coverage. O1 can follow once source invalidation hooks
+are complete. W2 is a later view-ownership change. C1 is independent correctness
+work and a prerequisite for any proposal to enable clustered lighting; it does
+not explain performance with that backend disabled. Counters accompany these
+changes rather than replacing an optimization package.
+
+### L1: bounded lighting-state and parameter reuse
+
+Modify `components/sceneutil/lightmanager.{hpp,cpp}` and extend the existing
+`apps/components_tests/sceneutil/lightmanager.cpp` production-callback fixtures.
+
+1. Replace unconditional cache destruction with a bounded retained cache using
+   separate writable frame slots. Never mutate a uniform or StateSet still
+   consumed by another in-flight frame. Use the renderer's existing frame-buffer
+   lifetime rules and retain a transient fallback when retained capacity is full.
+2. Use ordered light IDs for membership. Associate entries with weak camera/view
+   identities, stereo eye and view-instance slots; a raw `RefMatrix*` address is
+   not a persistent identity. Track frame and exact view matrix separately as
+   freshness inputs. Multiple matrices for the same camera in one frame require
+   distinct slots. Unknown view identity uses fresh state rather than sharing.
+3. Pack transformed position, colours, attenuation and radius once per light per
+   view/frame, then assemble each legacy `LightBuffer` from those packed values.
+   Preserve existing light selection and ordering, including negative lights,
+   ignored sources, flicker, fading and per-object limits. The first package
+   retains the existing uniform ABI and material shaders.
+4. Refresh parameters when they change even if membership stays identical. Keep
+   intensity/colour revisions separate from membership and transform revisions.
+   Retire expired cameras and old combinations under an explicit entry/memory
+   budget. Cache storage must not retain scene-node ownership cycles.
+
+Acceptance: unchanged light combinations reuse StateSet/uniform objects in the
+corresponding frame slot after warm-up; all packed values match the reference
+path. Tests hold the previous frame's state while preparing the next, change
+camera matrices and eyes, remove/move/fade lights, and repeatedly load/unload
+cells. Retained memory and warm allocations must plateau. A shared GPU light
+table with per-object indices is a later backend change, not required for L1.
+
+L1 implementation: `components/sceneutil/lightstatecache.{hpp,cpp}` now owns
+the retained state. Ordered light IDs keep the existing membership and shader
+ABI. Weak camera identities and exact view-matrix values separate views, with
+four view slots per camera and two frame slots under the existing renderer
+lifetime contract. Repeated updates of one frame allocate a fresh snapshot.
+Camera expiry, frame reset, light-limit and lighting-setting changes release or
+invalidate retained state without mutating old snapshots held by draw traversal.
+
+Retention is capped at 8,192 StateSets, 16 MiB of uniform-matrix payload,
+32,768 packed-light records and 16 cameras; the two frame slots reserve equal
+shares of the state/data budgets. Metadata is additional to that payload bound.
+Overflow or unknown camera identities use frame-local deduplication, preserving
+all selected lights. Unused entries age out after 120 frames, or two frames
+under pressure. Each selected light is packed once per view/frame, lazily.
+Unchanged packed values do not dirty retained uniforms; cache-wide revision
+tokens prevent stale values when packed records are evicted and recreated.
+
+New cache fixtures cover frame snapshots, reversed view visitation, anonymous
+and excess views/cameras, warm object reuse, unchanged uniform dirty counts,
+budget overflow, packed-record recreation, camera expiry and layout/reset
+invalidation. Production LightManager fixtures check moved lights, negative
+colours, attenuation/radius, view transforms and setting changes. C++ frontend
+checks cover these fixtures, the manager/helper and representative animation,
+paging and terrain callers. Builds and fixture execution are pending, following
+the repository's agent restrictions. No measured FPS improvement is claimed.
+
+### L2: spatial reuse without changing light selection
+
+Keep source records in world space with spatial revisions for membership,
+position, scale and influence radius. Intensity-only animation must not rebuild
+spatial structure. Reuse unchanged structure across cameras; refit changed
+bounds or rebuild when the dirty set makes refitting unattractive. Resolve
+current-view eligibility/fading by stable light ID before the final predicate.
+
+The broad phase remains conservative. Preserve the existing view-space sphere
+intersection and ranking for the final selection; unusual nonrigid views and
+malformed bounds retain the linear reference path. Retain current input order
+before ranking. Light selection ties cannot silently change because another
+query order happened to choose different equally ranked coloured lights.
+
+Do not simply raise the 64-candidate budget. A dense all-overlapping scene can
+still require examining every light. Keep the existing dense fallback until an
+alternative proves a net reduction in work. Exact top-K traversal is a possible
+follow-on only after conservative priority bounds and tie equivalence are proven.
+Hiding a lamp mesh is not sufficient to reject its light: its influence volume
+can illuminate visible surfaces. Classic attenuation without a finite cutoff,
+negative lights and invisible light markers need their existing semantics.
+
+Acceptance extends the existing randomized/tangent/dense light tests: exact
+selected IDs/order and uniform values must match the reference across motion,
+radius/fade changes, camera changes and removals. Stable geometry should avoid
+tree rebuilds; changing a light's colour alone must update lighting correctly.
+
+### S1: visibility before CPU skinning
+
+Modify `components/sceneutil/riggeometry.{hpp,cpp}` and audit the corresponding
+`riggeometryosgaextension` path independently. Preserve the existing once-per-
+frame deformation guard; multiple cameras do not currently imply repeated full
+CPU skinning in the same frame.
+
+Add conservative local visibility checks before deformation using the correct
+current transform and fresh animated bounds. Honour culling exclusions, node
+masks, near-plane fallbacks and camera ownership. Uninitialized, stale or
+uncertain bounds stay visible. Semi-active skeletons intentionally stop some
+updates after missed cull frames; an old pose's bounds cannot become proof that
+a newly extended limb is hidden. Use a pose/bounds revision or a proven animation
+envelope, and fail open when freshness cannot be established.
+
+Reuse each mesh's bone-matrix scratch capacity. A pose-reuse fast path must also
+account for skin-to-skeleton transforms, source geometry, influences, morphs and
+model replacement. Per-mesh inverse-bind transforms prevent blindly sharing a
+finished palette between different body parts. Primitive/picking queries must
+continue to obtain current CPU geometry. GPU skinning is a separate later design
+requiring a compatibility fallback and on-demand CPU deformation for such queries.
+
+Acceptance: rejected parts perform no deformation/upload preparation; visible
+parts retain the reference vertices, normals and tangents. Fixtures cover new
+actors, equipment replacement, large animation poses, three-frame semi-active
+transitions, mirrors, first person, near-plane crossings and culling exclusions.
+
+### A1: local actor avoidance with identical behaviour
+
+First optimize only `Actors::predictAndAvoidCollisions`. Build a spatial grid of
+actor centre positions for that invocation. Query the existing 100/200-unit
+neighbourhood, then run the original distance, vertical, front-facing, target,
+collision-time, LOS and awareness predicates unchanged. Include boundary padding
+and a linear fallback for malformed/extreme coordinates. Keep the player, dead
+bodies and stationary give-way actors eligible exactly as before.
+
+Return candidate indices in original actor-cache order. The loop reads references
+to movement and may turn actors; later actors observe corrections made earlier
+in the same invocation. Snapshotting all velocities/rotations would change
+behaviour. Reuse scratch storage without retaining live actor references across
+cell unload or teleportation.
+
+Compare both neighbour enumeration and final movement/turn decisions against the
+full scan on sparse, dense, boundary, vertical-separation, corpse and tie cases.
+Make the neighbour provider replaceable in the production avoidance kernel so
+fixtures compare linear and indexed enumeration through the same calculation,
+including live movement/rotation reads, rather than copying the gameplay formula
+into a second test implementation.
+All actors occupying one neighbourhood may still require quadratic work. Extend
+the index to head tracking/range queries only after movement/teleport invalidation
+and traversal order are covered. Leave combat scheduling and offscreen gameplay
+updates intact; rendering occlusion must not freeze actors' simulation.
+
+### G1 and W1: equivalent shader work and consumer-proven copies
+
+For lighting, add a diffuse/ambient-only path when specular contribution is
+provably zero. Account for specular maps, vertex-colour specular tracking,
+material changes, material strength and all shader users. A zero base material
+colour alone is insufficient when a map or tracked vertex colour overrides it.
+Keep normal detail, selected lights, attenuation and terrain layer blending.
+
+For water, an above-water pixel whose deep-water blend is fully saturated does
+not need the nine-sample opaque-presence test to select its deep-water colour.
+Retain raw refraction inputs used later by wobbly shores and scattering. Within
+the neighbourhood test, returning false after finding a clear-depth sample is
+equivalent for finite depth; use derivative-safe sampling and retain the
+compatibility path where required. Do not replace the 3x3 predicate with a centre-
+only test, shrink resolution, or remove normal/ripple layers.
+
+Split opaque colour and depth requirements using actual submitted consumers and
+the effective frame plan. Soft particles/distortion can require depth without
+colour, and water requires its inputs with PP off. A second copy after below-water
+transparent draws may have different requirements from the first. Unknown custom
+shader consumers conservatively retain legacy inputs. Determine requirements
+from CPU-side shader/material metadata, not synchronous GL program queries.
+Do not remove depth from that second copy merely by assuming transparent draws
+never write it; the submitted materials must establish that fact.
+
+Acceptance uses actual render callbacks and offscreen image comparisons for
+water/shore/sky edges, particles, hands, distortion, unknown material consumers,
+refraction, reverse Z, both framebuffer slots, MSAA and stereo. Compare emitted
+copy masks and explicit replay counts as well as images. The compiled shader
+matrix must cover zero/nonzero specular, vertex tracking and mapped materials.
+
+### O1: reduce preparation overhead while preserving invalidation
+
+First avoid ranking/sorting when exact view inputs and a fully validated stable
+source set are unchanged. Cache per-placement projected importance for matching
+inputs. Continue cheap source validation until all insertion, movement, mask,
+fade, replacement, cell and paging mutation paths publish reliable revisions.
+Asynchronous mesh readiness is also a source change: an unchanged camera must
+still gain newly ready occluders. Worker completion must not retain live nodes.
+
+A later revision-based fast path can skip enumeration only when these events
+are complete; unknown/custom mutation paths keep validation or fail open. Never
+reuse stale depth to save a scan. Add conservative parent-cell frustum rejection
+before enumerating eligible placements where bounds and culling flags permit it.
+
+Gate detailed per-rectangle query timing behind statistics/debug collection.
+Keep raster, candidate and aggregate overhead timing required by the configured
+budget and adaptive policy. Reuse/defer coverage with the current safety rules.
+Acceptance retains fresh-versus-reused visibility equivalence, late readiness,
+removal/movement/masks, traversal-order and no-preparation-submission regressions.
+
+### W2 and C1: view ownership and clustered safety
+
+For reflections, introduce a bounded pool of independent view-depth contexts with
+main-view priority. Route queries through the scoped active view without swapping
+global callback pointers. Main/stereo/reflection views must not overwrite each
+other's cached depth. Unsupported or excess views render normally.
+
+Represent the actual mirrored transforms, effective front-face winding, and
+water clip plane. Occluders clipped out by the GPU must not contribute software
+depth. This includes terrain. Cache safe plane-clipped immutable proxies where
+appropriate; missing proxies lose coverage rather than hide geometry. Respect
+the reflection detail mask and current water/terrain visibility gates. Tests
+need geometry on/crossing either side of the plane, above/below-water cameras,
+mirror winding, moving objects, stereo and cache pressure. Keep this package
+separate from W1; blindly reusing main-camera depth is not an implementation.
+
+For clustered lighting, cap shared-list copying and global allocation to real
+capacity, publish overflow explicitly, and make every consumer handle it,
+including water point-specular shading. An overflow fallback must preserve
+illumination, for example by evaluating the full valid light table for the
+affected cluster. Silently dropping lights or increasing a fixed limit is not
+the planned solution. Validate cluster indexing and total index-buffer bounds
+as well as the shared array. GPU fixtures must exercise 0, 511, 512, 513 and
+larger overlapping-light sets and compare against brute-force lighting.
+
+The current clustered assignment scans the light table for every cluster. A
+future light-centric/tiled assignment or shared-table backend needs a separate
+performance/compatibility comparison. No automatic backend switch is included
+in these packages.
+
+### Verification and completion
+
+Pair each package with its semantic and lifetime regressions and bounded optional
+counters. Useful invariants include warm lighting allocations, tree rebuilds,
+selected-light equality, deformed vertices, actual neighbour candidates, copy
+masks and occlusion ranking work. These enable automated attribution without
+requesting another manual debug replay.
+
+Agents perform scoped static review and C++/GLSL frontend checks only. Per
+`AGENTS.md`, maintainers/CI execute builds, component fixtures and offscreen GPU
+tests. Fixed-scene comparisons should cover dense lights, crowds, waterfronts,
+land-only scenes and both GPU classes, using identical content and quality.
+Record frame time and variability, not just drawable counts. Gate each change
+on its own correctness and resource limits; no numerical FPS gain is promised
+from this static plan. Startup/exit and configuration compatibility remain
+acceptance requirements for every delivery.

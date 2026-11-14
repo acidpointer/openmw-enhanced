@@ -3,10 +3,12 @@
 #include "sdlinit.hpp"
 
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QFile>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
+#include <QStandardItemModel>
 #include <components/config/launchersettings.hpp>
 
 #include <components/misc/display.hpp>
@@ -30,6 +32,23 @@ Launcher::GraphicsPage::GraphicsPage(
 
     auto* gpuBox = new QGroupBox(tr("Rendering GPU"), this);
     auto* gpuLayout = new QFormLayout(gpuBox);
+    mRendererSelector = new QComboBox(gpuBox);
+    mRendererSelector->addItem(tr("OpenGL"), "opengl");
+    mRendererSelector->addItem(tr("Vulkan (experimental)"), "vulkan");
+#ifdef Q_OS_WIN
+    const auto vulkanModule = QStringLiteral("/openmw-renderer-vulkan.dll");
+#else
+    const auto vulkanModule = QStringLiteral("/openmw-renderer-vulkan.so");
+#endif
+    if (!QFile::exists(QCoreApplication::applicationDirPath() + vulkanModule))
+    {
+        auto* model = static_cast<QStandardItemModel*>(mRendererSelector->model());
+        model->item(1)->setEnabled(false);
+        model->item(1)->setToolTip(tr("The Vulkan renderer module is not installed with this build."));
+    }
+    mRendererSelector->setToolTip(
+        tr("Applies the next time you launch the game. Vulkan currently uses a basic material pipeline."));
+    gpuLayout->addRow(tr("Renderer"), mRendererSelector);
     mGpuSelector = new QComboBox(gpuBox);
     mGpuSelector->setToolTip(tr("Applies the next time you launch the game."));
     mLastRenderer = new QLabel(gpuBox);
@@ -91,6 +110,7 @@ bool Launcher::GraphicsPage::setupSDL()
 
 bool Launcher::GraphicsPage::loadSettings()
 {
+    mRendererSelector->setCurrentIndex(Settings::video().mRenderer.get() == "vulkan" ? 1 : 0);
     loadGpuSelection();
     if (!setupSDL())
         return false;
@@ -147,6 +167,7 @@ bool Launcher::GraphicsPage::loadSettings()
 
 void Launcher::GraphicsPage::saveSettings()
 {
+    Settings::video().mRenderer.set(mRendererSelector->currentData().toString().toStdString());
     mLauncherSettings.setRenderGpu(mGpuSelector->currentData().toString());
     // Visuals
 
@@ -350,13 +371,17 @@ void Launcher::GraphicsPage::loadGpuSelection()
     {
         // Bound I/O while allowing for startup diagnostics in heavily modded games.
         const QString header = QString::fromUtf8(log.read(256 * 1024));
-        const QString marker = QStringLiteral("OpenGL Renderer: ");
+        const QString marker = header.contains(QStringLiteral("Vulkan Renderer: "))
+            ? QStringLiteral("Vulkan Renderer: ")
+            : QStringLiteral("OpenGL Renderer: ");
         const auto pos = header.indexOf(marker);
         if (pos >= 0)
         {
             const auto start = pos + marker.size();
             const auto end = header.indexOf('\n', start);
-            mLastRenderer->setText(header.mid(start, end < 0 ? -1 : end - start).trimmed());
+            mLastRenderer->setText(
+                (marker.startsWith("Vulkan") ? QStringLiteral("Vulkan: ") : QStringLiteral("OpenGL: "))
+                + header.mid(start, end < 0 ? -1 : end - start).trimmed());
         }
     }
 }

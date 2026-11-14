@@ -58,6 +58,8 @@ namespace Resource
         explicit SceneManager(const VFS::Manager* vfs, Resource::ImageManager* imageManager,
             Resource::NifFileManager* nifFileManager, Resource::BgsmFileManager* bgsmFileManager, double expiryDelay);
         ~SceneManager();
+        void setNativeRendering(bool value) { mNativeRendering = value; }
+        bool usesNativeRendering() const { return mNativeRendering; }
 
         Shader::ShaderManager& getShaderManager();
 
@@ -118,6 +120,10 @@ namespace Resource
         ///  If even the error marker mesh can not be found, an exception is thrown.
         /// @note Thread safe.
         osg::ref_ptr<const osg::Node> getTemplate(VFS::Path::NormalizedView path, bool compile = true);
+
+        // CPU loader output before GL shader generation, state rewriting or
+        // compilation. The supplied image manager owns API capability policy.
+        osg::ref_ptr<osg::Node> readModel(VFS::Path::NormalizedView path, ImageManager& images) const;
 
         /// Clone osg::Node safely.
         /// @note Thread safe.
@@ -224,6 +230,7 @@ namespace Resource
         bool mSupportsNormalsRT = false;
         bool mWeatherParticleOcclusion = false;
         bool mUnRefImageDataAfterApply = false;
+        bool mNativeRendering = false;
 
         SceneManager(const SceneManager&) = delete;
         void operator=(const SceneManager&) = delete;

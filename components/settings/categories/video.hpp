@@ -20,6 +20,8 @@ namespace Settings
     {
         using WithIndex::WithIndex;
 
+        SettingValue<std::string> mRenderer{ mIndex, "Video", "renderer" };
+
         SettingValue<int> mResolutionX{ mIndex, "Video", "resolution x", makeMaxSanitizerInt(1) };
         SettingValue<int> mResolutionY{ mIndex, "Video", "resolution y", makeMaxSanitizerInt(1) };
         SettingValue<WindowMode> mWindowMode{ mIndex, "Video", "window mode" };

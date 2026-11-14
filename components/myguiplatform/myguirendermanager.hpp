@@ -26,6 +26,8 @@ namespace osg
     class Camera;
     class RenderInfo;
     class StateSet;
+    class Array;
+    class Texture2D;
 }
 
 namespace MyGUIPlatform
@@ -33,6 +35,15 @@ namespace MyGUIPlatform
 
     class Drawable;
     class OSGTexture;
+
+    // Collect the existing CPU widget batches without creating GL buffers.
+    class DrawSink
+    {
+    public:
+        virtual ~DrawSink() = default;
+        virtual void drawGui(
+            const osg::Array& vertices, std::size_t count, osg::Texture2D* texture, osg::StateSet* state) = 0;
+    };
 
     class RenderManager : public MyGUI::RenderManager, public MyGUI::IRenderTarget
     {
@@ -55,6 +66,7 @@ namespace MyGUIPlatform
         float mInvScalingFactor;
 
         osg::StateSet* mInjectState;
+        DrawSink* mDrawSink = nullptr;
 
     public:
         RenderManager(osgViewer::Viewer* viewer, osg::Group* sceneroot, Resource::ImageManager* imageManager,
@@ -121,6 +133,7 @@ namespace MyGUIPlatform
         /*internal:*/
 
         void collectDrawCalls();
+        void setDrawSink(DrawSink* sink) { mDrawSink = sink; }
     };
 
 }
