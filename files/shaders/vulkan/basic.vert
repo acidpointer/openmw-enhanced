@@ -102,6 +102,12 @@ void main()
     skyAtmosphere = data.ambient;
     opacity = data.parameters.z;
     color = materialShader == 2u ? vertexColor * data.tint : diffuse * data.tint;
+    if (materialShader == 1u)
+    {
+        // Water computes its own optical opacity, independent of mesh alpha.
+        color = data.tint;
+        skyDiffuse = data.sunAmbient;
+    }
     specularColor = vec3(0.0);
     screenPosition = gl_Position;
     if (materialShader == 4u)

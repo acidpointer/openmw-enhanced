@@ -174,7 +174,6 @@ set(BUILTIN_DATA_FILES
     shaders/bloomlinear.omwfx
     shaders/debug.omwfx
     shaders/internal_distortion.omwfx
-    shaders/screen_space_shadows.omwfx
 
     mygui/core.skin
     mygui/core.xml
@@ -266,6 +265,17 @@ set(BUILTIN_DATA_FILES
     mygui/OpenMWResourcePlugin.xml
     mygui/skins.xml
 )
+
+# Installation copies the generated resource directory. Retire the old shader
+# there too, so cached builds cannot package a removed source asset again.
+get_generator_is_multi_config(multi_config)
+if (multi_config)
+    foreach(cfgtype ${CMAKE_CONFIGURATION_TYPES})
+        file(REMOVE "${OPENMW_RESOURCES_ROOT}/${cfgtype}/resources/vfs/shaders/screen_space_shadows.omwfx")
+    endforeach()
+else()
+    file(REMOVE "${OPENMW_RESOURCES_ROOT}/resources/vfs/shaders/screen_space_shadows.omwfx")
+endif()
 
 foreach (f ${BUILTIN_DATA_FILES})
     copy_resource_file("${CMAKE_CURRENT_SOURCE_DIR}/${f}" "${OPENMW_RESOURCES_ROOT}" "resources/vfs/${f}")

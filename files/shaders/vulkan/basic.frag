@@ -5,6 +5,7 @@ layout(constant_id = 1) const bool writeNormals = true;
 
 layout(set = 0, binding = 0) uniform sampler2D diffuseMap;
 layout(set = 1, binding = 0) uniform sampler2D blendMap;
+layout(set = 3, binding = 0) uniform sampler2D opaqueWaterDepth;
 layout(push_constant) uniform FogState
 {
     vec4 color;
@@ -59,22 +60,45 @@ void main()
         tangent *= orientation * inversesqrt(max(dot(tangent, tangent), 1e-20));
         bitangent *= orientation * inversesqrt(max(dot(bitangent, bitangent), 1e-20));
         surfaceNormal = normalize(tangent * field.x + bitangent * field.y + surfaceNormal * field.z);
+        vec3 eyeDirection = -viewPosition * inversesqrt(max(dot(viewPosition, viewPosition), 1e-12));
+        // Read the opaque depth snapshot at the exact framebuffer pixel. This
+        // also handles negative-height window viewports without an extra Y flip.
+        ivec2 depthPixel = clamp(ivec2(gl_FragCoord.xy), ivec2(0), textureSize(opaqueWaterDepth, 0) - 1);
+        float bottom = texelFetch(opaqueWaterDepth, depthPixel, 0).r;
+        float denominator = bottom * skyAtmosphere.z - skyAtmosphere.x;
+        float thickness = 5000.0;
+        if (bottom < 1.0 && abs(denominator) > 1e-8)
+        {
+            float bottomDistance = abs((skyAtmosphere.y - bottom * skyAtmosphere.w) / denominator);
+            // Projection depth measures camera Z. Convert the separation to
+            // optical distance along this pixel's viewing ray.
+            thickness = max(bottomDistance - abs(viewPosition.z), 0.0) / max(abs(eyeDirection.z), 1e-6);
+        }
+        // Beer-Lambert absorption starts at the shore, rather than leaving the
+        // first 2500 world units completely transparent. 2500 is the e-folding
+        // visibility distance; log2(e) expresses the exponential as exp2.
+        float transmission = bottom < 1.0 ? exp2(-thickness * (1.44269504089 / 2500.0)) : 0.0;
+        if (dot(viewNormal, -viewPosition) < 0.0)
+            transmission = 1.0; // Underwater fog is applied by the scene path.
         vec3 reflected = fog.color.rgb;
         if (materialKind > 2.125)
         {
             vec2 projectedUV = screenPosition.xy / max(abs(screenPosition.w), 1e-6) * 0.5 + 0.5;
             // Reflection rows follow the same bottom-up convention as the
             // scene target. Do not introduce an extra image-space Y flip.
-            vec2 reflectedUV = clamp(projectedUV + field.xy * .10, vec2(.001), vec2(.999));
+            vec2 reflectedUV = clamp(projectedUV + field.xy * .10 * clamp(thickness / 300.0, 0.0, 1.0),
+                vec2(.001), vec2(.999));
             reflected = texture(blendMap, reflectedUV).rgb;
         }
-        vec3 eyeDirection = -viewPosition * inversesqrt(max(dot(viewPosition, viewPosition), 1e-12));
         float facing = clamp(abs(dot(surfaceNormal, eyeDirection)), 0.0, 1.0);
         float fresnel = .02037 + .97963 * pow(1.0 - facing, 5.0);
-        // Alpha blending performs the Fresnel mix with the scene already
-        // behind the surface. Do not multiply reflection by Fresnel twice or
-        // replace transmission with an arbitrary opaque blue sheet.
-        result = vec4(reflected, fresnel) * color;
+        vec3 bodyColor = vec3(.090195, .115685, .12745) * length(skyDiffuse.rgb);
+        float bodyWeight = (1.0 - fresnel) * (1.0 - transmission);
+        float alpha = fresnel + bodyWeight;
+        // Straight-alpha blending reproduces reflection + body absorption +
+        // transmitted framebuffer color, without copying the scene color.
+        result = vec4((reflected * fresnel + bodyColor * bodyWeight) / max(alpha, 1e-6), alpha);
+        result.rgb *= color.rgb;
     }
     else if ((materialShader == 0u || materialShader == 5u) && materialKind > 0.5 && materialKind < 1.5)
         result.a = color.a * texture(blendMap, maskUV).a;

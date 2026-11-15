@@ -276,6 +276,22 @@ namespace
         EXPECT_FLOAT_EQ(stream.mVertices[1].mUV[0], .25f);
     }
 
+    TEST(RenderProjection, OpaqueWaterDepthRetainsWorldDistanceAtLongViewRanges)
+    {
+        RenderAssets::OsgState state;
+        const auto projection
+            = RenderAssets::clipProjection(state, osg::Matrixd::perspective(75, 1.6, 1, 81920), false);
+        const auto coefficients = RenderAssets::depthCoefficients(projection, true);
+        for (double distance : { 20., 2500., 5000., 40000. })
+        {
+            const auto clip = osg::Vec4d(0, 0, -distance, 1) * projection;
+            const float sample = static_cast<float>(clip.z() / clip.w());
+            const float viewZ
+                = (coefficients[1] - sample * coefficients[3]) / (sample * coefficients[2] - coefficients[0]);
+            EXPECT_NEAR(-viewZ, distance, distance * .01);
+        }
+    }
+
     TEST(RenderProjection, FirstPersonDepthCanBeReadInTheWorldProjection)
     {
         const auto world = osg::Matrixd::perspective(75, 1.6, 3, 5000);

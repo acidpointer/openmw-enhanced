@@ -100,6 +100,8 @@ namespace Render
         std::span<const std::uint32_t> mVertex;
         std::span<const std::uint32_t> mFragment;
         std::span<const EffectBinding> mBindings;
+        // Conservative default for callers without shader reflection.
+        bool mVertexTextureReads = true;
     };
     struct EffectInput
     {
@@ -249,6 +251,8 @@ namespace Render
         bool mDistortion = false;
         float mDistortionStrength = 1;
         bool mWater = false;
+        // Rational depth coefficients for the water draw's zero-to-one projection.
+        std::array<float, 4> mWaterProjection{};
         bool mSky = false;
         int mSkyPass = -1;
         float mOpacity = 1;
@@ -404,7 +408,7 @@ namespace Render
     // Private, same-build module ABI. Creation and destruction stay paired in
     // the module; errors are copied into caller-owned memory, never thrown
     // through the exported entry point. No graphics API types cross it.
-    inline constexpr std::uint32_t BackendAbi = 11;
+    inline constexpr std::uint32_t BackendAbi = 12;
     using CreateBackend = Backend* (*)(std::uint32_t abi, const BackendOptions*, char* error, std::size_t errorSize);
     using DestroyBackend = void (*)(Backend*);
 }

@@ -42,6 +42,31 @@ namespace
         }
     };
 
+    TEST(NativeEffectShader, PresentationPreservesFramebufferCoordinatesAndYDerivatives)
+    {
+        Module shader;
+        shader.name(15, { 4, 1 }, "main");
+        EXPECT_FALSE(RenderAssets::effectRequiresOffscreen(shader.words));
+        for (unsigned builtin : { 15u, 17u })
+        {
+            auto direct = shader;
+            direct.instruction(71, { 1, 11, builtin });
+            EXPECT_TRUE(RenderAssets::effectRequiresOffscreen(direct.words));
+            auto block = shader;
+            block.instruction(72, { 1, 0, 11, builtin });
+            EXPECT_TRUE(RenderAssets::effectRequiresOffscreen(block.words));
+        }
+        for (unsigned op : { 208u, 211u, 214u })
+        {
+            auto derivative = shader;
+            derivative.instruction(op, { 1, 2, 3 });
+            EXPECT_TRUE(RenderAssets::effectRequiresOffscreen(derivative.words));
+        }
+        EXPECT_TRUE(RenderAssets::effectRequiresOffscreen({}));
+        shader.words.push_back(0);
+        EXPECT_TRUE(RenderAssets::effectRequiresOffscreen(shader.words));
+    }
+
     TEST(NativeEffectShader, CoveragePreservesDiscardingAndSampleMaskedOutputs)
     {
         Module full;

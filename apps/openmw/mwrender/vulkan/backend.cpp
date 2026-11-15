@@ -86,6 +86,7 @@ namespace MWRender::Vulkan
             VkRenderPass mClear = VK_NULL_HANDLE;
             VkRenderPass mLoad = VK_NULL_HANDLE;
             VkRenderPass mOverwrite = VK_NULL_HANDLE;
+            VkRenderPass mResume = VK_NULL_HANDLE;
         };
 
         struct Sampler
@@ -158,6 +159,8 @@ namespace MWRender::Vulkan
             std::shared_ptr<Image> mNormals;
             std::shared_ptr<Image> mWorldDepth;
             bool mWorldDepthInitialized = false;
+            std::shared_ptr<Image> mWaterDepth;
+            bool mWaterDepthInitialized = false;
             std::optional<std::size_t> mUpload;
             std::uint64_t mLastSubmission = 0;
             explicit Image(VkDevice device)
@@ -184,7 +187,9 @@ namespace MWRender::Vulkan
             VkDescriptorSetLayout mDescriptorLayout = VK_NULL_HANDLE;
             VkPipelineLayout mLayout = VK_NULL_HANDLE;
             std::array<VkShaderModule, 2> mModules{};
-            std::array<VkPipeline, TargetFormats> mPipelines{};
+            std::array<VkPipeline, TargetFormats + 1> mPipelines{};
+            VkFormat mWindowFormat = VK_FORMAT_UNDEFINED;
+            bool mVertexTextureReads = true;
             std::vector<Render::EffectBinding> mBindings;
             explicit Effect(VkDevice device)
                 : mDevice(device)
@@ -233,6 +238,8 @@ namespace MWRender::Vulkan
             std::vector<VkDescriptorPool> mEffectPools;
             std::size_t mEffectPoolIndex = 0;
             std::optional<std::uint32_t> mAcquiredImage;
+            std::shared_ptr<Image> mWaterDepth;
+            bool mWaterDepthInitialized = false;
         };
 
         constexpr std::size_t BlendCount = 5;
@@ -262,6 +269,7 @@ namespace MWRender::Vulkan
             bool mClearDepthBefore;
             std::uint32_t mIndexCount;
             std::array<float, 8> mFog;
+            bool mWater = false;
         };
 
         struct PreparedPass
@@ -276,6 +284,8 @@ namespace MWRender::Vulkan
             VkDescriptorSet mEffectDescriptor = VK_NULL_HANDLE;
             bool mPreserveWorldDepth = false;
             bool mOverwrite = false;
+            bool mWater = false;
+            std::shared_ptr<Image> mWaterDepth{};
         };
 
         struct InstanceData
@@ -407,13 +417,15 @@ namespace MWRender::Vulkan
             void destroyWindowPipelines();
             void refreshSurface();
             VkRenderPass createRenderPass(VkFormat format, bool offscreen, bool clear, bool normals = false,
-                bool depth = true, bool overwrite = false);
+                bool depth = true, bool overwrite = false, bool preserveDepth = false, bool storeDepth = false);
             void copyWorldDepth(VkCommandBuffer commands, Image& target);
+            std::shared_ptr<Image> createDepthSnapshot(std::uint32_t width, std::uint32_t height);
+            void copyDepth(VkCommandBuffer commands, const Image& source, Image& destination, bool& initialized);
             void createPipeline(std::size_t index);
             void warmPipelines(std::size_t target);
             void loadPipelineCache();
             void savePipelineCache() noexcept;
-            VkPipeline effectPipeline(Effect& effect, Render::TargetFormat format);
+            VkPipeline effectPipeline(Effect& effect, const Image* target);
             VkDescriptorSet effectDescriptor(Frame& frame, Effect& effect, std::span<const Render::EffectInput> inputs);
             void recordUploads(Frame& frame, VkDeviceSize instanceBytes, VkDeviceSize lightBytes);
             void cancelUpload(std::optional<std::size_t>& index);
@@ -470,10 +482,14 @@ namespace MWRender::Vulkan
             VkSwapchainKHR mSwapchain = VK_NULL_HANDLE;
             VkFormat mColorFormat = VK_FORMAT_UNDEFINED;
             VkFormat mDepthFormat = VK_FORMAT_UNDEFINED;
+            VkFormat mNormalFormat = VK_FORMAT_UNDEFINED;
             VkExtent2D mExtent{};
             VkExtent2D mDrawableExtent{};
             VkRenderPass mRenderPass = VK_NULL_HANDLE;
             VkRenderPass mMainLoadPass = VK_NULL_HANDLE;
+            VkRenderPass mMainResumePass = VK_NULL_HANDLE;
+            VkRenderPass mMainWaterClearPass = VK_NULL_HANDLE;
+            VkRenderPass mMainWaterLoadPass = VK_NULL_HANDLE;
             std::array<TargetPasses, TargetFormats> mTargetPasses{};
             std::array<VkPipeline, PipelinesPerTarget*(TargetFormats + 1)> mPipelines{};
             std::vector<const Render::Draw*> mFrameDraws;
@@ -538,6 +554,7 @@ namespace MWRender::Vulkan
                     frame.mInstanceUpload.reset();
                     frame.mLightUpload.reset();
                     frame.mLights.reset();
+                    frame.mWaterDepth.reset();
                     for (auto pool : frame.mEffectPools)
                         vkDestroyDescriptorPool(mDevice, pool, nullptr);
                     vkDestroySemaphore(mDevice, frame.mAcquired, nullptr);
@@ -561,6 +578,7 @@ namespace MWRender::Vulkan
                     vkDestroyRenderPass(mDevice, passes.mClear, nullptr);
                     vkDestroyRenderPass(mDevice, passes.mLoad, nullptr);
                     vkDestroyRenderPass(mDevice, passes.mOverwrite, nullptr);
+                    vkDestroyRenderPass(mDevice, passes.mResume, nullptr);
                 }
                 mDescriptorPools.clear();
                 mSamplers.clear();
@@ -818,6 +836,21 @@ namespace MWRender::Vulkan
             }
             if (mDepthFormat == VK_FORMAT_UNDEFINED)
                 throw std::runtime_error("Vulkan device has no supported depth attachment format");
+            // Encoded normals need ten bits per component rather than a full
+            // float16 attachment. Keep the old format as a checked fallback.
+            for (const auto candidate : { VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_R16G16B16A16_SFLOAT })
+            {
+                VkFormatProperties properties{};
+                vkGetPhysicalDeviceFormatProperties(mPhysicalDevice, candidate, &properties);
+                constexpr auto required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
+                    | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+                    | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+                if ((properties.optimalTilingFeatures & required) == required)
+                {
+                    mNormalFormat = candidate;
+                    break;
+                }
+            }
             for (std::size_t i = 0; i < TargetFormats; ++i)
             {
                 auto& properties = mTargetProperties[i];
@@ -826,17 +859,8 @@ namespace MWRender::Vulkan
                     | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
                 if ((properties.optimalTilingFeatures & required) != required)
                     continue;
-                if (hasNormals(static_cast<Render::TargetFormat>(i)))
-                {
-                    VkFormatProperties normalProperties{};
-                    vkGetPhysicalDeviceFormatProperties(
-                        mPhysicalDevice, VK_FORMAT_R16G16B16A16_SFLOAT, &normalProperties);
-                    constexpr auto normalRequired = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
-                        | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
-                        | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-                    if ((normalProperties.optimalTilingFeatures & normalRequired) != normalRequired)
-                        continue;
-                }
+                if (hasNormals(static_cast<Render::TargetFormat>(i)) && mNormalFormat == VK_FORMAT_UNDEFINED)
+                    continue;
                 const auto targetFormat = static_cast<Render::TargetFormat>(i);
                 mTargetPasses[i] = { createRenderPass(TargetVkFormats[i], true, true, hasNormals(targetFormat),
                                          Render::targetHasDepth(targetFormat)),
@@ -844,7 +868,10 @@ namespace MWRender::Vulkan
                         Render::targetHasDepth(targetFormat)),
                     Render::targetHasDepth(targetFormat)
                         ? VK_NULL_HANDLE
-                        : createRenderPass(TargetVkFormats[i], true, false, false, false, true) };
+                        : createRenderPass(TargetVkFormats[i], true, false, false, false, true),
+                    Render::targetHasDepth(targetFormat)
+                        ? createRenderPass(TargetVkFormats[i], true, false, hasNormals(targetFormat), true, false, true)
+                        : VK_NULL_HANDLE };
             }
         }
 
@@ -879,8 +906,8 @@ namespace MWRender::Vulkan
             pool.poolSizeCount = 1;
             pool.pPoolSizes = &dataSize;
             check(vkCreateDescriptorPool(mDevice, &pool, nullptr, &mDataPool), "Create frame data descriptor pool");
-            const std::array materialLayouts{ mDescriptorLayout, mDescriptorLayout, mDataLayout };
-            layout.setLayoutCount = 3;
+            const std::array materialLayouts{ mDescriptorLayout, mDescriptorLayout, mDataLayout, mDescriptorLayout };
+            layout.setLayoutCount = materialLayouts.size();
             layout.pSetLayouts = materialLayouts.data();
             const VkPushConstantRange fogConstants{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32 };
             layout.pushConstantRangeCount = 1;
@@ -1340,7 +1367,7 @@ namespace MWRender::Vulkan
                     VK_IMAGE_ASPECT_DEPTH_BIT);
             if (hasNormals(format))
             {
-                image->mNormals = createImage(width, height, VK_FORMAT_R16G16B16A16_SFLOAT,
+                image->mNormals = createImage(width, height, mNormalFormat,
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                     VK_IMAGE_ASPECT_COLOR_BIT);
                 image->mNormals->mSampler = image->mSampler;
@@ -1428,20 +1455,29 @@ namespace MWRender::Vulkan
             if (!image->mTarget || !image->mDepth)
                 throw std::invalid_argument("World depth requires a render target");
             if (!image->mWorldDepth)
-            {
-                auto depth = createImage(image->mWidth, image->mHeight, mDepthFormat,
-                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
-                Render::SamplerState sampling;
-                sampling.mWrapS = sampling.mWrapT = Render::TextureWrap::Clamp;
-                sampling.mMinFilter = sampling.mMagFilter = Render::TextureFilter::Nearest;
-                sampling.mUseMipmaps = false;
-                depth->mSampler = sampler(sampling);
-                allocateDescriptor(*depth);
-                image->mWorldDepth = std::move(depth);
-            }
+                image->mWorldDepth = createDepthSnapshot(image->mWidth, image->mHeight);
             return mTextures.insert(image->mWorldDepth);
         }
+        std::shared_ptr<Image> VulkanBackend::createDepthSnapshot(std::uint32_t width, std::uint32_t height)
+        {
+            auto depth = createImage(width, height, mDepthFormat,
+                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+            Render::SamplerState sampling;
+            sampling.mWrapS = sampling.mWrapT = Render::TextureWrap::Clamp;
+            sampling.mMinFilter = sampling.mMagFilter = Render::TextureFilter::Nearest;
+            sampling.mUseMipmaps = false;
+            depth->mSampler = sampler(sampling);
+            allocateDescriptor(*depth);
+            return depth;
+        }
+
         void VulkanBackend::copyWorldDepth(VkCommandBuffer commands, Image& target)
+        {
+            copyDepth(commands, *target.mDepth, *target.mWorldDepth, target.mWorldDepthInitialized);
+        }
+
+        void VulkanBackend::copyDepth(
+            VkCommandBuffer commands, const Image& source, Image& destination, bool& initialized)
         {
             std::array<VkImageMemoryBarrier, 2> barriers{};
             for (auto& barrier : barriers)
@@ -1452,16 +1488,15 @@ namespace MWRender::Vulkan
                 if (mDepthFormat == VK_FORMAT_D24_UNORM_S8_UINT)
                     barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
             }
-            barriers[0].image = target.mDepth->mImage;
+            barriers[0].image = source.mImage;
             barriers[0].oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             barriers[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
             barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            barriers[1].image = target.mWorldDepth->mImage;
-            barriers[1].oldLayout
-                = target.mWorldDepthInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+            barriers[1].image = destination.mImage;
+            barriers[1].oldLayout = initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
             barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barriers[1].srcAccessMask = target.mWorldDepthInitialized ? VK_ACCESS_SHADER_READ_BIT : 0;
+            barriers[1].srcAccessMask = initialized ? VK_ACCESS_SHADER_READ_BIT : 0;
             barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             vkCmdPipelineBarrier(commands,
                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
@@ -1469,9 +1504,9 @@ namespace MWRender::Vulkan
                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, barriers.data());
             VkImageCopy copy{};
             copy.srcSubresource = copy.dstSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 };
-            copy.extent = { target.mWidth, target.mHeight, 1 };
-            vkCmdCopyImage(commands, target.mDepth->mImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                target.mWorldDepth->mImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            copy.extent = { source.mWidth, source.mHeight, 1 };
+            vkCmdCopyImage(commands, source.mImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination.mImage,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
             barriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             barriers[0].newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             barriers[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -1485,12 +1520,13 @@ namespace MWRender::Vulkan
                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
                     | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                 0, 0, nullptr, 0, nullptr, 2, barriers.data());
-            target.mWorldDepthInitialized = true;
+            initialized = true;
         }
 
         Render::EffectHandle VulkanBackend::createEffect(const Render::EffectProgram& program)
         {
             auto effect = std::make_shared<Effect>(mDevice);
+            effect->mVertexTextureReads = program.mVertexTextureReads;
             effect->mBindings.assign(program.mBindings.begin(), program.mBindings.end());
             std::vector<VkDescriptorSetLayoutBinding> bindings;
             std::uint32_t textures = 0, buffers = 0;
@@ -1541,11 +1577,18 @@ namespace MWRender::Vulkan
             return mEffects.insert(std::move(effect));
         }
 
-        VkPipeline VulkanBackend::effectPipeline(Effect& effect, Render::TargetFormat format)
+        VkPipeline VulkanBackend::effectPipeline(Effect& effect, const Image* target)
         {
-            const auto slot = static_cast<std::size_t>(format);
-            if (slot >= TargetFormats || !mTargetPasses[slot].mClear)
+            const auto slot = target ? static_cast<std::size_t>(target->mTargetFormat) + 1 : 0;
+            if (slot > TargetFormats || (target && !mTargetPasses[slot - 1].mClear))
                 throw std::invalid_argument("Unsupported effect output format");
+            if (!target && effect.mWindowFormat != mColorFormat)
+            {
+                // A swapchain format change has already waited for device idle.
+                vkDestroyPipeline(mDevice, effect.mPipelines[0], nullptr);
+                effect.mPipelines[0] = VK_NULL_HANDLE;
+                effect.mWindowFormat = mColorFormat;
+            }
             if (effect.mPipelines[slot])
                 return effect.mPipelines[slot];
             std::array<VkPipelineShaderStageCreateInfo, 2> shaders{};
@@ -1603,7 +1646,7 @@ namespace MWRender::Vulkan
             info.pColorBlendState = &blend;
             info.pDynamicState = &dynamic;
             info.layout = effect.mLayout;
-            info.renderPass = mTargetPasses[slot].mClear;
+            info.renderPass = target ? mTargetPasses[slot - 1].mClear : mRenderPass;
             check(vkCreateGraphicsPipelines(mDevice, mPipelineCache, 1, &info, nullptr, &effect.mPipelines[slot]),
                 "Create native effect pipeline");
             return effect.mPipelines[slot];
@@ -1752,8 +1795,14 @@ namespace MWRender::Vulkan
             }
             vkDestroyRenderPass(mDevice, mRenderPass, nullptr);
             vkDestroyRenderPass(mDevice, mMainLoadPass, nullptr);
+            vkDestroyRenderPass(mDevice, mMainResumePass, nullptr);
+            vkDestroyRenderPass(mDevice, mMainWaterClearPass, nullptr);
+            vkDestroyRenderPass(mDevice, mMainWaterLoadPass, nullptr);
             mRenderPass = VK_NULL_HANDLE;
             mMainLoadPass = VK_NULL_HANDLE;
+            mMainResumePass = VK_NULL_HANDLE;
+            mMainWaterClearPass = VK_NULL_HANDLE;
+            mMainWaterLoadPass = VK_NULL_HANDLE;
         }
 
         void VulkanBackend::refreshSurface()
@@ -1937,12 +1986,16 @@ namespace MWRender::Vulkan
             {
                 mRenderPass = createRenderPass(mColorFormat, false, true);
                 mMainLoadPass = createRenderPass(mColorFormat, false, false);
+                mMainResumePass = createRenderPass(mColorFormat, false, false, false, true, false, true);
+                mMainWaterClearPass = createRenderPass(mColorFormat, false, true, false, true, false, false, true);
+                mMainWaterLoadPass = createRenderPass(mColorFormat, false, false, false, true, false, false, true);
                 warmPipelines(0);
             }
             mDepthImages.reserve(FramesInFlight);
             for (std::size_t i = 0; i < FramesInFlight; ++i)
                 mDepthImages.push_back(createImage(mExtent.width, mExtent.height, mDepthFormat,
-                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT));
+                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                    VK_IMAGE_ASPECT_DEPTH_BIT));
             mFramebuffers.resize(imageCount * FramesInFlight);
             for (std::size_t i = 0; i < mFramebuffers.size(); ++i)
             {
@@ -1964,8 +2017,8 @@ namespace MWRender::Vulkan
             return true;
         }
 
-        VkRenderPass VulkanBackend::createRenderPass(
-            VkFormat format, bool offscreen, bool clear, bool normals, bool hasDepth, bool overwrite)
+        VkRenderPass VulkanBackend::createRenderPass(VkFormat format, bool offscreen, bool clear, bool normals,
+            bool hasDepth, bool overwrite, bool preserveDepth, bool storeDepth)
         {
             std::array<VkAttachmentDescription, 3> attachments{};
             attachments[0].format = format;
@@ -1983,14 +2036,16 @@ namespace MWRender::Vulkan
                 = offscreen ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
             attachments[1].format = mDepthFormat;
             attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
-            attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            attachments[1].storeOp = offscreen ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            attachments[1].loadOp = preserveDepth ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+            attachments[1].storeOp = offscreen || preserveDepth || storeDepth ? VK_ATTACHMENT_STORE_OP_STORE
+                                                                              : VK_ATTACHMENT_STORE_OP_DONT_CARE;
             attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            attachments[1].initialLayout
+                = preserveDepth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
             attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             attachments[2] = attachments[0];
-            attachments[2].format = VK_FORMAT_R16G16B16A16_SFLOAT;
+            attachments[2].format = mNormalFormat;
             const std::array colors{ VkAttachmentReference{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
                 VkAttachmentReference{ 2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL } };
             VkAttachmentReference depth{ 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
@@ -1999,25 +2054,47 @@ namespace MWRender::Vulkan
             subpass.colorAttachmentCount = normals ? 2 : 1;
             subpass.pColorAttachments = colors.data();
             subpass.pDepthStencilAttachment = hasDepth ? &depth : nullptr;
-            VkSubpassDependency dependency{};
-            dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-            dependency.dstSubpass = 0;
-            dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
-                | (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-            dependency.dstStageMask
-                = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-            dependency.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
-                | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-            dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT
-                | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+            // Keep color and depth dependencies separate. Combining their
+            // masks makes early depth tests wait for unrelated color stores.
+            std::array<VkSubpassDependency, 3> dependencies{};
+            for (auto& dependency : dependencies)
+            {
+                dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+                dependency.dstSubpass = 0;
+            }
+            auto& colorDependency = dependencies[0];
+            colorDependency.srcStageMask = colorDependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            colorDependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            colorDependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+            auto& depthDependency = dependencies[1];
+            depthDependency.srcStageMask = depthDependency.dstStageMask
+                = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            depthDependency.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            depthDependency.dstAccessMask
+                = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+            if (offscreen)
+            {
+                depthDependency.srcStageMask
+                    |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                depthDependency.srcAccessMask |= VK_ACCESS_SHADER_READ_BIT;
+            }
+            auto& outputDependency = dependencies[2];
+            outputDependency.srcSubpass = 0;
+            outputDependency.dstSubpass = VK_SUBPASS_EXTERNAL;
+            outputDependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            outputDependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            outputDependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            outputDependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             auto info = vkInfo<VkRenderPassCreateInfo>(VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO);
             info.attachmentCount = normals ? 3 : hasDepth ? 2 : 1;
             info.pAttachments = attachments.data();
             info.subpassCount = 1;
             info.pSubpasses = &subpass;
-            info.dependencyCount = 1;
-            info.pDependencies = &dependency;
+            // Scope output visibility to this producer subpass. Color-only
+            // passes need no duplicate global incoming dependency or separate
+            // post-pass barrier command; initial transitions remain explicit.
+            info.dependencyCount = hasDepth ? 2 : 1;
+            info.pDependencies = dependencies.data() + (offscreen ? (hasDepth ? 1 : 2) : 0);
             VkRenderPass result = VK_NULL_HANDLE;
             check(vkCreateRenderPass(mDevice, &info, nullptr, &result), "Create Vulkan render pass");
             return result;
@@ -2383,11 +2460,14 @@ namespace MWRender::Vulkan
                     { mFrameDraws.size(), pass.mDraws.size(), target, pass.mClearColor, pass.mClear, pass.mViewport });
                 mPreparedPasses.back().mPreserveWorldDepth = pass.mPreserveWorldDepth;
                 mPreparedPasses.back().mOverwrite = pass.mOverwrite;
-                if (pass.mOverwrite && (!pass.mEffect || !target || target->mDepth))
+                if (pass.mOverwrite && (!pass.mEffect || (target && target->mDepth)))
                     throw std::invalid_argument("Only color-only fullscreen effects can overwrite a target");
                 Render::reserveFor(mFrameDraws, mFrameDraws.size() + pass.mDraws.size());
                 for (const auto& draw : pass.mDraws)
+                {
                     mFrameDraws.push_back(&draw);
+                    mPreparedPasses.back().mWater |= draw.mWater;
+                }
             }
             if (passes.empty()
                 || std::none_of(passes.begin(), passes.end(), [](const auto& pass) { return !pass.mTarget; }))
@@ -2439,20 +2519,35 @@ namespace MWRender::Vulkan
                 auto& pass = mPreparedPasses[i];
                 if (pass.mTarget)
                     frame.mResources.push_back(pass.mTarget);
+                if (pass.mWater)
+                {
+                    if (pass.mTarget && !pass.mTarget->mDepth)
+                        throw std::invalid_argument("Water requires a depth attachment");
+                    auto& snapshot = pass.mTarget ? pass.mTarget->mWaterDepth : frame.mWaterDepth;
+                    const auto w = pass.mTarget ? pass.mTarget->mWidth : mExtent.width;
+                    const auto h = pass.mTarget ? pass.mTarget->mHeight : mExtent.height;
+                    if (!snapshot || snapshot->mWidth != w || snapshot->mHeight != h)
+                    {
+                        snapshot = createDepthSnapshot(w, h);
+                        (pass.mTarget ? pass.mTarget->mWaterDepthInitialized : frame.mWaterDepthInitialized) = false;
+                    }
+                    pass.mWaterDepth = snapshot;
+                    frame.mResources.push_back(snapshot);
+                }
                 if (passes[i].mEffect)
                 {
-                    if (!pass.mTarget || pass.mCount)
-                        throw std::invalid_argument("Effects require an offscreen color-only pass");
+                    if (pass.mCount || (pass.mTarget && pass.mTarget->mDepth))
+                        throw std::invalid_argument("Effects require a color-only output");
                     pass.mEffect = mEffects.get(passes[i].mEffect);
                     frame.mResources.push_back(pass.mEffect);
                     for (const auto& input : passes[i].mEffectInputs)
-                        if (input.mTexture
+                        if (pass.mTarget && input.mTexture
                             && (mTextures.get(input.mTexture) == pass.mTarget
                                 || mTextures.get(input.mTexture) == pass.mTarget->mDepth
                                 || mTextures.get(input.mTexture) == pass.mTarget->mNormals))
                             throw std::invalid_argument("An effect cannot sample its own framebuffer attachment");
                     pass.mEffectDescriptor = effectDescriptor(frame, *pass.mEffect, passes[i].mEffectInputs);
-                    effectPipeline(*pass.mEffect, pass.mTarget->mTargetFormat);
+                    effectPipeline(*pass.mEffect, pass.mTarget.get());
                     frame.mResources.push_back(mMeshes.get(mFullscreenMesh));
                 }
             }
@@ -2517,7 +2612,8 @@ namespace MWRender::Vulkan
                 mPrepared.push_back({ mesh.get(), texture.get(), mask.get(), pipeline, rasterKey,
                     draw.mClearDepthBefore, draw.mIndexCount ? draw.mIndexCount : mesh->mIndexCount,
                     { draw.mFogColor[0], draw.mFogColor[1], draw.mFogColor[2], draw.mFogColor[3], draw.mFogStart,
-                        draw.mFogEnd, 0, 0 } });
+                        draw.mFogEnd, 0, 0 },
+                    draw.mWater });
             }
             if (draws.size() > frame.mInstanceCapacity)
             {
@@ -2619,6 +2715,8 @@ namespace MWRender::Vulkan
                     emission[3] = draw.mEmissiveMult;
                 }
                 auto specular = draw.mSpecular;
+                if (draw.mWater)
+                    ambient = draw.mWaterProjection;
                 specular[3] = draw.mShininess;
                 const InstanceData instance{ draw.mClipFromModel, draw.mTint,
                     { draw.mAlphaCutoff, static_cast<float>(draw.mAlphaCompare),
@@ -2674,6 +2772,18 @@ namespace MWRender::Vulkan
             bool windowWritten = mSwapchainInitialized[imageIndex];
             for (const auto& view : mPreparedPasses)
             {
+                if (view.mEffect && view.mEffect->mVertexTextureReads)
+                {
+                    // Custom vertex texture reads can also consume persistent
+                    // history written in a previous frame. Synchronize at that
+                    // rare consumer instead of stalling vertices after every
+                    // ordinary fragment-only fullscreen pass.
+                    auto barrier = vkInfo<VkMemoryBarrier>(VK_STRUCTURE_TYPE_MEMORY_BARRIER);
+                    barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+                    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                    vkCmdPipelineBarrier(frame.mCommands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+                }
                 const VkExtent2D extent
                     = view.mTarget ? VkExtent2D{ view.mTarget->mWidth, view.mTarget->mHeight } : mExtent;
                 const auto x = std::min(view.mViewport[0], extent.width);
@@ -2697,7 +2807,10 @@ namespace MWRender::Vulkan
                         if (!attachment)
                             continue;
                         auto barrier = vkInfo<VkImageMemoryBarrier>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
-                        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                        // Also cover LOAD after a prior attachment write or
+                        // initial transfer clear, even if no shader sampled it.
+                        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                            | VK_ACCESS_TRANSFER_WRITE_BIT;
                         barrier.dstAccessMask
                             = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
                         barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -2707,7 +2820,8 @@ namespace MWRender::Vulkan
                         barrier.image = attachment->mImage;
                         barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
                         vkCmdPipelineBarrier(frame.mCommands,
-                            (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT),
+                            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                                | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
                     }
                 std::array<VkClearValue, 3> clear{};
@@ -2716,10 +2830,12 @@ namespace MWRender::Vulkan
                 clear[1].depthStencil = { 1, 0 };
                 auto pass = vkInfo<VkRenderPassBeginInfo>(VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO);
                 const auto targetSlot = view.mTarget ? static_cast<std::size_t>(view.mTarget->mTargetFormat) : 0;
-                pass.renderPass = view.mTarget ? (view.mClear              ? mTargetPasses[targetSlot].mClear
-                                                         : view.mOverwrite ? mTargetPasses[targetSlot].mOverwrite
-                                                                           : mTargetPasses[targetSlot].mLoad)
-                                               : (view.mClear || !windowWritten ? mRenderPass : mMainLoadPass);
+                pass.renderPass = view.mTarget
+                    ? (view.mClear              ? mTargetPasses[targetSlot].mClear
+                              : view.mOverwrite ? mTargetPasses[targetSlot].mOverwrite
+                                                : mTargetPasses[targetSlot].mLoad)
+                    : (view.mClear || !windowWritten ? (view.mWater ? mMainWaterClearPass : mRenderPass)
+                                                     : (view.mWater ? mMainWaterLoadPass : mMainLoadPass));
                 if (!view.mTarget)
                     windowWritten = true;
                 pass.framebuffer = view.mTarget ? view.mTarget->mFramebuffer
@@ -2743,19 +2859,14 @@ namespace MWRender::Vulkan
                 {
                     vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, mPipelineLayout, 2, 1,
                         &frame.mDataDescriptor, 0, nullptr);
+                    const auto emptyDepth = mTextures.get(mWhiteTexture)->mDescriptor;
+                    vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, mPipelineLayout, 3, 1,
+                        &emptyDepth, 0, nullptr);
                 }
                 bool savedWorldDepth = false;
-                for (std::size_t first = view.mFirst; first < view.mFirst + view.mCount;)
-                {
-                    const auto& draw = mPrepared[first];
-                    if (draw.mClearDepthBefore && view.mPreserveWorldDepth && view.mTarget && view.mTarget->mWorldDepth
-                        && !savedWorldDepth)
-                    {
-                        vkCmdEndRenderPass(frame.mCommands);
-                        copyWorldDepth(frame.mCommands, *view.mTarget);
-                        savedWorldDepth = true;
-                        // Ending the pass preserves color/normals. Reopen with
-                        // LOAD color and a fresh depth buffer for the weapon.
+                bool savedWaterDepth = false;
+                const auto resume = [&](VkRenderPass renderPass) {
+                    if (view.mTarget)
                         for (const auto& image : { view.mTarget, view.mTarget->mNormals })
                         {
                             if (!image)
@@ -2772,8 +2883,20 @@ namespace MWRender::Vulkan
                             vkCmdPipelineBarrier(frame.mCommands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
                         }
-                        pass.renderPass = mTargetPasses[targetSlot].mLoad;
-                        vkCmdBeginRenderPass(frame.mCommands, &pass, VK_SUBPASS_CONTENTS_INLINE);
+                    pass.renderPass = renderPass;
+                    vkCmdBeginRenderPass(frame.mCommands, &pass, VK_SUBPASS_CONTENTS_INLINE);
+                };
+                for (std::size_t first = view.mFirst; first < view.mFirst + view.mCount;)
+                {
+                    const auto& draw = mPrepared[first];
+                    if (draw.mClearDepthBefore && view.mPreserveWorldDepth && view.mTarget && view.mTarget->mWorldDepth
+                        && !savedWorldDepth)
+                    {
+                        vkCmdEndRenderPass(frame.mCommands);
+                        copyWorldDepth(frame.mCommands, *view.mTarget);
+                        savedWorldDepth = true;
+                        // Preserve color/normals and clear depth for the weapon.
+                        resume(mTargetPasses[targetSlot].mLoad);
                     }
                     else if (draw.mClearDepthBefore && (!view.mTarget || view.mTarget->mDepth))
                     {
@@ -2782,6 +2905,21 @@ namespace MWRender::Vulkan
                         depth.clearValue.depthStencil = { 1, 0 };
                         const VkClearRect rect{ scissor, 0, 1 };
                         vkCmdClearAttachments(frame.mCommands, 1, &depth, 1, &rect);
+                    }
+                    if (draw.mWater && !savedWaterDepth)
+                    {
+                        vkCmdEndRenderPass(frame.mCommands);
+                        const auto& source = view.mTarget ? view.mTarget->mDepth : mDepthImages[mFrameIndex];
+                        auto& initialized
+                            = view.mTarget ? view.mTarget->mWaterDepthInitialized : frame.mWaterDepthInitialized;
+                        copyDepth(frame.mCommands, *source, *view.mWaterDepth, initialized);
+                        // LOAD both color and depth. Clearing depth here would
+                        // let later transparent draws show through the terrain.
+                        resume(view.mTarget ? mTargetPasses[targetSlot].mResume : mMainResumePass);
+                        const auto descriptor = view.mWaterDepth->mDescriptor;
+                        vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, mPipelineLayout, 3, 1,
+                            &descriptor, 0, nullptr);
+                        savedWaterDepth = true;
                     }
                     std::size_t end = first + 1;
                     while (end < view.mFirst + view.mCount && mPrepared[end].mMesh == draw.mMesh
@@ -2846,7 +2984,7 @@ namespace MWRender::Vulkan
                     const auto& fullscreen = *mMeshes.get(mFullscreenMesh);
                     const VkDeviceSize offset = fullscreen.mVertices.offset();
                     vkCmdBindPipeline(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        effectPipeline(*view.mEffect, view.mTarget->mTargetFormat));
+                        effectPipeline(*view.mEffect, view.mTarget.get()));
                     vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, view.mEffect->mLayout, 0,
                         1, &view.mEffectDescriptor, 0, nullptr);
                     vkCmdBindVertexBuffers(frame.mCommands, 0, 1, &fullscreen.mVertices.page().mBuffer, &offset);
@@ -2857,29 +2995,12 @@ namespace MWRender::Vulkan
                 vkCmdEndRenderPass(frame.mCommands);
                 if (view.mPreserveWorldDepth && view.mTarget && view.mTarget->mWorldDepth && !savedWorldDepth)
                     copyWorldDepth(frame.mCommands, *view.mTarget);
-                if (view.mTarget)
+                if (view.mTarget && view.mTarget->mDepth)
                 {
                     auto barrier = vkInfo<VkImageMemoryBarrier>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
-                    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
                     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-                    barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                    barrier.image = view.mTarget->mImage;
-                    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-                    vkCmdPipelineBarrier(frame.mCommands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                        (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT), 0, 0, nullptr, 0,
-                        nullptr, 1, &barrier);
-                    if (view.mTarget->mNormals)
-                    {
-                        barrier.image = view.mTarget->mNormals->mImage;
-                        vkCmdPipelineBarrier(frame.mCommands, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                            (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT), 0, 0,
-                            nullptr, 0, nullptr, 1, &barrier);
-                    }
-                    if (!view.mTarget->mDepth)
-                        continue;
+                    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    barrier.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
                     barrier.image = view.mTarget->mDepth->mImage;
                     barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
                     barrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -2889,8 +3010,7 @@ namespace MWRender::Vulkan
                         barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
                     vkCmdPipelineBarrier(frame.mCommands,
                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                        (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT), 0, 0, nullptr, 0,
-                        nullptr, 1, &barrier);
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
                 }
             }
             if (mCaptureRequested)

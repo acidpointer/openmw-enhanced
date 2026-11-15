@@ -68,7 +68,7 @@ namespace Stereo
             View mRight;
         };
 
-        //! Gets the singleton instance
+        //! Gets the singleton instance; throws std::logic_error if none exists.
         static Manager& instance();
 
         //! Constructor

@@ -698,18 +698,6 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <source>Shadows</source>
-        <translation type="unfinished">Skuggor</translation>
-    </message>
-    <message>
-        <source>Screen-space shadows</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Auto-enable the OpenMW Enhanced screen-space shadow post-processing shader.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>Enhanced</source>
         <translation type="unfinished"></translation>
     </message>

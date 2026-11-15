@@ -370,7 +370,7 @@ namespace MWRender
             }
             if (postProcessor->needsWorldDepth(frameId) && opaqueDepthFBO && worldDepthFBO)
             {
-                // Keep world depth separate from first-person hands for screen-space shadows.
+                // Keep world depth separate from first-person hands for post-processing.
                 if (Stereo::getMultiview())
                 {
                     auto& resolve = mWorldDepthResolve[frameId];

@@ -352,12 +352,6 @@ void Launcher::SettingsPage::setupEnhancedTab()
         23, 0);
     pageLayout->addWidget(occlusionGroup);
 
-    auto* shadowsGroup = new QGroupBox(tr("Shadows"), enhancedContent);
-    auto* enhancedShadowsLayout = new QGridLayout(shadowsGroup);
-    mEnhancedScreenSpaceShadows = addCheckBox(*enhancedShadowsLayout, shadowsGroup, tr("Screen-space shadows"),
-        tr("Auto-enable the OpenMW Enhanced screen-space shadow post-processing shader."), 0, 0);
-    pageLayout->addWidget(shadowsGroup);
-
     pageLayout->addStretch(1);
     AdvancedTabWidget->addTab(enhancedPage, tr("Enhanced"));
 }
@@ -410,8 +404,6 @@ void Launcher::SettingsPage::loadEnhancedSettings()
     mEnhancedOcclusionWaterStaticOccluders->setCheckState(
         SceneUtil::Enhanced::occlusionWaterStaticOccluders() ? Qt::Checked : Qt::Unchecked);
 
-    mEnhancedScreenSpaceShadows->setCheckState(
-        SceneUtil::Enhanced::settingBool("Shadows", "screen space shadows", true) ? Qt::Checked : Qt::Unchecked);
 }
 
 void Launcher::SettingsPage::saveEnhancedSettings() const
@@ -466,9 +458,6 @@ void Launcher::SettingsPage::saveEnhancedSettings() const
     stream << "occlusion adaptive cooldown frames = " << mEnhancedOcclusionAdaptiveCooldownFrames->value() << '\n';
     stream << "occlusion water cameras = " << comboValue(*mEnhancedOcclusionWaterCameras) << '\n';
     stream << "occlusion water static occluders = " << boolText(*mEnhancedOcclusionWaterStaticOccluders) << "\n\n";
-
-    stream << "[Shadows]\n";
-    stream << "screen space shadows = " << boolText(*mEnhancedScreenSpaceShadows) << '\n';
 
     file.close();
     SceneUtil::Enhanced::loadSettings(mCfgMgr);

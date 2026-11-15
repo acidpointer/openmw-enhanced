@@ -15,6 +15,7 @@
 #include <osgViewer/Viewer>
 
 #include <map>
+#include <stdexcept>
 #include <string>
 
 #include <components/misc/constants.hpp>
@@ -111,6 +112,8 @@ namespace Stereo
 
     Manager& Manager::instance()
     {
+        if (!sInstance)
+            throw std::logic_error("Stereo::Manager is not initialized");
         return *sInstance;
     }
 
@@ -132,7 +135,11 @@ namespace Stereo
         sStereoEnabled = enableStereo;
     }
 
-    Manager::~Manager() {}
+    Manager::~Manager()
+    {
+        sStereoEnabled = false;
+        sInstance = nullptr;
+    }
 
     void Manager::initializeStereo(osg::GraphicsContext* gc, bool enableMultiview, bool sharedShadowMaps)
     {

@@ -698,18 +698,6 @@ Les logs et préférences modifiées y seront sauvegardés.</translation>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <source>Shadows</source>
-        <translation type="unfinished">Ombres</translation>
-    </message>
-    <message>
-        <source>Screen-space shadows</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Auto-enable the OpenMW Enhanced screen-space shadow post-processing shader.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>Enhanced</source>
         <translation type="unfinished"></translation>
     </message>

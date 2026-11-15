@@ -305,8 +305,8 @@ namespace MWRender::Vulkan
                     std::vector<Render::EffectBinding> bindings;
                     for (const auto& resource : result->mShader.mResources)
                         bindings.push_back(resource.mBinding);
-                    result->mHandle
-                        = mBackend.createEffect({ result->mShader.mVertex, result->mShader.mFragment, bindings });
+                    result->mHandle = mBackend.createEffect({ result->mShader.mVertex, result->mShader.mFragment,
+                        bindings, result->mShader.mVertexTextureReads });
                 }
                 catch (const std::exception& error)
                 {
@@ -582,6 +582,7 @@ void main() {
             unsigned width = scenePosition->mViewport[2], height = scenePosition->mViewport[3];
             if (!width || !height)
                 return;
+            const auto windowViewport = scenePosition->mViewport;
             // SceneView culling and effect dispatch are separate phases. Supply
             // the actual camera explicitly in both scalar and UBO paths, so
             // sun projection, view rays and temporal inputs cannot retain a
@@ -743,6 +744,7 @@ void main(){
             const auto eye
                 = needsExposure ? exposure(effects, scene.mColor, osg::Matrixf(projection)) : Render::TextureHandle{};
             Fx::ScratchRouting routing;
+            bool presentDirectly = false;
             const auto scratch = [&](int slot) {
                 if (slot < 0)
                     return scene.mColor;
@@ -791,8 +793,13 @@ void main(){
                     const auto lastPass = scratch(routing.lastPass());
                     const auto& source = node.mHandle->getPasses()[index];
                     const auto name = source->getTarget();
-                    const auto output = name.empty() ? scratch(routing.selectOutput(index + 1 == item.passes.size()))
-                                                     : mNamed.at({ node.mHandle.get(), name }).mTarget->mColor;
+                    const bool overwrite = source->usesDefaultVertexShader() && !shader->mShader.mMayDiscard;
+                    presentDirectly = &item == &prepared.back() && index + 1 == item.passes.size() && name.empty()
+                        && overwrite && !shader->mShader.mRequiresOffscreen;
+                    const int slot = name.empty() ? routing.selectOutput(index + 1 == item.passes.size()) : -1;
+                    const auto output = !name.empty() ? mNamed.at({ node.mHandle.get(), name }).mTarget->mColor
+                        : presentDirectly             ? Render::TextureHandle{}
+                                                      : scratch(slot);
                     auto& work = nextWork();
                     uniforms(work, *shader, state, osg::Matrixf(projection), [&](const std::string& sampler) {
                         if (sampler == "omw_SamplerDistortion")
@@ -821,32 +828,41 @@ void main(){
                         throw std::invalid_argument("Missing or unsupported OMWFX texture: " + sampler);
                     });
                     for (const auto& input : work.mInputs)
-                        if (input.mTexture == output)
+                        if (output && input.mTexture == output)
                             throw std::invalid_argument("OMWFX pass samples its own render target");
                     effects.push_back({ {}, output, {}, false, {}, shader->mHandle, work.mInputs });
-                    effects.back().mOverwrite = source->usesDefaultVertexShader() && !shader->mShader.mMayDiscard;
+                    effects.back().mOverwrite = overwrite;
+                    if (presentDirectly)
+                    {
+                        effects.back().mViewport = windowViewport;
+                        effects.back().mClear = true;
+                    }
                 }
             }
-            Render::Draw resolve;
-            resolve.mClipFromModel = Render::IdentityTransform;
-            resolve.mMesh = mQuad;
-            resolve.mTexture = scratch(routing.lastShader());
-            resolve.mDepthTest = resolve.mDepthWrite = false;
-            resolve.mDoubleSided = true;
-            resolve.mUseVertexColor = false;
-            mResolve.push_back(resolve);
+            if (!presentDirectly)
+            {
+                Render::Draw resolve;
+                resolve.mClipFromModel = Render::IdentityTransform;
+                resolve.mMesh = mQuad;
+                resolve.mTexture = scratch(routing.lastShader());
+                resolve.mDepthTest = resolve.mDepthWrite = false;
+                resolve.mDoubleSided = true;
+                resolve.mUseVertexColor = false;
+                mResolve.push_back(resolve);
+            }
             // Publish scene redirection and its resolve together. An allocation
             // failure while assembling passes must leave the original window
             // scene intact, rather than stranding it in an offscreen target.
             static_assert(
                 std::is_nothrow_copy_constructible_v<Render::Pass> && std::is_nothrow_move_assignable_v<Render::Pass>);
             passes.reserve(passes.size() + effects.size() + 1);
-            const auto windowViewport = passes[sceneIndex].mViewport;
             passes[sceneIndex].mViewport = { 0, 0, width, height };
             passes[sceneIndex].mTarget = scene.mColor;
             passes[sceneIndex].mPreserveWorldDepth = firstPerson;
             passes.insert(passes.begin() + sceneIndex + 1, effects.begin(), effects.end());
-            passes.insert(passes.begin() + sceneIndex + effects.size() + 1, { mResolve, {}, {}, true, windowViewport });
+            if (!presentDirectly)
+                passes.insert(
+                    passes.begin() + sceneIndex + effects.size() + 1, { mResolve, {}, {}, true, windowViewport });
             mCameraQueued = true;
             std::erase_if(mNamed, [](const auto& pair) { return pair.second.mOwner.expired(); });
             std::erase_if(mVolumes, [](const auto& pair) { return !pair.second.mSource.valid(); });

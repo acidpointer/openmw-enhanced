@@ -90,8 +90,6 @@ namespace Launcher
         QComboBox* mEnhancedOcclusionWaterCameras = nullptr;
         QCheckBox* mEnhancedOcclusionWaterStaticOccluders = nullptr;
 
-        QCheckBox* mEnhancedScreenSpaceShadows = nullptr;
-
         /**
          * Load the cells associated with the given content files for use in autocomplete
          * @param filePaths the file paths of the content files to be examined

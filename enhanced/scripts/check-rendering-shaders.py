@@ -102,7 +102,7 @@ def blocks(s):
         result.append((m.group(1), m.group(2), s[start:i - 1]))
         pos = i
     return result
-paths = [root / 'files/data/shaders/screen_space_shadows.omwfx', root / 'files/data/shaders/internal_distortion.omwfx'] + compat_paths
+paths = [root / 'files/data/shaders/internal_distortion.omwfx'] + compat_paths
 count = 0
 for path in paths:
     s = path.read_text()
@@ -111,7 +111,7 @@ for path in paths:
     for ver in (120, 330):
         for multi in (0,) if ver == 120 else (0, 1):
             for rz in (0, 1):
-                for normals in (0, 1) if 'screen_space_shadows' in path.name else (0,):
+                for normals in (0,):
                     for mode in ('static', 'uniform'):
                         defs = {'@version': str(ver), '@profile': 'compatibility' if ver >= 330 else '', '@extensions': '#extension GL_OVR_multiview2 : require' if multi else '', '@uboStruct': struct, '@apiVersion': '1', '@reverseZ': str(rz), '@radialFog': '1', '@exponentialFog': '1', '@hdr': '0', '@normals': str(normals), '@useBindings': str(int(ver >= 330)), '@multiview': str(multi), '@in': 'in' if ver >= 330 else 'varying', '@out': 'out' if ver >= 330 else 'varying', '@position': 'gl_Position', '@texture1D': 'texture' if ver >= 330 else 'texture1D', '@texture2DArray': 'texture', '@texture2D': 'texture' if ver >= 330 else 'texture2D', '@texture3D': 'texture' if ver >= 330 else 'texture3D', '@vertex': '_omw_Vertex' if ver >= 330 else 'gl_Vertex', '@fragColor': '_omw_FragColor' if ver >= 330 else 'gl_FragColor', '@fragBinding': 'out vec4 _omw_FragColor;' if ver >= 330 else '', '@builtinSampler': 'sampler2DArray' if multi else 'sampler2D', '@pointLightCount': '256', '@ubo': str(int(ver >= 330))}
                         h = header

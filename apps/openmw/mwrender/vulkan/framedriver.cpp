@@ -1094,6 +1094,8 @@ namespace MWRender
                 // column-major matrix consumed by the native vertex pipeline.
                 const auto& transforms = transform(leaf, resolved);
                 const auto& projection = transforms.mProjection;
+                if (water)
+                    draw.mWaterProjection = RenderAssets::depthCoefficients(projection, true);
                 if (mProjectionOutput && !mProjectionOutput->has_value() && !sky)
                 {
                     // Retain the authored projection before combining it with

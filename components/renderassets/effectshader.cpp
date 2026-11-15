@@ -24,6 +24,31 @@
 
 namespace RenderAssets
 {
+    bool effectRequiresOffscreen(std::span<const std::uint32_t> words)
+    {
+        if (words.size() < 5 || words[0] != 0x07230203)
+            return true;
+        bool fragment = false;
+        for (std::size_t offset = 5; offset < words.size();)
+        {
+            const auto count = words[offset] >> 16;
+            const auto op = words[offset] & 0xffff;
+            if (!count || count > words.size() - offset)
+                return true;
+            if (op == 15 && count >= 4 && words[offset + 1] == 4)
+                fragment = true;
+            // FragCoord, FrontFacing and signed Y derivatives change when the
+            // window's negative-height viewport replaces an offscreen viewport.
+            const auto sensitive = [](unsigned builtin) { return builtin == 15 || builtin == 17; };
+            if ((op == 71 && count >= 4 && words[offset + 2] == 11 && sensitive(words[offset + 3]))
+                || (op == 72 && count >= 5 && words[offset + 3] == 11 && sensitive(words[offset + 4])) || op == 208
+                || op == 211 || op == 214)
+                return true;
+            offset += count;
+        }
+        return !fragment;
+    }
+
     bool effectMayDiscard(std::span<const std::uint32_t> words)
     {
         if (words.size() < 5 || words[0] != 0x07230203)
@@ -501,6 +526,7 @@ namespace RenderAssets
         result.mVertex = readShader(directory.path / "vert.spv");
         result.mFragment = readShader(directory.path / "frag.spv");
         result.mMayDiscard = effectMayDiscard(result.mFragment);
+        result.mRequiresOffscreen = effectRequiresOffscreen(result.mFragment);
         const auto reflect = [&](const auto& code) {
             auto resources = reflectEffectShader(code);
             for (auto& resource : resources)
@@ -516,6 +542,8 @@ namespace RenderAssets
             return resources;
         };
         result.mResources = reflect(result.mVertex);
+        result.mVertexTextureReads = std::any_of(result.mResources.begin(), result.mResources.end(),
+            [](const auto& resource) { return resource.mBinding.mKind == Render::EffectBindingKind::Texture; });
         for (auto& resource : reflect(result.mFragment))
         {
             const auto existing = std::find_if(result.mResources.begin(), result.mResources.end(),

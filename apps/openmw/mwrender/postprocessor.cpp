@@ -19,7 +19,6 @@
 #include <components/resource/scenemanager.hpp>
 #include <components/sceneutil/color.hpp>
 #include <components/sceneutil/depth.hpp>
-#include <components/sceneutil/enhancedsettings.hpp>
 #include <components/sceneutil/nodecallback.hpp>
 #include <components/settings/values.hpp>
 #include <components/shader/shadermanager.hpp>
@@ -47,13 +46,6 @@
 
 namespace
 {
-    constexpr std::string_view EnhancedScreenSpaceShadowsTechnique = "screen_space_shadows";
-
-    bool enhancedScreenSpaceShadowsEnabled()
-    {
-        return SceneUtil::Enhanced::settingBool("Shadows", "screen space shadows", false);
-    }
-
     struct ResizedCallback : osg::GraphicsContext::ResizedCallback
     {
         ResizedCallback(MWRender::PostProcessor* postProcessor)
@@ -306,6 +298,9 @@ namespace MWRender
     {
         for (const auto& path : mVFS->getRecursiveDirectoryIterator(Fx::Technique::sSubdir))
         {
+            // Hide obsolete copies left in external data directories as well.
+            if (path == VFS::Path::NormalizedView("shaders/screen_space_shadows.omwfx"))
+                continue;
             std::string_view fileExt = Misc::getFileExtension(path);
             if (path.parent().parent().empty() && fileExt == Fx::Technique::sExt)
             {
@@ -932,6 +927,12 @@ namespace MWRender
     {
         mTechniques.clear();
 
+        // Migrate chains saved before the bundled effect was removed, retaining
+        // the order and settings of the user's other techniques.
+        auto chain = Settings::postProcessing().mChain.get();
+        if (std::erase(chain, "screen_space_shadows"))
+            Settings::postProcessing().mChain.set(std::move(chain));
+
         for (const auto& technique : mInternalTechniques)
         {
             mTechniques.push_back(technique);
@@ -946,29 +947,6 @@ namespace MWRender
 
                 mTechniques.push_back(loadTechnique(techniqueName));
             }
-        }
-
-        if (Settings::postProcessing().mEnabled && enhancedScreenSpaceShadowsEnabled())
-        {
-            const auto hasScreenSpaceShadows = std::any_of(mTechniques.begin(), mTechniques.end(), [](const auto& technique) {
-                return technique->getName() == EnhancedScreenSpaceShadowsTechnique;
-            });
-
-            if (!hasScreenSpaceShadows)
-            {
-                auto technique = loadTechnique(EnhancedScreenSpaceShadowsTechnique);
-                mTechniques.insert(mTechniques.begin() + static_cast<std::ptrdiff_t>(mInternalTechniques.size()),
-                    std::move(technique));
-            }
-
-            if (std::any_of(mTechniques.begin(), mTechniques.end(), [this](const auto& technique) {
-                    return technique->getName() == EnhancedScreenSpaceShadowsTechnique && technique->isValid()
-                        && technique->getGLSLVersion() <= mGLSLVersion;
-                }))
-                Log(Debug::Info) << "OpenMW Enhanced screen-space shadows active as post-processing shader.";
-            else
-                Log(Debug::Warning)
-                    << "OpenMW Enhanced screen-space shadows unavailable: invalid or unsupported technique.";
         }
 
         dirtyTechniques();

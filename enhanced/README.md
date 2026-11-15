@@ -236,9 +236,8 @@ APPIMAGE_EXTRACT_AND_RUN=1 .build/dist/OpenMW-Enhanced-x86_64.AppImage --openmw 
 
 Launch the AppImage and confirm the launcher retains the existing mod/content
 selection. In game, check exterior and interior transitions, doors and distant
-objects with occlusion enabled, water/refraction, first/third-person screen-space
-shadows, and the shadow settings (resolution, soft shadows, temporal reuse).
-Screen-space shadows require post-processing to be enabled. Check the log for
+objects with occlusion enabled, water/refraction, first/third-person transitions,
+and shadow settings (resolution, soft shadows, temporal reuse). Check the log for
 bundled `usr/bin/openmw.cfg` and `defaults.bin` together with user
 `~/.config/openmw/openmw.cfg` and `settings.cfg`.
 
@@ -403,62 +402,11 @@ Statistics output is delayed 16 frames in this mode; unavailable/late results ca
 be absent. GPU elapsed time is not a utilization measurement. CPU waits and GPU
 work can overlap; a high FPS peak does not rule out stalls in slower frames.
 
-## Measured post-processing slowdown in interiors
-
-The November 8 A500 capture loaded Adanumuran, an interior. With post-processing
-off, the stable 13–15 second window reported a median GPU frame time of 4.25 ms.
-With it on, the 17–19 second window reported 14.19 ms. The dispatched passes were
-screen-space shadows, HDR, and FXAA; the underwater and depth-of-field techniques
-in the configured chain were not dispatched in that view.
-
-| GPU stage | Median time in the enabled window |
-| --- | ---: |
-| Shadow raw mask | 0.48 ms |
-| Shadow directional filter | 3.99 ms |
-| Shadow cross filter | 2.86 ms |
-| Shadow composite | 0.74 ms |
-| HDR luminance | 0.33 ms |
-| HDR tone mapping | 0.26 ms |
-| FXAA | 0.81 ms |
-
-One confirmed avoidable cost in this capture was filtering a deliberately empty indoor shadow
-mask. `screenSpaceShadowLoss` already returned zero in interiors, but the technique
-lacked `disable_interiors`, so both filters and the composite still ran. This
-spent about 7.6 ms filtering/compositing zero, plus the raw pass and the normals
-render target. The previous intermediate-allocation optimization did not resolve
-this bottleneck. These timings establish the captured A500 case; Intel Xe has not
-yet been profiled, and diagnostic timestamps themselves can affect performance.
-
-The shader now declares `disable_interiors`, retaining all four passes, 64 trace
-steps, normal precision, filtering, and resolution for exteriors and interiors
-that behave like exteriors. Buffer requirements are recomputed from the passes
-active in the current environment, using the same environment mask as dispatch.
-An inactive technique therefore cannot require normals output, point-light
-collection, or HDR exposure calculation. Global post-processing disable also
-clears these requirements. This matters on interior/exterior and underwater
-transitions, not just when editing the chain.
-
-A component regression test loads the actual shipped shader, checks that it is
-masked in both indoor water states and remains active in both exterior states,
-and verifies that its four passes and normals requirement are retained. Agents
-performed syntax and formatting checks only; the regression test and GPU checks
-must be run by the user.
-
-After the cached build, repeat the Adanumuran capture using new output filenames
-to preserve the baseline. There should be no `GPU postprocess screen_space_shadows/`
-entries indoors. HDR and FXAA remain enabled and have their own GPU costs. On
-exiting the interior, verify that screen-space shadows and their normals output
-return, including after disabling and re-enabling post-processing. The captured
-baseline is saved locally as `/tmp/openmw-postprocess-before.stats`; no post-fix
-FPS improvement has been measured yet.
-
 ## Further rendering optimizations
 
 The following changes remove work from existing rendering paths while retaining
-the selected light limit, shadow trace steps, filter taps, target dimensions, and
-normal precision. They have not yet been benchmarked or visually verified on the
-A500 or Xe; playtests are postponed. The interior capture above establishes that
-particular workload, not a diagnosis for every exterior or mod configuration.
+the selected light limit, filter taps, and target dimensions. Their performance
+and visual behavior need to be verified on each supported GPU and mod setup.
 
 | Path | Avoided work | Behavior retained |
 | --- | --- | --- |
@@ -467,7 +415,6 @@ particular workload, not a diagnosis for every exterior or mod configuration.
 | Depth-only render state | Explicitly mask all color writes rather than relying on a fragment shader with no assigned color output. | The opaque color attachment used by water refraction is protected during depth replay. |
 | Idle distortion | Reuse a buffer known to be empty instead of binding, clearing, and restoring it every frame. | The texture remains black for any effect that samples it; the first empty frame after distortion clears it again. |
 | Per-object lighting | Select and sort only the closest retained lights with `partial_sort`, reducing selection from O(N log N) to O(N log K) for N candidates and a K-light limit. Avoid object-bound transforms when the view has no lights. | Radius-weighted proximity, the configured limit, ignored lights, and the sorted retained prefix. Equal-priority light ordering remains unspecified. |
-| Screen-space shadow filters | Reuse sampled world depth for first-person exclusion; compare normals in view space to avoid per-tap world transforms. Return the center sample immediately at zero softness. | The same filter kernel and weights; rigid camera rotations preserve normal dot products. |
 
 The distortion clear cache is separate for each graphics context and alternating
 frame buffer. Replacing an FBO or releasing its GL handle invalidates reuse. A
@@ -718,7 +665,7 @@ manual diagnostic replay is a prerequisite for implementation.
    Per-layer RGBA8 and RGB16F framebuffer rounding means this is not bit-exact
    merely because the algebra matches. Define bounded numerical tolerances and
    automate comparisons for layered slopes, normal/specular/parallax maps,
-   fog, water edges, and screen-space shadow boundaries. Enable batching by
+   fog, water edges, and shadow boundaries. Enable batching by
    default only after those comparisons pass. Expected structural result is
    ceil(L/K) layer draws for L compatible layers and batch size K, with fewer
    blended MRT writes; no FPS multiplier is promised.

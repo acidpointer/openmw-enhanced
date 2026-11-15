@@ -549,8 +549,8 @@ runtime performance verification remain user-operated. These changes do not
 prove the remaining spikes are eliminated or the 65 FPS target is met.
 
 The next GPU-focused pass addresses effect attachment traffic and scene shading.
-The latest user-operated log includes 38 effect composites with screen-space
-shadows, godrays, HDR, FXAA and depth of field queued. That establishes a large
+The latest user-operated log included 38 effect composites across the enabled
+post-processing techniques. That establishes a large
 pass count, not individual GPU durations. Color-only effect outputs previously
 always used LOAD, including passes replacing the entire viewport. The source
 pass now records whether its vertex stage is the generated fullscreen stage;
@@ -582,6 +582,47 @@ C++ frontend checks and source review are permitted; shader compilation, builds,
 fixture execution and GPU performance verification remain user-operated. These
 changes do not establish that post-processing overhead is halved or that the
 maximum-distance 65 FPS target is achieved.
+
+The following GPU pass removes the final scratch-image store/read and fullscreen
+resolve when the last effect uses the generated vertex stage, covers the viewport,
+and does not observe framebuffer coordinates, front-facing state or signed Y
+derivatives. Such effects render directly into the window. Other effects retain
+their offscreen resolve so changing viewport orientation cannot change their
+behavior. Final scratch allocation and initialization are skipped on the direct
+path. ABI 12 covers the effect-stage metadata and water projection contract.
+
+Ordinary target writes now synchronize with fragment consumers rather than also
+stalling vertices. Reflected vertex texture reads use a conservative dependency at
+the consumer, including when they read persistent history from a previous frame.
+Color-only passes avoid a duplicate global external dependency, and color/depth
+dependencies are separated so unrelated color stores do not stall early depth
+tests. An outgoing producer-subpass dependency also replaces the separate color
+and normals barrier commands after every offscreen pass. This follows the Khronos
+[pipeline-barrier guidance](https://docs.vulkan.org/samples/latest/samples/performance/pipeline_barriers/README.html).
+The encoded-normal attachment prefers RGB10A2 instead of RGBA16F, halving its
+storage/bandwidth with ten-bit normal components; feature checks retain RGBA16F
+when sampling, filtering or blending is unsupported. Effect resolutions, sample
+counts, ordering and enabled settings are preserved.
+The custom screen-space shadow effect and its launcher controls have been
+removed. Its shader asset is no longer installed, and old saved-chain entries
+are migrated out while preserving the user's other effects.
+
+Native water previously blended only its Fresnel reflection, leaving transmission
+unchanged at every depth. It now snapshots depth on the GPU once before the first
+water draw in a view and reconstructs optical thickness along the viewing ray.
+Continuous Beer-Lambert absorption uses a 2500-unit attenuation distance instead
+of leaving the first 2500 units completely unattenuated. Ambient-lit body color
+increases with depth; shallow shores remain clear and reflection distortion fades
+near the shore. Straight-alpha
+composition combines absorption and reflection with the existing scene color,
+avoiding a color snapshot or another scene traversal. Water resumes with LOAD for
+both depth and color; weapon-depth preservation retains its separate clear-depth
+semantics. Views without water allocate no snapshot and window passes without
+water retain their discard-depth store policy. Frontend checks and regression
+fixture sources cover presentation-sensitive SPIR-V and long-distance depth
+reconstruction. Shader builds, fixture execution and GPU performance/visual
+verification remain user-operated; these source changes do not establish a
+particular FPS or prove that all post-processing overhead has been removed.
 
 ## Backend architecture
 

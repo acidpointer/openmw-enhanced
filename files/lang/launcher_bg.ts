@@ -697,18 +697,6 @@ Logs and settings changed through the launcher and in-game will be saved here.</
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <source>Shadows</source>
-        <translation type="unfinished">Сенки</translation>
-    </message>
-    <message>
-        <source>Screen-space shadows</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <source>Auto-enable the OpenMW Enhanced screen-space shadow post-processing shader.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
         <source>Enhanced</source>
         <translation type="unfinished"></translation>
     </message>
