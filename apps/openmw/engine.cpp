@@ -246,6 +246,10 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
             ScopedProfile<UserStatsType::Input> profile(statsEpoch, frameNumber, frameStats);
             mInputManager->update(frametime, false);
         }
+        // A GUI Exit action can arrive during input injection. Do not start
+        // another Lua/world update or preload/cache pass after it is accepted.
+        if (mStateManager->hasQuitRequest() || mFrameDriver->isDone())
+            return false;
 
         // When the window is minimized, pause the game. Currently this *has* to be here to work around a MyGUI bug.
         // If we are not currently rendering, then RenderItems will not be reused resulting in a memory leak upon
@@ -388,6 +392,8 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
         Debug::Trace::Scope trace("Event traversal", frameNumber);
         mFrameDriver->processEvents();
     }
+    if (mStateManager->hasQuitRequest() || mFrameDriver->isDone())
+        return false;
     {
         Debug::Trace::Scope trace("Update traversal", frameNumber);
         mFrameDriver->updateScene();
@@ -464,6 +470,13 @@ OMW::Engine::~Engine()
     else if (mViewer)
         mViewer->stopThreading();
 
+    // Native cull snapshots retain scene callbacks, effect programs and worker
+    // owners. Release them while the world, GUI and resource services still
+    // exist, rather than after their destruction below.
+    Log(Debug::Info) << "Shutdown: releasing renderer resources";
+    mFrameDriver.reset();
+    Log(Debug::Info) << "Shutdown: releasing game and GUI services";
+
     if (mScreenCaptureOperation != nullptr)
     {
         mScreenCaptureOperation->stop();
@@ -476,6 +489,7 @@ OMW::Engine::~Engine()
     mJournal = nullptr;
     mWindowManager = nullptr;
     mScriptManager = nullptr;
+    Log(Debug::Info) << "Shutdown: releasing world and background work";
     mWorld = nullptr;
     mStereoManager = nullptr;
     mSoundManager = nullptr;
@@ -490,7 +504,7 @@ OMW::Engine::~Engine()
     mUnrefQueue = nullptr;
     mWorkQueue = nullptr;
 
-    mFrameDriver.reset();
+    Log(Debug::Info) << "Shutdown: releasing viewer and resource caches";
     mViewer = nullptr;
 
     mResourceSystem.reset();
@@ -1225,7 +1239,14 @@ void OMW::Engine::go()
         }
     }
 
+    Log(Debug::Info) << "Shutdown: stopping renderer and Lua worker";
+    mFrameDriver->stop();
     mLuaWorker->join();
+    // Close the visible application immediately. Saving persistent state and
+    // releasing world/GUI caches still complete normally below and in ~Engine.
+    if (mWindow)
+        SDL_HideWindow(mWindow);
+    Log(Debug::Info) << "Shutdown: saving settings and Lua storage";
 
     // Save user settings
     Settings::Manager::saveUser(mCfgMgr.getUserConfigPath() / "settings.cfg");

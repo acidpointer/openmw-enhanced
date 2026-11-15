@@ -38,6 +38,7 @@ namespace MWRender::Vulkan
         std::uint32_t type() const { return mType; }
         MemoryKind kind() const { return mKind; }
         bool empty() const;
+        void beginShutdown() { mShuttingDown = true; }
 
     private:
         VkDevice mDevice;
@@ -46,6 +47,7 @@ namespace MWRender::Vulkan
         std::uint32_t mType;
         MemoryKind mKind;
         Render::AllocationRanges mRanges;
+        bool mShuttingDown = false;
     };
 
     class Allocation
@@ -81,6 +83,7 @@ namespace MWRender::Vulkan
         // Keep one unused block per type/kind for reuse and release excess
         // empty blocks. Call only after retiring completed frame resources.
         void trim();
+        void beginShutdown();
 
     private:
         VkDevice mDevice;

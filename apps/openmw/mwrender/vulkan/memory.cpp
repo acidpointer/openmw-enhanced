@@ -49,7 +49,8 @@ namespace MWRender::Vulkan
 
     void MemoryBlock::release(VkDeviceSize offset) noexcept
     {
-        mRanges.release(offset);
+        if (!mShuttingDown)
+            mRanges.release(offset);
     }
 
     bool MemoryBlock::empty() const
@@ -91,6 +92,11 @@ namespace MWRender::Vulkan
         : mDevice(device)
         , mProperties(properties)
     {
+    }
+    void MemoryAllocator::beginShutdown()
+    {
+        for (const auto& block : mBlocks)
+            block->beginShutdown();
     }
 
     Allocation MemoryAllocator::allocate(

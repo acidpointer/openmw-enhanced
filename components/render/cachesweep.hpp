@@ -15,26 +15,57 @@ namespace Render
         template <class Expired, class Stop>
         std::size_t sweep(Map& cache, Expired&& expired, Stop&& stop)
         {
-            auto next = mAfter ? cache.upper_bound(*mAfter) : cache.begin();
-            std::size_t removed = 0;
-            while (next != cache.end() && !stop())
+            if constexpr (requires { cache.bucket_count(); })
             {
-                mAfter = next->first;
-                if (expired(*next))
+                // Iterators cannot survive a rehash. Keep the next key, and
+                // restart a round if bucket order changed or that key died.
+                const bool rehashed = mBuckets != cache.bucket_count();
+                mBuckets = cache.bucket_count();
+                auto next = !rehashed && mNext ? cache.find(*mNext) : cache.begin();
+                if (next == cache.end())
+                    next = cache.begin();
+                std::size_t removed = 0;
+                while (next != cache.end() && !stop())
                 {
-                    next = cache.erase(next);
-                    ++removed;
+                    if (expired(*next))
+                    {
+                        next = cache.erase(next);
+                        ++removed;
+                    }
+                    else
+                        ++next;
                 }
+                if (next == cache.end())
+                    mNext.reset();
                 else
-                    ++next;
+                    mNext = next->first;
+                return removed;
             }
-            if (next == cache.end())
-                mAfter.reset();
-            return removed;
+            else
+            {
+                auto next = mAfter ? cache.upper_bound(*mAfter) : cache.begin();
+                std::size_t removed = 0;
+                while (next != cache.end() && !stop())
+                {
+                    mAfter = next->first;
+                    if (expired(*next))
+                    {
+                        next = cache.erase(next);
+                        ++removed;
+                    }
+                    else
+                        ++next;
+                }
+                if (next == cache.end())
+                    mAfter.reset();
+                return removed;
+            }
         }
 
     private:
         std::optional<typename Map::key_type> mAfter;
+        std::optional<typename Map::key_type> mNext;
+        std::size_t mBuckets = 0;
     };
 }
 

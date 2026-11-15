@@ -1,5 +1,7 @@
 #include "osgimporter.hpp"
 
+#include <components/render/reserve.hpp>
+
 #include <components/nifosg/autotransform.hpp>
 #include <components/render/math.hpp>
 #include <components/render/texture.hpp>
@@ -76,6 +78,16 @@ namespace RenderAssets
             const bool normalize = normalizedColor || array.getNormalize();
             const auto data = array.getDataPointer(index);
             std::array<float, 4> result{ 0, 0, 0, 1 };
+            // Float channels already use the native scalar representation.
+            // Copy once rather than dispatching the type for each component.
+            if (array.getDataType() == GL_FLOAT)
+            {
+                std::memcpy(result.data(), data, static_cast<std::size_t>(count) * sizeof(float));
+                if (finiteRequired
+                    && !std::all_of(result.begin(), result.begin() + count, [](float v) { return std::isfinite(v); }))
+                    throw std::invalid_argument("Model contains a nonfinite vertex channel");
+                return result;
+            }
             for (int i = 0; i < count; ++i)
             {
                 switch (array.getDataType())
@@ -201,10 +213,21 @@ namespace RenderAssets
             }
             if (colors && colors->getBinding() != osg::Array::BIND_OFF)
             {
-                const auto value = readArray(*colors, channelIndex(*colors, source, set), true);
-                for (std::size_t i = 0; i < 4; ++i)
-                    vertex.mColor[i] = byteColor(value[i]);
-                vertex.mAlpha = std::clamp(value[3], 0.f, 1.f);
+                const auto index = channelIndex(*colors, source, set);
+                if (colors->getDataType() == GL_UNSIGNED_BYTE && colors->getDataSize() == 4)
+                {
+                    if (index >= colors->getNumElements())
+                        throw std::invalid_argument("Model vertex channel is shorter than its binding requires");
+                    std::memcpy(vertex.mColor.data(), colors->getDataPointer(index), 4);
+                    vertex.mAlpha = static_cast<float>(double(vertex.mColor[3]) / 255.0);
+                }
+                else
+                {
+                    const auto value = readArray(*colors, index, true);
+                    for (std::size_t i = 0; i < 4; ++i)
+                        vertex.mColor[i] = byteColor(value[i]);
+                    vertex.mAlpha = std::clamp(value[3], 0.f, 1.f);
+                }
             }
             std::array<float, 3> normal{ 0, 0, 1 };
             if (normals && normals->getBinding() != osg::Array::BIND_OFF)
@@ -215,8 +238,11 @@ namespace RenderAssets
                     const double length
                         = double(value[0]) * value[0] + double(value[1]) * value[1] + double(value[2]) * value[2];
                     if (length > 1e-20 && std::isfinite(length))
+                    {
+                        const double inverse = 1.0 / std::sqrt(length);
                         for (unsigned i = 0; i < 3; ++i)
-                            normal[i] = value[i] / std::sqrt(length);
+                            normal[i] = static_cast<float>(value[i] * inverse);
+                    }
                 }
             }
             vertex.mNormal = normal;
@@ -237,9 +263,13 @@ namespace RenderAssets
             auto result = std::make_shared<Render::MeshAsset>();
             // Reuse source vertices whenever channel bindings permit. A
             // per-primitive-set channel gets a separate key for that set.
-            std::unordered_map<std::uint64_t, std::uint32_t> vertices;
-            vertices.reserve(positions->getNumElements());
+            constexpr auto missingVertex = std::numeric_limits<std::uint32_t>::max();
+            std::vector<std::uint32_t> vertices(positions->getNumElements(), missingVertex);
             result->mVertices.reserve(positions->getNumElements());
+            // MeshStream consumes packed vertices, not the asset-only normal
+            // sidecar or bounds. Do not build those just to discard them.
+            if (!vertexSources && normals && normals->getBinding() != osg::Array::BIND_OFF)
+                result->mNormals.reserve(positions->getNumElements());
             const bool identityUV = uvMatrix.isIdentity();
             if (vertexSources)
                 vertexSources->reserve(positions->getNumElements());
@@ -247,9 +277,22 @@ namespace RenderAssets
                 || (normals && normals->getBinding() == osg::Array::BIND_PER_PRIMITIVE_SET);
             for (unsigned set = 0; set < geometry.getNumPrimitiveSets(); ++set)
             {
+                // Per-set channels need independent packed vertices. All other
+                // channels share this dense source-index remap across sets;
+                // there is no hash lookup/node allocation per imported vertex.
+                if (perSet && set)
+                    std::fill(vertices.begin(), vertices.end(), missingVertex);
                 const auto* primitive = geometry.getPrimitiveSet(set);
                 if (!primitive)
                     throw std::invalid_argument("Model contains an absent primitive set");
+                if (primitive->getNumInstances() > 1)
+                    throw std::invalid_argument(
+                        "Imported model contains unsupported shader-driven primitive instancing");
+                const std::size_t indexCount = primitive->getNumIndices();
+                const std::size_t expansion = primitive->getMode() == GL_TRIANGLES ? 1 : 3;
+                if (indexCount > (result->mIndices.max_size() - result->mIndices.size()) / expansion)
+                    throw std::length_error("Imported mesh exceeds index storage capacity");
+                Render::reserveFor(result->mIndices, result->mIndices.size() + indexCount * expansion);
                 const auto emit = [&](unsigned a, unsigned b, unsigned c) {
                     if (a >= positions->getNumElements() || b >= positions->getNumElements()
                         || c >= positions->getNumElements())
@@ -258,26 +301,42 @@ namespace RenderAssets
                         return;
                     for (const unsigned source : { a, b, c })
                     {
-                        const auto key = (std::uint64_t{ perSet ? set : 0 } << 32) | source;
-                        if (const auto found = vertices.find(key); found != vertices.end())
+                        auto& packed = vertices[source];
+                        if (packed != missingVertex)
                         {
-                            result->mIndices.push_back(found->second);
+                            result->mIndices.push_back(packed);
                             continue;
                         }
                         if (result->mVertices.size() >= std::numeric_limits<std::uint32_t>::max())
                             throw std::length_error("Imported mesh exceeds 32-bit vertex indexing");
                         const auto vertex = streamVertex(geometry, uvUnit, uvMatrix, identityUV, source, set);
                         const auto id = static_cast<std::uint32_t>(result->mVertices.size());
-                        vertices.emplace(key, id);
+                        packed = id;
                         if (vertexSources)
                             vertexSources->push_back((std::uint64_t{ set } << 32) | source);
                         result->mVertices.push_back(vertex);
-                        if (normals && normals->getBinding() != osg::Array::BIND_OFF)
+                        if (!vertexSources && normals && normals->getBinding() != osg::Array::BIND_OFF)
                             result->mNormals.push_back(vertex.mNormal);
                         result->mIndices.push_back(id);
                     }
                 };
-                if (const auto* lengths = dynamic_cast<const osg::DrawArrayLengths*>(primitive))
+                if (const auto* multi = dynamic_cast<const osg::MultiDrawArrays*>(primitive))
+                {
+                    if (multi->getFirsts().size() != multi->getCounts().size())
+                        throw std::invalid_argument("Multi-draw primitive has mismatched ranges");
+                    for (std::size_t range = 0; range < multi->getFirsts().size(); ++range)
+                    {
+                        const auto start = multi->getFirsts()[range];
+                        const auto count = multi->getCounts()[range];
+                        if (start < 0 || count < 0
+                            || std::uint64_t(start) + std::uint64_t(count) > positions->getNumElements())
+                            throw std::invalid_argument("Multi-draw range exceeds its vertex array");
+                        triangles(
+                            primitive->getMode(), count, [&](auto i) { return static_cast<unsigned>(start + i); },
+                            emit);
+                    }
+                }
+                else if (const auto* lengths = dynamic_cast<const osg::DrawArrayLengths*>(primitive))
                 {
                     if (lengths->getFirst() < 0)
                         throw std::invalid_argument("Model draw range starts before its vertex array");
@@ -294,9 +353,6 @@ namespace RenderAssets
                 }
                 else
                 {
-                    if (primitive->getNumInstances() > 1 || dynamic_cast<const osg::MultiDrawArrays*>(primitive))
-                        throw std::invalid_argument(
-                            "Imported model contains unsupported primitive instancing or multi-draw state");
                     triangles(
                         primitive->getMode(), primitive->getNumIndices(),
                         [&](auto i) { return primitive->index(static_cast<unsigned>(i)); }, emit);
@@ -304,13 +360,16 @@ namespace RenderAssets
             }
             if (result->mVertices.empty())
                 throw std::invalid_argument("Imported model geometry has no nondegenerate triangles");
-            result->mBounds = { result->mVertices.front().mPosition, result->mVertices.front().mPosition };
-            for (const auto& vertex : result->mVertices)
-                for (std::size_t i = 0; i < 3; ++i)
-                {
-                    result->mBounds.mMin[i] = std::min(result->mBounds.mMin[i], vertex.mPosition[i]);
-                    result->mBounds.mMax[i] = std::max(result->mBounds.mMax[i], vertex.mPosition[i]);
-                }
+            if (!vertexSources)
+            {
+                result->mBounds = { result->mVertices.front().mPosition, result->mVertices.front().mPosition };
+                for (const auto& vertex : result->mVertices)
+                    for (std::size_t i = 0; i < 3; ++i)
+                    {
+                        result->mBounds.mMin[i] = std::min(result->mBounds.mMin[i], vertex.mPosition[i]);
+                        result->mBounds.mMax[i] = std::max(result->mBounds.mMax[i], vertex.mPosition[i]);
+                    }
+            }
             return result;
         }
 
@@ -336,6 +395,22 @@ namespace RenderAssets
                     return Render::TextureFormat::BC5;
                 default:
                     return std::nullopt;
+            }
+        }
+
+        bool srgb(GLint format)
+        {
+            switch (format)
+            {
+                case GL_SRGB8:
+                case GL_SRGB8_ALPHA8:
+                case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
+                case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
+                case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT:
+                case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:
+                    return true;
+                default:
+                    return false;
             }
         }
 
@@ -371,19 +446,7 @@ namespace RenderAssets
             auto result = std::make_shared<Render::ImageAsset>();
             result->mName = source.getFileName();
             result->mFormat = !decode && compressed ? *compressed : Render::TextureFormat::RGBA8;
-            switch (source.getInternalTextureFormat())
-            {
-                case GL_SRGB8:
-                case GL_SRGB8_ALPHA8:
-                case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
-                case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
-                case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT:
-                case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:
-                    result->mSrgb = true;
-                    break;
-                default:
-                    break;
-            }
+            result->mSrgb = srgb(source.getInternalTextureFormat());
             auto width = static_cast<std::uint32_t>(source.s());
             auto height = static_cast<std::uint32_t>(source.t());
             result->mLevels.reserve(source.getNumMipmapLevels());
@@ -617,6 +680,45 @@ namespace RenderAssets
     std::shared_ptr<const Render::ImageAsset> OsgImporter::importImage(const osg::Image& source, bool preserveRows)
     {
         return mImpl->importImage(source, preserveRows);
+    }
+
+    std::optional<Render::TextureData> OsgImporter::borrowTexture(
+        const osg::Image& source, std::vector<Render::TextureLevel>& levels, bool mipmaps)
+    {
+        levels.clear();
+        if (source.s() <= 0 || source.t() <= 0 || source.r() != 1 || !source.data())
+            throw std::invalid_argument("Live texture must contain a nonempty 2D image");
+        const auto compressed = compression(source.getPixelFormat());
+        if (!compressed
+            && (source.isCompressed() || source.getPixelFormat() != GL_RGBA || source.getDataType() != GL_UNSIGNED_BYTE
+                || !source.isDataContiguous()))
+            return {};
+        auto width = static_cast<std::uint32_t>(source.s());
+        auto height = static_cast<std::uint32_t>(source.t());
+        const auto format = compressed.value_or(Render::TextureFormat::RGBA8);
+        const auto count = mipmaps ? source.getNumMipmapLevels() : 1u;
+        const auto available = source.getTotalSizeInBytesIncludingMipmaps();
+        for (unsigned level = 0; level < count; ++level)
+        {
+            // Vulkan's tightly packed copies cannot consume padded source rows.
+            if (!compressed
+                && osg::Image::computeRowWidthInBytes(width, GL_RGBA, GL_UNSIGNED_BYTE, source.getPacking())
+                    != std::uint64_t(width) * 4)
+            {
+                levels.clear();
+                return {};
+            }
+            const auto offset = source.getMipmapOffset(level);
+            const auto size = Render::textureLevelSize(format, width, height);
+            if (offset > available || size > available - offset)
+                throw std::invalid_argument("Live texture mip exceeds its source image buffer");
+            levels.push_back({ width, height,
+                { reinterpret_cast<const std::byte*>(source.data()) + offset, static_cast<std::size_t>(size) } });
+            width = std::max(1u, width / 2);
+            height = std::max(1u, height / 2);
+        }
+        return Render::TextureData{ format, srgb(source.getInternalTextureFormat()),
+            mipmaps && !compressed && count == 1, levels };
     }
 
     std::shared_ptr<const Render::ModelAsset> OsgImporter::import(const osg::Node& root, std::string_view name)
@@ -885,6 +987,13 @@ namespace RenderAssets
         result.mIndices = std::move(imported->mIndices);
         result.mSourceVertexCount = geometry.getVertexArray()->getNumElements();
         result.mUVUnit = uvUnit;
+        const std::array channels{ geometry.getTexCoordArray(uvUnit), geometry.getColorArray(),
+            geometry.getTexCoordArray(0) };
+        for (unsigned i = 0; i < channels.size(); ++i)
+        {
+            result.mStaticChannels[i] = channels[i];
+            result.mStaticRevisions[i] = channels[i] ? channels[i]->getModifiedCount() : 0;
+        }
         return result;
     }
 
@@ -896,11 +1005,56 @@ namespace RenderAssets
             || stream.mVertices.size() != stream.mVertexSources.size() || (uv && uv->getDataSize() != 2))
             throw std::invalid_argument("Animated mesh stream requires its original topology and channel dimensions");
         const osg::Matrixf identity;
+        const std::array channels{ uv, geometry.getColorArray(), geometry.getTexCoordArray(0) };
+        bool staticChannelsUnchanged = true;
+        for (unsigned i = 0; i < channels.size(); ++i)
+            staticChannelsUnchanged &= stream.mStaticChannels[i].get() == channels[i]
+                && stream.mStaticRevisions[i] == (channels[i] ? channels[i]->getModifiedCount() : 0);
+        const auto* packedPositions = dynamic_cast<const osg::Vec3Array*>(positions);
+        const auto* normals = geometry.getNormalArray();
+        const auto* packedNormals = dynamic_cast<const osg::Vec3Array*>(normals);
+        const bool hasNormals = normals && normals->getBinding() != osg::Array::BIND_OFF;
+        if (staticChannelsUnchanged && packedPositions && (!hasNormals || packedNormals))
+        {
+            // Skinning changes pose, not UV/color channels. Keep those packed
+            // bytes and topology in place; read float pose arrays directly.
+            for (std::size_t i = 0; i < stream.mVertices.size(); ++i)
+            {
+                const auto source = stream.mVertexSources[i];
+                const auto& p = (*packedPositions)[static_cast<unsigned>(source)];
+                if (!std::isfinite(p.x()) || !std::isfinite(p.y()) || !std::isfinite(p.z()))
+                    throw std::invalid_argument("Model contains a nonfinite vertex channel");
+                auto& vertex = stream.mVertices[i];
+                vertex.mPosition = { p.x(), p.y(), p.z() };
+                vertex.mNormal = { 0, 0, 1 };
+                if (hasNormals)
+                {
+                    const auto index
+                        = channelIndex(*normals, static_cast<unsigned>(source), static_cast<unsigned>(source >> 32));
+                    if (index >= packedNormals->size())
+                        throw std::invalid_argument("Animated normal channel is too short");
+                    const auto& n = (*packedNormals)[index];
+                    const double length = double(n.x()) * n.x() + double(n.y()) * n.y() + double(n.z()) * n.z();
+                    if (std::isfinite(length) && length > 1e-20)
+                    {
+                        const auto scale = 1.0 / std::sqrt(length);
+                        vertex.mNormal = { static_cast<float>(n.x() * scale), static_cast<float>(n.y() * scale),
+                            static_cast<float>(n.z() * scale) };
+                    }
+                }
+            }
+            return;
+        }
         for (std::size_t i = 0; i < stream.mVertices.size(); ++i)
         {
             const auto source = stream.mVertexSources[i];
             stream.mVertices[i] = streamVertex(geometry, stream.mUVUnit, identity, true, static_cast<unsigned>(source),
                 static_cast<unsigned>(source >> 32));
+        }
+        for (unsigned i = 0; i < channels.size(); ++i)
+        {
+            stream.mStaticChannels[i] = channels[i];
+            stream.mStaticRevisions[i] = channels[i] ? channels[i]->getModifiedCount() : 0;
         }
     }
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -350,15 +351,35 @@ namespace RenderAssets
     }
 
     EffectShader compileEffectShader(const std::filesystem::path& compiler, std::string_view vertex,
-        std::string_view fragment, const std::vector<std::string>& samplers)
+        std::string_view fragment, const std::vector<std::string>& samplers, std::stop_token stop)
     {
+        if (stop.stop_requested())
+            throw std::runtime_error("Effect shader compilation cancelled");
 #ifdef _WIN32
         throw std::runtime_error("Native effect shader compiler launching is not implemented on Windows");
 #else
         // Shader work runs off the render thread, with one compiler process at
         // a time so enabling a large effect chain cannot saturate all CPU cores.
         static std::mutex compilerMutex;
-        const std::lock_guard compilerLock(compilerMutex);
+        static std::condition_variable_any compilerAvailable;
+        static bool compilerBusy = false;
+        {
+            std::unique_lock lock(compilerMutex);
+            if (!compilerAvailable.wait(lock, stop, [] { return !compilerBusy; }) || stop.stop_requested())
+                throw std::runtime_error("Effect shader compilation cancelled");
+            compilerBusy = true;
+        }
+        struct ReleaseCompiler
+        {
+            ~ReleaseCompiler()
+            {
+                {
+                    const std::lock_guard lock(compilerMutex);
+                    compilerBusy = false;
+                }
+                compilerAvailable.notify_one();
+            }
+        } releaseCompiler;
         std::string pattern = (std::filesystem::temp_directory_path() / "openmw-vulkan-fx-XXXXXX").string();
         if (!mkdtemp(pattern.data()))
             throw std::runtime_error("Cannot create effect compiler directory");
@@ -431,7 +452,7 @@ namespace RenderAssets
                     status = 1 << 8;
                 }
             }
-            if (std::chrono::steady_clock::now() >= deadline)
+            if (stop.stop_requested() || std::chrono::steady_clock::now() >= deadline)
             {
                 if (!finished)
                 {
@@ -441,7 +462,8 @@ namespace RenderAssets
                     }
                 }
                 close(pipefd[0]);
-                throw std::runtime_error("Effect shader compilation timed out: " + log);
+                throw std::runtime_error(stop.stop_requested() ? "Effect shader compilation cancelled"
+                                                               : "Effect shader compilation timed out: " + log);
             }
             if (finished && ready == 0)
                 break;

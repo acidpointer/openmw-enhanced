@@ -41,10 +41,10 @@ namespace MWRender::Vulkan
                 case GL_RGB:
                 case GL_RGB8:
                 case 0:
-                    return Render::TargetFormat::RGBA8;
+                    return Render::TargetFormat::ColorRGBA8;
                 case GL_RGBA16F:
                 case GL_RGB16F:
-                    return Render::TargetFormat::RGBA16F;
+                    return Render::TargetFormat::ColorRGBA16F;
                 case GL_R8:
                 case GL_RED:
                     return Render::TargetFormat::R8;
@@ -67,12 +67,15 @@ namespace MWRender::Vulkan
             }
         }
         void packMember(std::vector<std::byte>& bytes, const RenderAssets::EffectMember& member,
-            const RenderAssets::OsgState& state, const osg::Matrixf& projection, const osg::Matrixf& inverse)
+            const RenderAssets::OsgStateView& state, const RenderAssets::OsgState& camera,
+            const osg::Matrixf& projection, const osg::Matrixf& inverse, bool cameraOnly)
         {
             const float* matrix = member.mName == "omw.projectionMatrix" ? projection.ptr()
                 : member.mName == "omw.invProjectionMatrix"              ? inverse.ptr()
                                                                          : nullptr;
-            const auto* uniform = state.getUniform(member.mName);
+            const auto* uniform = camera.getUniform(member.mName);
+            if (!uniform && !cameraOnly)
+                uniform = state.getUniform(member.mName);
             const void* source = matrix;
             std::size_t count = matrix ? 16 : 0;
             if (!matrix && uniform)
@@ -140,6 +143,10 @@ namespace MWRender::Vulkan
             }
         };
         std::unique_ptr<Target> mScene;
+        osg::ref_ptr<osg::StateSet> mCameraUniforms = new osg::StateSet;
+        RenderAssets::OsgState mCameraState;
+        osg::Matrixf mCurrentView, mPreviousView;
+        bool mHasPreviousView = false, mCameraQueued = false;
         std::array<std::unique_ptr<Target>, 3> mScratch;
         struct NamedTarget
         {
@@ -153,6 +160,7 @@ namespace MWRender::Vulkan
             Render::Backend& mBackend;
             Render::EffectHandle mHandle{};
             RenderAssets::EffectShader mShader;
+            std::stop_source mStop;
             std::future<RenderAssets::EffectShader> mCompilation;
             std::string mError;
             explicit Program(Render::Backend& backend)
@@ -161,6 +169,7 @@ namespace MWRender::Vulkan
             }
             ~Program()
             {
+                mStop.request_stop();
                 if (mHandle)
                     mBackend.releaseEffect(mHandle);
             }
@@ -191,12 +200,26 @@ namespace MWRender::Vulkan
         };
         std::map<const osg::Program*, ProgramRecord> mPrograms;
         std::map<std::pair<std::string, std::string>, std::shared_ptr<Program>> mCode;
+        struct Prepared
+        {
+            const Fx::DispatchNode* node = nullptr;
+            std::vector<std::pair<std::shared_ptr<Program>, const osg::StateSet*>> passes;
+        };
+        std::vector<Prepared> mPrepared;
         struct Work
         {
             std::vector<std::vector<std::byte>> mData;
             std::vector<Render::EffectInput> mInputs;
         };
         std::deque<Work> mWork;
+        std::size_t mWorkUsed = 0;
+        std::vector<Render::Pass> mEffectPasses;
+        Work& nextWork()
+        {
+            if (mWorkUsed == mWork.size())
+                mWork.emplace_back();
+            return mWork[mWorkUsed++];
+        }
         std::vector<Target*> mInitialized;
         std::vector<Render::Draw> mResolve;
         Render::MeshHandle mQuad{};
@@ -206,6 +229,14 @@ namespace MWRender::Vulkan
             : mBackend(backend)
             , mTextures(std::move(textures))
         {
+            mCameraUniforms->addUniform(new osg::Uniform("omw.viewMatrix", osg::Matrixf()));
+            mCameraUniforms->addUniform(new osg::Uniform("omw.invViewMatrix", osg::Matrixf()));
+            mCameraUniforms->addUniform(new osg::Uniform("omw.prevViewMatrix", osg::Matrixf()));
+            mCameraUniforms->addUniform(new osg::Uniform("omw.eyePos", osg::Vec4f()));
+            mCameraUniforms->addUniform(new osg::Uniform("omw.eyeVec", osg::Vec4f()));
+            mCameraUniforms->addUniform(new osg::Uniform("omw.resolution", osg::Vec2f()));
+            mCameraUniforms->addUniform(new osg::Uniform("omw.rcpResolution", osg::Vec2f()));
+            mCameraState = RenderAssets::OsgState(*mCameraUniforms);
             char* base = SDL_GetBasePath();
             if (!base)
                 throw std::runtime_error("Cannot locate native effect compiler");
@@ -220,8 +251,23 @@ namespace MWRender::Vulkan
             constexpr std::array<std::uint32_t, 3> indices{ 0, 1, 2 };
             mQuad = mBackend.createMesh(vertices, indices);
         }
+        void stop()
+        {
+            // Cancel every queued/running job before future destruction joins
+            // workers. A queue of obsolete variants must not delay game exit
+            // by one compiler timeout per program.
+            for (const auto& [key, program] : mCode)
+                program->mStop.request_stop();
+            for (const auto& [source, record] : mPrograms)
+                if (record.mProgram)
+                    record.mProgram->mStop.request_stop();
+            for (const auto& program : { mLuminanceProgram, mExposureProgram, mDepthProgram })
+                if (program)
+                    program->mStop.request_stop();
+        }
         ~Impl()
         {
+            stop();
             if (mQuad)
                 mBackend.releaseMesh(mQuad);
         }
@@ -274,13 +320,14 @@ namespace MWRender::Vulkan
             const std::string& vertex, const std::string& fragment, const std::vector<std::string>& samplers)
         {
             auto result = std::make_shared<Program>(mBackend);
-            result->mCompilation = std::async(std::launch::async, [compiler = mCompiler, vertex, fragment, samplers] {
-                return RenderAssets::compileEffectShader(compiler, vertex, fragment, samplers);
-            });
+            result->mCompilation = std::async(std::launch::async,
+                [compiler = mCompiler, vertex, fragment, samplers, stop = result->mStop.get_token()] {
+                    return RenderAssets::compileEffectShader(compiler, vertex, fragment, samplers, stop);
+                });
             return result;
         }
 
-        std::shared_ptr<Program> program(const RenderAssets::OsgState& state)
+        std::shared_ptr<Program> program(const RenderAssets::OsgStateView& state)
         {
             const auto* source = dynamic_cast<const osg::Program*>(state.getAttribute(osg::StateAttribute::PROGRAM));
             if (!source)
@@ -335,11 +382,14 @@ namespace MWRender::Vulkan
                 throw;
             }
         }
-        void uniforms(Work& work, const Program& program, const RenderAssets::OsgState& state,
-            const osg::Matrixf& projection, const std::function<Render::TextureHandle(const std::string&)>& texture)
+        template <class ResolveTexture>
+        void uniforms(Work& work, const Program& program, const RenderAssets::OsgStateView& state,
+            const osg::Matrixf& projection, const ResolveTexture& texture)
         {
             work.mData.reserve(program.mShader.mResources.size());
             work.mInputs.reserve(program.mShader.mResources.size());
+            work.mInputs.clear();
+            std::size_t block = 0;
             const auto inverse = osg::Matrixf::inverse(projection);
             for (const auto& resource : program.mShader.mResources)
             {
@@ -347,7 +397,11 @@ namespace MWRender::Vulkan
                     work.mInputs.push_back({ resource.mBinding.mBinding, texture(resource.mName), {} });
                 else
                 {
-                    auto& bytes = work.mData.emplace_back(resource.mBinding.mSize);
+                    if (block == work.mData.size())
+                        work.mData.emplace_back();
+                    auto& bytes = work.mData[block++];
+                    bytes.assign(resource.mBinding.mSize, std::byte{});
+                    bool engineBuffer = false;
                     if (resource.mName == "_data")
                     {
                         const auto* binding = dynamic_cast<const osg::UniformBufferBinding*>(
@@ -359,15 +413,21 @@ namespace MWRender::Vulkan
                             const auto available = binding->getBufferData()->getTotalDataSize();
                             if (offset <= available && bytes.size() <= available - offset
                                 && bytes.size() <= static_cast<std::size_t>(binding->getSize()))
+                            {
                                 std::memcpy(bytes.data(),
                                     static_cast<const std::byte*>(binding->getBufferData()->getDataPointer()) + offset,
                                     bytes.size());
+                                engineBuffer = true;
+                            }
                             else
                                 throw std::invalid_argument("OMWFX engine buffer does not match reflected layout");
                         }
                     }
                     for (const auto& member : resource.mMembers)
-                        packMember(bytes, member, state, projection, inverse);
+                        // A bound GL uniform block supplies its members as one
+                        // buffer, not as individual uniforms in every ancestor.
+                        // Only native camera corrections override that block.
+                        packMember(bytes, member, state, mCameraState, projection, inverse, engineBuffer);
                     work.mInputs.push_back({ resource.mBinding.mBinding, {}, bytes });
                 }
             }
@@ -421,7 +481,7 @@ void main() {
             auto& lum = target(mLuminance, 16, 16, Render::TargetFormat::R16F);
             auto& previous = target(mExposure[mExposureIndex], 1, 1, Render::TargetFormat::R16F);
             auto& current = target(mExposure[1 - mExposureIndex], 1, 1, Render::TargetFormat::R16F);
-            auto& first = mWork.emplace_back();
+            auto& first = nextWork();
             uniforms(first, *luminance, {}, projection, [&](const std::string&) { return scene; });
             effects.push_back({ {}, lum.mColor, {}, false, {}, luminance->mHandle, first.mInputs });
             const auto now = std::chrono::steady_clock::now();
@@ -439,8 +499,8 @@ void main() {
             mExposureState->getUniform("delta")->set(std::clamp(elapsed, 0.f, 1.f));
             mExposureState->getUniform("speed")->set(Settings::postProcessing().mAutoExposureSpeed.get());
             mExposureState->getUniform("initialized")->set(previous.mInitialized ? 1 : 0);
-            auto& second = mWork.emplace_back();
-            uniforms(second, *adapt, RenderAssets::OsgState(*mExposureState), projection,
+            auto& second = nextWork();
+            uniforms(second, *adapt, RenderAssets::OsgStateView(nullptr, mExposureState), projection,
                 [&](const std::string& name) { return name == "currentLum" ? lum.mColor : previous.mColor; });
             effects.push_back({ {}, current.mColor, {}, false, {}, adapt->mHandle, second.mInputs });
             mInitialized.push_back(&current);
@@ -498,16 +558,20 @@ void main() {
         }
 
         void append(std::vector<Render::Pass>& passes, PingPongCanvas& canvas,
-            const RenderAssets::OsgState& canvasState, const osg::Matrixd& projection,
+            const RenderAssets::OsgStateView& canvasState, const osg::Matrixd& projection, const osg::Matrixd& view,
             std::span<const Render::Draw> distortion)
         {
             mExposureQueued = false;
-            mWork.clear();
+            mCameraQueued = false;
+            mWorkUsed = 0;
             mInitialized.clear();
             mResolve.clear();
             const auto plan = Fx::makeExecutionPlan(canvas.getPasses(), canvas.getMask(), canvas.getPostProcessing());
             if (plan.mNodes.empty())
+            {
+                mHasPreviousView = false;
                 return;
+            }
             const auto scenePosition
                 = std::find_if(passes.begin(), passes.end(), [](const auto& pass) { return !pass.mTarget; });
             if (scenePosition == passes.end())
@@ -516,13 +580,25 @@ void main() {
             unsigned width = scenePosition->mViewport[2], height = scenePosition->mViewport[3];
             if (!width || !height)
                 return;
+            // SceneView culling and effect dispatch are separate phases. Supply
+            // the actual camera explicitly in both scalar and UBO paths, so
+            // sun projection, view rays and temporal inputs cannot retain a
+            // previous cull's camera or viewport.
+            mCurrentView = osg::Matrixf(view);
+            const auto cameraInverse = osg::Matrixd::inverse(view);
+            const auto cameraEye = osg::Vec3d(0, 0, 0) * cameraInverse;
+            auto cameraDirection = osg::Matrixd::transform3x3(osg::Vec3d(0, 0, -1), cameraInverse);
+            cameraDirection.normalize();
+            mCameraUniforms->getUniform("omw.viewMatrix")->set(mCurrentView);
+            mCameraUniforms->getUniform("omw.invViewMatrix")->set(osg::Matrixf(cameraInverse));
+            mCameraUniforms->getUniform("omw.prevViewMatrix")->set(mHasPreviousView ? mPreviousView : mCurrentView);
+            mCameraUniforms->getUniform("omw.eyePos")->set(osg::Vec4f(cameraEye.x(), cameraEye.y(), cameraEye.z(), 0));
+            mCameraUniforms->getUniform("omw.eyeVec")
+                ->set(osg::Vec4f(cameraDirection.x(), cameraDirection.y(), cameraDirection.z(), 0));
+            mCameraUniforms->getUniform("omw.resolution")->set(osg::Vec2f(width, height));
+            mCameraUniforms->getUniform("omw.rcpResolution")->set(osg::Vec2f(1.f / width, 1.f / height));
             const auto format = plan.mHDR ? Render::TargetFormat::RGBA16F : Render::TargetFormat::RGBA8;
-            struct Prepared
-            {
-                const Fx::DispatchNode* node;
-                std::vector<std::pair<std::shared_ptr<Program>, RenderAssets::OsgState>> passes;
-            };
-            std::vector<Prepared> prepared;
+            std::size_t preparedCount = 0;
             for (auto index : plan.mNodes)
             {
                 const auto& node = canvas.getPasses()[index];
@@ -533,20 +609,23 @@ void main() {
                     if (node.mInternalDistortion)
                         node.mRootStateSet->getOrCreateUniform("enhancedDistortionCoverage", osg::Uniform::FLOAT_VEC4)
                             ->set(osg::Vec4f(0, 0, 1, 1));
-                    Prepared result{ &node, {} };
+                    if (preparedCount == mPrepared.size())
+                        mPrepared.emplace_back();
+                    auto& result = mPrepared[preparedCount];
+                    result.node = &node;
+                    result.passes.clear();
                     for (const auto& pass : node.mPasses)
                     {
                         if (pass.mMipMap)
                             throw std::invalid_argument("Mipmapped OMWFX targets are not yet available in Vulkan");
-                        RenderAssets::OsgState state = canvasState;
-                        state.merge(*node.mRootStateSet);
-                        state.merge(*pass.mStateSet);
+                        RenderAssets::OsgStateView root(&canvasState, node.mRootStateSet);
+                        RenderAssets::OsgStateView state(&root, pass.mStateSet);
                         if (state.getMode(GL_BLEND) & osg::StateAttribute::ON)
                             throw std::invalid_argument("OMWFX attachment blending is not yet available in Vulkan");
                         auto shader = program(state);
-                        result.passes.emplace_back(std::move(shader), std::move(state));
+                        result.passes.emplace_back(std::move(shader), pass.mStateSet.get());
                     }
-                    prepared.push_back(std::move(result));
+                    ++preparedCount;
                 }
                 catch (const ShaderPending&)
                 {
@@ -559,6 +638,9 @@ void main() {
                         Log(Debug::Warning) << "Vulkan OMWFX skipped " << message;
                 }
             }
+            for (std::size_t i = preparedCount; i < mPrepared.size(); ++i)
+                mPrepared[i].passes.clear();
+            const std::span<const Prepared> prepared(mPrepared.data(), preparedCount);
             if (prepared.empty())
                 return;
             bool needsNormals = false, needsDepth = false, needsDistortion = false;
@@ -583,7 +665,8 @@ void main() {
                     [](const auto& draw) { return draw.mClearDepthBefore; });
             if (firstPerson && !scene.mWorldDepth)
                 scene.mWorldDepth = mBackend.worldDepthTexture(scene.mColor);
-            std::vector<Render::Pass> effects;
+            auto& effects = mEffectPasses;
+            effects.clear();
             auto depth = scene.mDepth;
             const auto worldDepth = firstPerson ? scene.mWorldDepth : scene.mDepth;
             if (firstPerson)
@@ -633,8 +716,8 @@ void main(){
                 Render::SamplerState nearest;
                 nearest.mMinFilter = nearest.mMagFilter = Render::TextureFilter::Nearest;
                 auto& merged = target(mCombinedDepth, width, height, Render::TargetFormat::R32F, nearest);
-                auto& work = mWork.emplace_back();
-                uniforms(work, *shader, RenderAssets::OsgState(*mDepthState), osg::Matrixf(projection),
+                auto& work = nextWork();
+                uniforms(work, *shader, RenderAssets::OsgStateView(nullptr, mDepthState), osg::Matrixf(projection),
                     [&](const std::string& name) { return name == "worldDepth" ? worldDepth : scene.mDepth; });
                 effects.push_back({ {}, merged.mColor, {}, false, {}, shader->mHandle, work.mInputs });
                 depth = merged.mColor;
@@ -642,7 +725,7 @@ void main(){
             Render::TextureHandle distortionTexture;
             if (needsDistortion)
             {
-                auto& field = target(mDistortion, width, height, Render::TargetFormat::RGBA16F);
+                auto& field = target(mDistortion, width, height, Render::TargetFormat::ColorRGBA16F);
                 mDistortionDraws.assign(distortion.begin(), distortion.end());
                 for (auto& draw : mDistortionDraws)
                     draw.mMaskTexture = depth;
@@ -658,7 +741,20 @@ void main(){
                 = needsExposure ? exposure(effects, scene.mColor, osg::Matrixf(projection)) : Render::TextureHandle{};
             Fx::ScratchRouting routing;
             const auto scratch = [&](int slot) {
-                return slot < 0 ? scene.mColor : target(mScratch[slot], width, height, format).mColor;
+                if (slot < 0)
+                    return scene.mColor;
+                const auto scratchFormat
+                    = plan.mHDR ? Render::TargetFormat::ColorRGBA16F : Render::TargetFormat::ColorRGBA8;
+                auto& destination = target(mScratch[slot], width, height, scratchFormat);
+                // Match PingPongCanvas initialization: passes may discard
+                // pixels outside a reduced region and read that padding later.
+                if (!destination.mInitialized
+                    && std::find(mInitialized.begin(), mInitialized.end(), &destination) == mInitialized.end())
+                {
+                    effects.push_back({ {}, destination.mColor, { .5f, .5f, .5f, 1.f }, true });
+                    mInitialized.push_back(&destination);
+                }
+                return destination.mColor;
             };
             for (const auto& item : prepared)
             {
@@ -685,14 +781,16 @@ void main(){
                 }
                 for (std::size_t index = 0; index < item.passes.size(); ++index)
                 {
-                    const auto& [shader, state] = item.passes[index];
+                    const auto& [shader, sourceState] = item.passes[index];
+                    RenderAssets::OsgStateView root(&canvasState, node.mRootStateSet);
+                    RenderAssets::OsgStateView state(&root, sourceState);
                     const auto lastShader = scratch(routing.lastShader());
                     const auto lastPass = scratch(routing.lastPass());
                     const auto& source = node.mHandle->getPasses()[index];
                     const auto name = source->getTarget();
                     const auto output = name.empty() ? scratch(routing.selectOutput(index + 1 == item.passes.size()))
                                                      : mNamed.at({ node.mHandle.get(), name }).mTarget->mColor;
-                    auto& work = mWork.emplace_back();
+                    auto& work = nextWork();
                     uniforms(work, *shader, state, osg::Matrixf(projection), [&](const std::string& sampler) {
                         if (sampler == "omw_SamplerDistortion")
                             return distortionTexture;
@@ -736,16 +834,16 @@ void main(){
             // Publish scene redirection and its resolve together. An allocation
             // failure while assembling passes must leave the original window
             // scene intact, rather than stranding it in an offscreen target.
-            auto composed = passes;
-            composed.reserve(passes.size() + effects.size() + 1);
-            const auto windowViewport = composed[sceneIndex].mViewport;
-            composed[sceneIndex].mViewport = { 0, 0, width, height };
-            composed[sceneIndex].mTarget = scene.mColor;
-            composed[sceneIndex].mPreserveWorldDepth = firstPerson;
-            composed.insert(composed.begin() + sceneIndex + 1, effects.begin(), effects.end());
-            composed.insert(
-                composed.begin() + sceneIndex + effects.size() + 1, { mResolve, {}, {}, true, windowViewport });
-            passes.swap(composed);
+            static_assert(
+                std::is_nothrow_copy_constructible_v<Render::Pass> && std::is_nothrow_move_assignable_v<Render::Pass>);
+            passes.reserve(passes.size() + effects.size() + 1);
+            const auto windowViewport = passes[sceneIndex].mViewport;
+            passes[sceneIndex].mViewport = { 0, 0, width, height };
+            passes[sceneIndex].mTarget = scene.mColor;
+            passes[sceneIndex].mPreserveWorldDepth = firstPerson;
+            passes.insert(passes.begin() + sceneIndex + 1, effects.begin(), effects.end());
+            passes.insert(passes.begin() + sceneIndex + effects.size() + 1, { mResolve, {}, {}, true, windowViewport });
+            mCameraQueued = true;
             std::erase_if(mNamed, [](const auto& pair) { return pair.second.mOwner.expired(); });
             std::erase_if(mVolumes, [](const auto& pair) { return !pair.second.mSource.valid(); });
             std::erase_if(mPrograms, [](const auto& pair) { return !pair.second.mSource.valid(); });
@@ -764,12 +862,17 @@ void main(){
     {
     }
     Effects::~Effects() = default;
-    void Effects::append(std::vector<Render::Pass>& passes, PingPongCanvas& canvas, const RenderAssets::OsgState& state,
-        const osg::Matrixd& projection, std::span<const Render::Draw> distortion)
+    void Effects::stop()
+    {
+        mImpl->stop();
+    }
+    void Effects::append(std::vector<Render::Pass>& passes, PingPongCanvas& canvas,
+        const RenderAssets::OsgStateView& state, const osg::Matrixd& projection, const osg::Matrixd& view,
+        std::span<const Render::Draw> distortion)
     {
         try
         {
-            mImpl->append(passes, canvas, state, projection, distortion);
+            mImpl->append(passes, canvas, state, projection, view, distortion);
         }
         catch (const ShaderPending&)
         {
@@ -786,6 +889,12 @@ void main(){
     }
     void Effects::submitted()
     {
+        if (mImpl->mCameraQueued)
+        {
+            mImpl->mPreviousView = mImpl->mCurrentView;
+            mImpl->mHasPreviousView = true;
+            mImpl->mCameraQueued = false;
+        }
         if (mImpl->mExposureQueued)
         {
             mImpl->mExposureIndex = 1 - mImpl->mExposureIndex;

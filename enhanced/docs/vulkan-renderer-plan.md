@@ -49,8 +49,9 @@ installs `VulkanFrameDriver`. The adapter consumes the existing CPU cull result
 and submits cached visible geometry directly to Vulkan. Skinning, morphing,
 terrain selection, and gameplay transforms still run through existing CPU OSG
 services. Unchanged geometry remains resident; changed vertices update resident
-buffers without reuploading unchanged indices. Effective state is cached until
-its bindings or inherited state change. UV animation stays in instance data.
+buffers without reuploading unchanged indices. Live inherited bindings are
+borrowed from the cull graph, and material parameters are decoded once per
+state graph per prepared frame. UV animation stays in instance data.
 
 MyGUI emits its existing clipped and ordered CPU batches to the native renderer.
 The viewer's rendering entry point is preserved, so loading screens, videos and
@@ -221,8 +222,9 @@ The subsequent playtest confirmed that camera control improved after the
 parentless-state fix, with remaining hitches concentrated on rotation. Source
 inspection found that the native mesh/texture caches still evicted loaded assets
 after only 16 unseen frames. These caches now retain assets while under soft
-residency budgets, scaled to the largest local-memory heap: geometry uses
-1/16 (32–128 MiB), textures use 1/8 (64–512 MiB). Dead sources are reclaimed
+residency budgets, scaled to the largest local-memory heap or the lower reported
+VK_EXT_memory_budget allowance: geometry uses 1/16 (32–512 MiB), textures use
+1/8 (64–2048 MiB). Dead sources are reclaimed
 regardless of budget. Under pressure, only assets unseen for more than 32 frames
 are eligible, preserving the active working set. Visible/in-flight resources
 and render targets are not hard-capped by these cache limits. Payload bytes
@@ -267,8 +269,12 @@ The next rotation-stutter pass shares native mesh storage across OSG hierarchy
 clones with identical vertex/index sources and revisions. Instance transforms
 remain separate, and adjacent matching draws can now use the same instanced
 batch. Modified geometry detaches from canonical storage before uploading;
-animated streams then update their own buffers. Weak storage records and source
-observers prevent dead objects or reused addresses from matching old meshes.
+animated streams then update their own buffers. Source observers and revision
+checks prevent dead objects or reused addresses from matching old meshes.
+Canonical GPU storage stays cached within its residency allowance even when the
+last scene clone disappears; keeping only a weak storage reference used to lose
+these uploads before a later clone could reuse them. Stale source revisions
+retire incrementally, and memory pressure can retire unused canonical storage.
 Residency charges follow shared storage, and records retire within the existing
 incremental cache sweep. These changes remove duplicate imports/uploads from
 camera-dependent discovery; their effect on frame pacing is not yet measured.
@@ -278,8 +284,12 @@ handler to create an invisible GL slave camera. Its five states show off, FPS,
 submission-interval history and CPU rendering phases, cache residency, and
 engine phases. The history tracks successful submissions, including elapsed
 time across skipped fence polls; it is not GPU timing or display scanout timing.
-The graph keeps fixed topology and uploads only changed vertices. Overlay
-widgets are destroyed before WindowManager teardown.
+The graph keeps fixed topology and uploads only changed vertices. The subsequent
+playtest found unreadable text and chart/text overlap. The overlay now has an
+opaque background, wrapped read-only labels, and separate measured header,
+chart and detail areas in the same GUI coordinate space. Chart width follows
+the panel, with fixed sample count. Overlay widgets are destroyed before
+WindowManager teardown.
 
 The native OMWFX scene target now adds an encoded view-normal attachment only
 when a compiled active pass samples normals. Sky normals are neutral. When a
@@ -296,11 +306,247 @@ pass uses scene depth for occlusion, preserves authored blending and strength,
 and supplies the existing internal distortion effect. Premultiplied-alpha and
 weighted-replace blend selection are independent again. Unlit, sky, water and
 distortion draws no longer upload unused point-light sets. The same-build
-backend ABI is now version 8 for normal/world-depth access and scene target
-formats. These paths have static frontend checks only; shader compilation,
+backend ABI is now version 10 for normal/world-depth access, color-only effect
+targets, optional device memory-budget information and retained-topology vertex-prefix updates.
+These paths have static frontend checks only; shader compilation,
 visual output and frame-pacing improvements await the user's normal build and
 playtest. Remaining material normal-map detail and advanced effect features
 still require implementation.
+
+The user subsequently reported approximately 30–34 FPS, functioning depth of
+field, remaining camera-rotation hitches, incomplete sunshaft output, and an exit
+freeze. Shutdown now releases the frame driver before world/GUI/resource
+destruction, so its cull snapshots cannot outlive those services. Effect workers
+use stop tokens: shutdown cancels queued jobs and kills/reaps an active compiler
+instead of joining a serial queue of compiler timeouts. Waiting compiler jobs
+sleep on a cancellable condition variable rather than polling the compile lock.
+This fixes concrete teardown lifetime/wait hazards; normal exit still needs
+playtest confirmation.
+
+Fullscreen effect intermediates now use color-only framebuffers, avoiding
+unused full-resolution depth allocations and per-pass depth clears. Scene,
+inventory and map targets retain depth. Scratch images initialize to the same
+neutral gray/opaque value as PingPongCanvas, preserving authored assumptions in
+partial/discard passes such as the installed godray chain. Current view, inverse
+view, eye position/direction and resolution are supplied explicitly to native
+effect uniforms in both scalar and UBO layouts. Previous-view data advances
+after successful submission. Sunshaft visibility remains unverified; these
+changes do not imply complete optical/effect compatibility.
+
+Mesh import uses a dense source-index remap instead of one hash node per packed
+vertex, with independent remaps for per-primitive-set channels. MultiDrawArrays
+ranges now restart topology correctly and validate each range. Shader-driven
+primitive instancing remains unsupported. Live material state is decoded once
+per StateGraph per prepared frame, while geometry-specific transforms remain
+per draw. Residency ceilings now scale further on larger adapters without
+increasing the cache fractions or the allowance on small adapters. These are
+steps toward long viewing distances; visibility/LOD, asynchronous asset
+preparation, draw submission scaling, far-depth precision and non-rendering
+update/loading stalls remain further work. The last ordinary log contained
+both a 226 ms prepare interval with hundreds of uploads and a separate 705 ms
+interval outside the renderer, so these must not be treated as one proven GPU
+bottleneck. New fixtures and affected integration units have static frontend
+checks only; agents have not built, compiled shaders, run tests, or launched the
+game.
+
+The subsequent playtest did not confirm a performance or exit improvement.
+Its screenshots show 86–176 mesh updates and approximately 22 ms of CPU
+preparation for roughly 2000 draw items. The next changes target the remaining
+work directly: native scene/effect state now borrows the live cull-state chain
+instead of comparing/copying inherited maps. Override/protected rules resolve
+from the root down, and uniform lookup strings are interned once for OSG's
+non-heterogeneous map. The borrowed chain is consumed synchronously before
+the next cull; workers and GPU submissions do not retain it. Owned snapshots
+remain available for immutable/import operations and fixtures.
+
+Effect work records, uniform byte arrays, descriptor-write arrays and pass
+metadata retain their allocations across frames. Pass publication reserves
+before mutation and then inserts only non-throwing metadata. Backend flattening
+borrows pointers to Draw objects instead of copying complete draw records and
+their shared light owners. Animated float pose streams update positions/normals
+directly in persistent packed storage; unchanged UVs, colors, masks and topology
+are retained. Non-float or changed-channel data uses the checked general path.
+The redundant second RenderStage sort is removed; the source
+[SceneView cull implementation](https://github.com/openscenegraph/OpenSceneGraph/blob/OpenSceneGraph-3.6.5/src/osgUtil/SceneView.cpp)
+already sorts the graph. This removes identified CPU
+allocations/copies; GPU uploads of changed animation data remain necessary and
+the whole engine is not claimed to be allocation-free or zero-copy.
+
+The blinking sun had a concrete native-path defect: color-write masks were
+ignored, allowing colorless OpenGL occlusion-query geometry in a separate bin
+to render after the world as textured quads. Such invisible proxies are now
+omitted based on effective color state, independently of the sky-bin flag.
+The water material was still an approximation with a fixed blue color and
+large fixed alpha. It now derives wave UVs from world position, blends three
+animated normal-map scales, computes the view-space basis only in the water
+fragment branch, samples the reflected camera image, and uses Fresnel alpha to
+mix reflection with the undistorted scene behind water. It also handles the
+huge water grid's far-depth limit, retains HDR reflection formats, and prevents
+an inherited terrain blend sampler from replacing the reflection input.
+Depth-dependent absorption, displaced scene refraction, ripple simulation and
+full water-material parity remain outstanding; this does not imply those work.
+
+Shutdown now accepts Exit immediately after input processing and skips the
+remaining world/cull/upload work. It stops the renderer and cancels compilers
+as soon as the main loop ends. Once GPU submissions finish, descriptor pools
+and suballocation blocks use bulk teardown, avoiding individual descriptor
+frees and repeated free-range coalescing. Normal shutdown phase logs distinguish
+Lua joining/saving, renderer release, world/GUI services, and viewer/resource
+cleanup. The latest playtest confirms the exit freeze and sun blinking are
+fixed. Its log shows native resource release taking about 95 ms, followed by
+about 1.88 seconds releasing game/GUI services and another 1.25 seconds in
+world/background cleanup. Exit now hides the stopped game window immediately;
+saving and ordered service destruction still finish normally. This improves
+visible close response without claiming process teardown is instantaneous.
+
+The latest screenshots still show 28.6–32.9 FPS, 14–20 ms CPU preparation,
+roughly 5–6 ms culling, and up to 130 ms submission-interval spikes. The target
+is at least 65 FPS at maximum configured draw distance, a total frame budget of
+about 15.4 ms. Similar mid/max-distance rates suggest substantial fixed work;
+they do not establish unlimited GPU or visibility capacity. The following
+additional changes have static checks only and require the normal user build
+and playtest before their FPS impact can be assessed:
+
+- Borrowed state views memoize native uniform, attribute, texture and mode
+  bindings at shared ancestors. Rebinding each frame invalidates addresses;
+  uniform values remain live. Both missing bindings and OVERRIDE/PROTECTED
+  results are cached, with no inherited-state clones, ownership registration,
+  per-query allocation or mod-dependent cache growth. A repeated state-map
+  lookup per draw is also removed.
+- CPU state, light and texture-binding records survive brief changes in camera
+  direction within bounded cache thresholds. Idle upload pages have a 32 MiB
+  reuse allowance and expire after eight idle maintenance sweeps, instead of
+  being destroyed at the first sweep and recreated during the next turn.
+  In-flight page ownership still prevents premature reuse or eviction.
+- Decoded point-light sets reuse their buffers between submissions, and unlit,
+  water and sky draws avoid decoding them. Native light-offset deduplication
+  uses retained flat storage instead of allocating hash nodes each frame.
+- A valid OMWFX engine UBO is copied as a block with native camera corrections;
+  its members no longer trigger redundant ancestor searches for scalar values.
+  Scalar-only effects keep the existing member packing path.
+- Vulkan specialization constants separate world surfaces, water, sky,
+  distortion and window overlays within the existing shader pair. This lets
+  the driver remove unrelated branches and varyings without reducing effect
+  quality or draw distance. Common variants are warmed when a compatible
+  target appears on devices with extended dynamic raster state, and reuse the
+  persistent pipeline cache. First target creation can incur compilation work;
+  the Vulkan 1.1 fallback retains lazy pipeline creation. See the
+  [Khronos specialization example](https://docs.vulkan.org/samples/latest/samples/performance/specialization_constants/README.html).
+
+State-cache invalidation, borrowed values and bounded upload-page reuse have
+regression fixture sources. No builds, shader compilation, test execution or
+game launch has been performed by the agent. Post-processing GPU cost, remaining
+rotation spikes and attainment of the 65 FPS target are not yet verified.
+
+The following playtest reported preparation varying from about 10 ms to
+70–80 ms or more. Preparation still contained cold asset work: per-mesh Vulkan
+buffer creation, CPU texture copies, the first animated mesh's static-to-stream
+conversion, and synchronous render-target/pipeline creation. Those are concrete
+burst-cost paths; phase-level timings alone do not prove which dominates each
+reported spike. The latest ordinary log also records a loading frame with 1,970
+mesh uploads, 1,285 image uploads and 38 composite maps, demonstrating that
+preparation can receive large batches of work at once.
+
+Mesh vertex/index data now suballocates reusable Vulkan buffer objects, rather
+than creating two buffer objects for each mesh. A move-only range owner stays
+alive with the mesh through its final in-flight frame. Upload copies, ordinary
+vertex/index bindings and fullscreen effect bindings all use the range's
+buffer-relative offset. Pools keep bounded idle capacity; shutdown skips
+unnecessary range coalescing after draining the GPU. Range allocation prefers
+the unused tail for streaming and caches failed-fit size bounds, avoiding
+repeated scans of full blocks and movement of live metadata during append.
+This uses Vulkan's existing buffer-offset model, not a new GPU requirement;
+see [Khronos resource creation](https://docs.vulkan.org/spec/latest/chapters/resources.html)
+and [descriptor/buffer management](https://docs.vulkan.org/samples/latest/samples/performance/descriptor_management/README.html).
+
+Tightly packed live RGBA8 and supported BC mip data now borrow the source OSG
+image bytes directly through the synchronous upload call. Only the required
+copy into GPU staging remains. Row order, authored mip levels, sRGB encoding
+and source bounds checks are preserved. Padded rows, channel conversions and
+unsupported device compression retain the checked conversion fallback.
+Device format capabilities are cached at initialization instead of repeatedly
+querying the driver for each texture decision and upload.
+
+Rig/morph arrays marked with dynamic/streaming VBO usage enter the retained
+native mesh stream on their first import. They no longer first populate the
+canonical static cache and then reimport/fork on animation. Stream imports
+also skip discarded CPU asset normal/bounds sidecars, reserve index capacity
+before emission, and compute the normalization reciprocal once per vertex.
+Every visible draw is still prepared; no visibility or quality reduction and
+no arbitrary asset omission is used to hide preparation work.
+
+F3 now retains the worst preparation attempt between text refreshes, including
+attempts that could not yet present. Its scene/effects/overlay totals and nested
+mesh/texture/target costs describe the same peak attempt, with build/update
+counts. Normal slow-frame logging includes those subdivisions for preparation
+above 32 ms, rate-limited to once per five seconds. These are existing renderer
+diagnostics, not a separate benchmark harness. Buffer ownership, range reuse,
+failed-fit invalidation and borrowed texture layouts have regression fixture
+sources. C++ frontend checks are allowed; builds, test execution and runtime
+verification remain user-operated. Remaining cold image/target creation and
+shader compilation can still cost time; eliminating all spikes is unverified.
+
+The residency policy also had a mismatch: its documented cache allowance was
+compared against total asset bytes, including currently visible resources. A
+large visible scene could keep both caches permanently over their thresholds,
+evicting otherwise reusable assets behind the camera after 32 unseen frames.
+Charges now mark visible bytes once per preparation attempt, including shared
+meshes, multiple cameras and GUI resources. The warm allowance applies above
+the current/recent visible working set, with a 256-attempt high-watermark grace
+so briefly looking up or at a wall does not collapse it. Combined logical
+geometry and texture allowances remain capped at device-scaled ceilings (up to
+one quarter and one half of the initial local-memory budget respectively),
+leaving room for render targets, staging and driver allocations. Visible assets
+are not evicted to enforce those soft cache ceilings. Existing warm fractions
+are retained; this corrects their accounting instead of simply raising every
+fixed cache limit. Source expiry, multiple touches, active-size changes,
+working-set decay and ceiling precedence have regression fixture coverage.
+
+The next playtest still reports 10–20 ms average preparation and occasional
+90 ms or longer spikes. Ordinary logs separate two cases: a preparation frame
+at 93.85 ms with only 0.53 ms of mesh work and no texture uploads, and another
+at 90.35 ms with 25.37 ms of mesh work and 50.09 ms of texture work. Effects
+preparation is usually well below 2 ms in those frames; that is CPU time, not
+proof of cheap GPU effects. Cold asset bursts and resident-scene overhead
+therefore need separate treatment.
+
+Native uniform lookups now use typed slots. Each state graph propagates a
+fixed borrowed pointer table once per frame and applies its local bindings in
+one visit, retaining OVERRIDE/PROTECTED behavior and live uniform values.
+This removes per-draw string searches and repeated walks through parent maps;
+it does not clone StateSets or register inherited OSG parents. Arbitrary effect
+uniform names keep the general resolver. The uniform cache stores exactly the
+43 native slots, reducing each retained state record's footprint.
+
+Hot state, geometry, texture-binding, GUI and light lookups use hash tables.
+Their incremental cleanup retains keys rather than iterators and handles
+rehashing or external removal safely. Model/view/projection products and normal
+matrices are shared within a frame using a flat, epoch-based cache. Its storage
+is reused on reset and grows only with the largest simultaneously visible set,
+independent of source pointer churn between frames. Cache references are used
+only until the next leaf can insert/grow the table. Camera-specific projection
+and source matrix identities remain part of the key, and every new frame
+recomputes the mutable matrix values.
+
+Particle conversion caches transformed centers, preserves source-index ordering
+for equal depths, sorts without stable-sort scratch allocations, avoids zero-
+angle quaternion work, packs colors once per particle and exits immediately
+when OSG reports an entirely dead pool. Retained GPU capacity and index topology
+remain unchanged, but subsequent uploads copy only the live vertex prefix.
+Pending updates reuse unsubmitted staging bytes in place, preserving a longer
+pending tail when a later update changes only its prefix. A larger replacement
+updates both staging ownership and byte count. ABI 10 prevents an older module, which requires full-size
+updates, from accepting that new host contract. Float vertex channels also use
+one checked bulk read, and byte colors avoid conversion to floats and back.
+
+F3 and normal slow-frame logs include particle conversion/lock-wait time and
+native binding/unique-transform counts for the same peak preparation attempt.
+Regression fixture sources cover native slot/name equivalence, mutable values,
+override rules, frame-cache growth/reset/collisions, hash cleanup cursor
+invalidation, byte color/alpha preservation and stable particle ordering.
+C++ frontend and source checks are permitted; fixture execution, builds and
+runtime performance verification remain user-operated. These changes do not
+prove the remaining spikes are eliminated or the 65 FPS target is met.
 
 ## Backend architecture
 

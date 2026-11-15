@@ -1,5 +1,7 @@
 #version 450
 
+layout(constant_id = 0) const uint materialShader = 0u;
+
 layout(set = 0, binding = 0) uniform sampler2D diffuseMap;
 layout(set = 1, binding = 0) uniform sampler2D blendMap;
 layout(push_constant) uniform FogState
@@ -28,43 +30,59 @@ layout(location = 1) out vec4 outNormals;
 
 void main()
 {
-    if (clipDistance < 0.0)
+    if (materialShader != 4u && clipDistance < 0.0)
         discard;
-    vec4 sampled = texture(diffuseMap, uv);
+    bool waterSurface = materialShader == 1u;
+    vec4 sampled = texture(diffuseMap, waterSurface ? uv * 3.75 + skyMoon.z * vec2(-.015, -.005) : uv);
     vec4 result = sampled * color;
-    if (materialKind > 1.5 && materialKind < 2.5)
+    vec3 surfaceNormal = materialShader == 4u ? vec3(0.0, 0.0, 1.0)
+                                              : viewNormal * inversesqrt(max(dot(viewNormal, viewNormal), 1e-12));
+    if (materialShader == 1u)
     {
         // The water texture carries normals; reflected color has its own
         // camera target and is projected from the current clip coordinates.
-        vec3 field = sampled.xyz * 2.0 - 1.0;
-        float waveLight = 0.65 + 0.35 * abs(field.z) * inversesqrt(max(dot(field, field), 1e-6));
-        vec3 waterColor = vec3(0.10, 0.22, 0.25) * waveLight;
-        float waterAlpha = 0.72;
+        float time = skyMoon.z;
+        vec3 a = sampled.xyz * 2.0 - 1.0;
+        vec3 b = texture(diffuseMap, uv * 18.75 + time * vec2(-.04, -.03) + a.xy * .05).xyz * 2.0 - 1.0;
+        vec3 c = texture(diffuseMap, uv * 75.0 + time * vec2(-.02, .1) + b.xy * .05).xyz * 2.0 - 1.0;
+        vec3 field = normalize(vec3(-(a.xy + b.xy + c.xy) * .5, max(a.z + b.z + c.z, .01)));
+        vec3 dx = dFdx(viewPosition), dy = dFdy(viewPosition);
+        vec2 tx = dFdx(uv), ty = dFdy(uv);
+        float orientation = tx.x * ty.y - tx.y * ty.x < 0.0 ? -1.0 : 1.0;
+        vec3 tangent = dx * ty.y - dy * tx.y;
+        vec3 bitangent = dy * tx.x - dx * ty.x;
+        tangent *= orientation * inversesqrt(max(dot(tangent, tangent), 1e-20));
+        bitangent *= orientation * inversesqrt(max(dot(bitangent, bitangent), 1e-20));
+        surfaceNormal = normalize(tangent * field.x + bitangent * field.y + surfaceNormal * field.z);
+        vec3 reflected = fog.color.rgb;
         if (materialKind > 2.125)
         {
             vec2 projectedUV = screenPosition.xy / max(abs(screenPosition.w), 1e-6) * 0.5 + 0.5;
-            vec2 reflectedUV = clamp(projectedUV + field.xy * 0.015, vec2(0.001), vec2(0.999));
-            vec3 reflected = texture(blendMap, reflectedUV).rgb;
-            float eyeLength = max(length(viewPosition), 1e-6);
-            vec3 normal = viewNormal * inversesqrt(max(dot(viewNormal, viewNormal), 1e-6));
-            float facing = clamp(abs(dot(normal, -viewPosition / eyeLength)), 0.0, 1.0);
-            float fresnel = 0.04 + 0.96 * pow(1.0 - facing, 5.0);
-            waterColor = mix(waterColor, reflected, fresnel);
-            waterAlpha = mix(0.6, 1.0, fresnel);
+            // Reflection rows follow the same bottom-up convention as the
+            // scene target. Do not introduce an extra image-space Y flip.
+            vec2 reflectedUV = clamp(projectedUV + field.xy * .10, vec2(.001), vec2(.999));
+            reflected = texture(blendMap, reflectedUV).rgb;
         }
-        result = vec4(waterColor, waterAlpha) * color;
+        vec3 eyeDirection = -viewPosition * inversesqrt(max(dot(viewPosition, viewPosition), 1e-12));
+        float facing = clamp(abs(dot(surfaceNormal, eyeDirection)), 0.0, 1.0);
+        float fresnel = .02037 + .97963 * pow(1.0 - facing, 5.0);
+        // Alpha blending performs the Fresnel mix with the scene already
+        // behind the surface. Do not multiply reflection by Fresnel twice or
+        // replace transmission with an arbitrary opaque blue sheet.
+        result = vec4(reflected, fresnel) * color;
     }
-    else if (materialKind > 0.5 && materialKind < 1.5)
+    else if (materialShader == 0u && materialKind > 0.5 && materialKind < 1.5)
         result.a = color.a * texture(blendMap, maskUV).a;
-    else if (materialKind > 2.5 && materialKind < 3.5)
+    else if (materialShader == 3u)
     {
-        if(result.a<0.1)discard;
-        vec2 screenUV=screenPosition.xy/screenPosition.w*0.5+0.5;
-        float sceneDepth=texture(blendMap,screenUV).r;
-        float occluded=gl_FragCoord.z>sceneDepth+1e-5?1.0:0.0;
-        result=vec4((result.rg*2.0-1.0)*(1.0-occluded)*opacity*result.a,occluded,result.a);
+        if (result.a < 0.1)
+            discard;
+        vec2 screenUV = screenPosition.xy / screenPosition.w * 0.5 + 0.5;
+        float sceneDepth = texture(blendMap, screenUV).r;
+        float occluded = gl_FragCoord.z > sceneDepth + 1e-5 ? 1.0 : 0.0;
+        result = vec4((result.rg * 2.0 - 1.0) * (1.0 - occluded) * opacity * result.a, occluded, result.a);
     }
-    else if (materialKind > 3.5)
+    else if (materialShader == 2u)
     {
         int pass = int(materialKind) - 4;
         if (pass == 0)
@@ -88,9 +106,10 @@ void main()
         else if (pass == 6)
             result = skyDiffuse;
     }
-    result.rgb += specularColor;
+    if (materialShader != 4u)
+        result.rgb += specularColor;
     bool accepted = true;
-    switch (int(alphaPolicy.y))
+    switch (materialShader == 4u ? 0 : int(alphaPolicy.y))
     {
         case 1:
             accepted = false;
@@ -116,13 +135,12 @@ void main()
     }
     if (!accepted)
         discard;
-    if (fog.range.y > fog.range.x && fog.range.y > 0.0)
+    if (materialShader != 4u && fog.range.y > fog.range.x && fog.range.y > 0.0)
     {
         float depth = 1.0 / gl_FragCoord.w;
         float factor = clamp((depth - fog.range.x) / (fog.range.y - fog.range.x), 0.0, 1.0);
         result.rgb = mix(result.rgb, fog.color.rgb, factor);
     }
     outColor = result;
-    vec3 normal = viewNormal * inversesqrt(max(dot(viewNormal,viewNormal),1e-12));
-    outNormals = vec4(materialKind > 3.5 ? vec3(0.5) : normal*0.5+0.5,result.a);
+    outNormals = vec4(materialShader == 2u ? vec3(0.5) : surfaceNormal * 0.5 + 0.5, result.a);
 }

@@ -18,41 +18,36 @@ namespace Render
     public:
         explicit AllocationRanges(std::uint64_t capacity)
             : mRanges{ { 0, capacity, true } }
+            , mLargestFree(capacity)
         {
             if (!capacity)
                 throw std::invalid_argument("Rendering allocation capacity must be positive");
         }
 
-        std::optional<std::uint64_t> allocate(std::uint64_t size, std::uint64_t alignment)
+        std::optional<std::uint64_t> allocate(std::uint64_t size, std::uint64_t alignment, bool preferEnd = false)
         {
             if (!size || !alignment)
                 throw std::invalid_argument("Rendering allocation size and alignment must be positive");
+            if (size > mLargestFree)
+                return {};
+            // Streaming many small meshes should append to unused capacity
+            // without scanning alignment gaps or shifting live range records.
+            // Fragmented holes remain available when the tail cannot fit.
+            if (preferEnd && !mRanges.empty() && mRanges.back().mFree)
+                if (auto offset = take(mRanges.size() - 1, size, alignment))
+                    return offset;
+            std::uint64_t largest = 0;
             for (std::size_t i = mFirstFree; i < mRanges.size(); ++i)
             {
-                const Range original = mRanges[i];
-                if (!original.mFree)
+                if (!mRanges[i].mFree)
                     continue;
-                const auto padding = (alignment - original.mOffset % alignment) % alignment;
-                if (padding > original.mSize || size > original.mSize - padding)
-                    continue;
-                reserveFor(mRanges, mRanges.size() + 2);
-                const auto offset = original.mOffset + padding;
-                const auto remaining = original.mSize - padding - size;
-                const bool first = i == mFirstFree;
-                mRanges.erase(mRanges.begin() + i);
-                if (padding)
-                    mRanges.insert(mRanges.begin() + i++, { original.mOffset, padding, true });
-                mRanges.insert(mRanges.begin() + i++, { offset, size, false });
-                if (remaining)
-                    mRanges.insert(mRanges.begin() + i, { offset + size, remaining, true });
-                if (first && !padding)
-                {
-                    mFirstFree = i;
-                    while (mFirstFree < mRanges.size() && !mRanges[mFirstFree].mFree)
-                        ++mFirstFree;
-                }
-                return offset;
+                largest = std::max(largest, mRanges[i].mSize);
+                if (auto offset = take(i, size, alignment))
+                    return offset;
             }
+            // Cache failed-fit information. Already-full blocks with tiny
+            // padding holes must not be rescanned for every subsequent mesh.
+            mLargestFree = largest;
             return std::nullopt;
         }
 
@@ -77,6 +72,7 @@ namespace Render
                     --i;
                 }
                 mFirstFree = std::min(mFirstFree, i);
+                mLargestFree = std::max(mLargestFree, mRanges[i].mSize);
                 return;
             }
         }
@@ -84,6 +80,30 @@ namespace Render
         bool empty() const { return mRanges.size() == 1 && mRanges.front().mFree; }
 
     private:
+        std::optional<std::uint64_t> take(std::size_t i, std::uint64_t size, std::uint64_t alignment)
+        {
+            const Range original = mRanges[i];
+            const auto padding = (alignment - original.mOffset % alignment) % alignment;
+            if (padding > original.mSize || size > original.mSize - padding)
+                return {};
+            reserveFor(mRanges, mRanges.size() + 2);
+            const auto offset = original.mOffset + padding;
+            const auto remaining = original.mSize - padding - size;
+            const bool first = i == mFirstFree;
+            mRanges.erase(mRanges.begin() + i);
+            if (padding)
+                mRanges.insert(mRanges.begin() + i++, { original.mOffset, padding, true });
+            mRanges.insert(mRanges.begin() + i++, { offset, size, false });
+            if (remaining)
+                mRanges.insert(mRanges.begin() + i, { offset + size, remaining, true });
+            if (first && !padding)
+            {
+                mFirstFree = i;
+                while (mFirstFree < mRanges.size() && !mRanges[mFirstFree].mFree)
+                    ++mFirstFree;
+            }
+            return offset;
+        }
         struct Range
         {
             std::uint64_t mOffset;
@@ -92,6 +112,7 @@ namespace Render
         };
         std::vector<Range> mRanges;
         std::size_t mFirstFree = 0;
+        std::uint64_t mLargestFree;
     };
 }
 

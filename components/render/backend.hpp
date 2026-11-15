@@ -72,8 +72,17 @@ namespace Render
         RG8,
         SceneRGBA8,
         SceneRGBA16F,
+        // Fullscreen effects do not need depth storage or depth clears.
+        ColorRGBA8,
+        ColorRGBA16F,
         Count
     };
+
+    constexpr bool targetHasDepth(TargetFormat format)
+    {
+        return format == TargetFormat::RGBA8 || format == TargetFormat::RGBA16F || format == TargetFormat::SceneRGBA8
+            || format == TargetFormat::SceneRGBA16F;
+    }
 
     enum class EffectBindingKind
     {
@@ -290,6 +299,7 @@ namespace Render
         std::uint32_t mVendorId = 0;
         std::uint32_t mDeviceId = 0;
         std::uint64_t mLocalMemoryBytes = 0;
+        std::uint64_t mLocalMemoryBudgetBytes = 0;
     };
 
     enum class PresentMode
@@ -335,6 +345,8 @@ namespace Render
         // Update resident geometry in submission order. Earlier frames retain
         // their data until the queue reaches this upload. Empty indices retain
         // the existing topology (the usual skinning and UI update case).
+        // With retained topology, a shorter nonempty vertex span replaces its
+        // prefix only; the caller limits draws to initialized vertices.
         virtual void updateMesh(MeshHandle, std::span<const Vertex>, std::span<const std::uint32_t>)
         {
             throw std::runtime_error("This renderer does not support mesh updates");
@@ -388,7 +400,7 @@ namespace Render
     // Private, same-build module ABI. Creation and destruction stay paired in
     // the module; errors are copied into caller-owned memory, never thrown
     // through the exported entry point. No graphics API types cross it.
-    inline constexpr std::uint32_t BackendAbi = 8;
+    inline constexpr std::uint32_t BackendAbi = 10;
     using CreateBackend = Backend* (*)(std::uint32_t abi, const BackendOptions*, char* error, std::size_t errorSize);
     using DestroyBackend = void (*)(Backend*);
 }

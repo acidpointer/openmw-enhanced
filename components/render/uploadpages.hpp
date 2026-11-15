@@ -45,6 +45,7 @@ namespace Render
                     continue;
                 const auto offset = page.mUsed + padding;
                 page.mUsed = offset + size;
+                page.mIdleTrims = 0;
                 return { page.mValue, offset };
             }
             const auto capacity = std::max(size, mPageSize);
@@ -52,19 +53,34 @@ namespace Render
             if (!value)
                 throw std::runtime_error("Cannot create an empty upload page");
             reserveFor(mPages, mPages.size() + 1);
-            mPages.push_back({ value, capacity, size });
+            mPages.push_back({ value, capacity, size, 0 });
             return { std::move(value), 0 };
         }
 
-        void trim()
+        // Spare pages can survive a short lull without reallocating on the
+        // next camera turn. Retention is bounded independently of live slices.
+        // Zero defaults retain the original single normal-page policy.
+        void trim(std::uint64_t retainBytes = 0, unsigned idleTrims = 0)
         {
             bool retained = false;
-            std::erase_if(mPages, [&](const auto& page) {
+            std::uint64_t idleBytes = 0;
+            std::erase_if(mPages, [&](auto& page) {
                 if (page.mValue.use_count() != 1)
+                {
+                    page.mIdleTrims = 0;
                     return false;
+                }
                 if (page.mCapacity == mPageSize && !retained)
                 {
                     retained = true;
+                    idleBytes += page.mCapacity;
+                    return false;
+                }
+                if (page.mIdleTrims < idleTrims && idleBytes <= retainBytes
+                    && page.mCapacity <= retainBytes - idleBytes)
+                {
+                    ++page.mIdleTrims;
+                    idleBytes += page.mCapacity;
                     return false;
                 }
                 return true;
@@ -79,6 +95,7 @@ namespace Render
             std::shared_ptr<Page> mValue;
             std::uint64_t mCapacity;
             std::uint64_t mUsed;
+            unsigned mIdleTrims;
         };
         std::uint64_t mPageSize;
         std::vector<Entry> mPages;

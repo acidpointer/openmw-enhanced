@@ -4,6 +4,7 @@
 #include <components/render/backend.hpp>
 
 #include <filesystem>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -47,6 +48,6 @@ namespace RenderAssets
     std::vector<std::string> effectCompilerArguments(
         const std::filesystem::path& compiler, const std::vector<std::string>& samplers);
     EffectShader compileEffectShader(const std::filesystem::path& compiler, std::string_view vertex,
-        std::string_view fragment, const std::vector<std::string>& samplers);
+        std::string_view fragment, const std::vector<std::string>& samplers, std::stop_token stop = {});
 }
 #endif

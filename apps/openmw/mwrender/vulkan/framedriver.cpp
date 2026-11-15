@@ -9,6 +9,7 @@
 #include <components/myguiplatform/myguirendermanager.hpp>
 #include <components/nifosg/particle.hpp>
 #include <components/render/cachesweep.hpp>
+#include <components/render/framecache.hpp>
 #include <components/render/math.hpp>
 #include <components/render/module.hpp>
 #include <components/render/presentation.hpp>
@@ -31,6 +32,7 @@
 
 #include <osg/BlendFunc>
 #include <osg/ClipPlane>
+#include <osg/ColorMask>
 #include <osg/CullFace>
 #include <osg/Depth>
 #include <osg/FrontFace>
@@ -57,9 +59,11 @@
 #include <numeric>
 #include <set>
 #include <tuple>
+#include <unordered_map>
 
 namespace MWRender
 {
+    using RenderAssets::NativeUniform;
     namespace
     {
         // Keep the viewer's rendering entry point: loading screens, videos and
@@ -115,6 +119,17 @@ namespace MWRender
             return result;
         }
 
+        struct PrepareTimer
+        {
+            using Clock = std::chrono::steady_clock;
+            double& mMilliseconds;
+            Clock::time_point mStart = Clock::now();
+            ~PrepareTimer()
+            {
+                mMilliseconds += std::chrono::duration<double, std::milli>(Clock::now() - mStart).count();
+            }
+        };
+
         struct MeshStorage
         {
             Render::Backend& mBackend;
@@ -123,6 +138,7 @@ namespace MWRender
             Render::MeshHandle mHandle;
             std::size_t mVertices = 0, mIndices = 0;
             bool mCanonical = false;
+            std::uint64_t mSeen = 0;
             MeshStorage(Render::Backend& backend, Render::Residency& budget)
                 : mBackend(backend)
                 , mBudget(budget)
@@ -157,7 +173,7 @@ namespace MWRender
             {
             }
             void upload(std::span<const Render::Vertex> vertices, std::span<const std::uint32_t> indices,
-                bool verticesOnly = false)
+                bool verticesOnly = false, std::size_t liveVertices = 0)
             {
                 if (mStorage.use_count() > 1 || mStorage->mCanonical)
                 {
@@ -165,7 +181,8 @@ namespace MWRender
                     mHandle = {};
                 }
                 if (mHandle && mVertices == vertices.size() && mIndices == indices.size())
-                    mBackend.updateMesh(mHandle, vertices, verticesOnly ? std::span<const std::uint32_t>{} : indices);
+                    mBackend.updateMesh(mHandle, verticesOnly && liveVertices ? vertices.first(liveVertices) : vertices,
+                        verticesOnly ? std::span<const std::uint32_t>{} : indices);
                 else
                 {
                     const auto replacement = mBackend.createMesh(vertices, indices);
@@ -177,6 +194,7 @@ namespace MWRender
                 mStorage->mVertices = vertices.size();
                 mStorage->mIndices = indices.size();
                 mStorage->mResidency.set(vertices.size_bytes() + indices.size_bytes());
+                mStorage->mResidency.touch();
                 mVertices = vertices.size();
                 mIndices = indices.size();
             }
@@ -224,6 +242,7 @@ namespace MWRender
                 add(primitive);
                 result = result * 31 + (primitive ? primitive->getMode() : 0);
                 result = result * 31 + (primitive ? primitive->getNumIndices() : 0);
+                result = result * 31 + (primitive ? primitive->getNumInstances() : 0);
             }
             return result;
         }
@@ -239,6 +258,7 @@ namespace MWRender
                     + (primitive ? std::size_t(primitive->getModifiedCount()) << 1 : 0) + (result << 6) + (result >> 2);
                 result = result * 31 + (primitive ? primitive->getMode() : 0);
                 result = result * 31 + (primitive ? primitive->getNumIndices() : 0);
+                result = result * 31 + (primitive ? primitive->getNumInstances() : 0);
             }
             return result;
         }
@@ -278,9 +298,19 @@ namespace MWRender
             // CPU scene callbacks (including skinning and terrain selection)
             // run once on the owner thread; they never submit a GL world frame.
             constexpr std::uint64_t MiB = 1024 * 1024;
-            const auto localMemory = backend().deviceInfo().mLocalMemoryBytes;
-            mMeshResidency.setLimit(Render::Residency::limit(localMemory, 16, 32 * MiB, 128 * MiB, 64 * MiB));
-            mTextureResidency.setLimit(Render::Residency::limit(localMemory, 8, 64 * MiB, 512 * MiB, 256 * MiB));
+            mStates.reserve(8192);
+            mMeshes.reserve(4096);
+            mTextureBindings.reserve(2048);
+            mLightSets.reserve(1024);
+            mGuiMeshes.reserve(128);
+            const auto& device = backend().deviceInfo();
+            const auto localMemory = device.mLocalMemoryBudgetBytes
+                ? std::min(device.mLocalMemoryBytes, device.mLocalMemoryBudgetBytes)
+                : device.mLocalMemoryBytes;
+            mMeshResidency.setLimit(Render::Residency::limit(localMemory, 16, 32 * MiB, 512 * MiB, 64 * MiB),
+                Render::Residency::limit(localMemory, 4, 64 * MiB, 2048 * MiB, 256 * MiB));
+            mTextureResidency.setLimit(Render::Residency::limit(localMemory, 8, 64 * MiB, 2048 * MiB, 256 * MiB),
+                Render::Residency::limit(localMemory, 2, 128 * MiB, 4096 * MiB, 1024 * MiB));
             viewer.setThreadingModel(osgViewer::Viewer::SingleThreaded);
             viewer.setIncrementalCompileOperation(nullptr);
             mSceneView = new osgUtil::SceneView;
@@ -349,6 +379,7 @@ namespace MWRender
             std::unique_ptr<GpuTexture> mTexture;
             unsigned mWidth = 0;
             unsigned mHeight = 0;
+            Render::TargetFormat mFormat = Render::TargetFormat::RGBA8;
         };
 
         Render::TextureHandle target(
@@ -368,16 +399,22 @@ namespace MWRender
                 = source.getTextureHeight() > 0 ? static_cast<unsigned>(source.getTextureHeight()) : fallbackHeight;
             if (!width || !height)
                 return mTransparent;
+            const auto format = source.getInternalFormat() == GL_RGBA16F || source.getInternalFormat() == GL_RGB16F
+                ? Render::TargetFormat::RGBA16F
+                : Render::TargetFormat::RGBA8;
             auto& record = mTargets[&source];
-            if (record.mSource.get() != &source || record.mWidth != width || record.mHeight != height)
+            if (record.mSource.get() != &source || record.mWidth != width || record.mHeight != height
+                || record.mFormat != format)
             {
+                PrepareTimer timer{ mPrepare.mTargets };
                 auto replacement = std::make_unique<GpuTexture>(backend());
-                replacement->mHandle
-                    = backend().createRenderTarget(width, height, RenderAssets::OsgImporter::importSampler(source));
+                replacement->mHandle = backend().createRenderTarget(
+                    width, height, RenderAssets::OsgImporter::importSampler(source), format);
                 record.mSource = &source;
                 record.mTexture = std::move(replacement);
                 record.mWidth = width;
                 record.mHeight = height;
+                record.mFormat = format;
             }
             return record.mTexture->mHandle;
         }
@@ -425,34 +462,40 @@ namespace MWRender
             cached.mSeen = mSerial;
             if (!cached.mHandle || cached.mRevision != sourceImage->getModifiedCount())
             {
-                auto image = mImporter.importImage(*sourceImage, true);
-                if (!backend().supportsTextureFormat(image->mFormat, image->mSrgb))
-                    image = image->mDecode ? image->mDecode() : image->mUncompressed;
-                if (!image)
-                    throw std::runtime_error("Live texture has no supported device format");
-                mLevels.clear();
-                for (const auto& level : image->mLevels)
+                PrepareTimer timer{ mPrepare.mTextures };
+                auto data = RenderAssets::OsgImporter::borrowTexture(*sourceImage, mLevels, sampling.mUseMipmaps);
+                std::shared_ptr<const Render::ImageAsset> converted;
+                if (!data || !backend().supportsTextureFormat(data->mFormat, data->mSrgb))
                 {
-                    mLevels.push_back({ level.mWidth, level.mHeight, level.mBytes });
-                    if (!sampling.mUseMipmaps)
-                        break;
+                    converted = mImporter.importImage(*sourceImage, true);
+                    if (!backend().supportsTextureFormat(converted->mFormat, converted->mSrgb))
+                        converted = converted->mDecode ? converted->mDecode() : converted->mUncompressed;
+                    if (!converted)
+                        throw std::runtime_error("Live texture has no supported device format");
+                    mLevels.clear();
+                    for (const auto& level : converted->mLevels)
+                    {
+                        mLevels.push_back({ level.mWidth, level.mHeight, level.mBytes });
+                        if (!sampling.mUseMipmaps)
+                            break;
+                    }
+                    data = Render::TextureData{ converted->mFormat, converted->mSrgb,
+                        converted->mGenerateMipmaps && sampling.mUseMipmaps, mLevels };
                 }
-                const auto replacement = backend().createTexture(
-                    { image->mFormat, image->mSrgb, image->mGenerateMipmaps && sampling.mUseMipmaps, mLevels },
-                    sampling);
+                const auto replacement = backend().createTexture(*data, sampling);
                 if (cached.mHandle)
                     backend().releaseTexture(cached.mHandle);
                 std::uint64_t bytes = 0;
                 for (const auto& level : mLevels)
                     bytes += level.mBytes.size();
-                if (image->mGenerateMipmaps && sampling.mUseMipmaps && mLevels.size() == 1)
+                if (data->mGenerateMipmaps && mLevels.size() == 1)
                 {
                     auto width = mLevels.front().mWidth, height = mLevels.front().mHeight;
                     while (width > 1 || height > 1)
                     {
                         width = std::max(1u, width / 2);
                         height = std::max(1u, height / 2);
-                        bytes += Render::textureLevelSize(image->mFormat, width, height);
+                        bytes += Render::textureLevelSize(data->mFormat, width, height);
                     }
                 }
                 cached.mResidency.set(bytes);
@@ -460,6 +503,7 @@ namespace MWRender
                 cached.mRevision = sourceImage->getModifiedCount();
                 ++mImageChanges;
             }
+            cached.mResidency.touch();
             return cached.mHandle;
         }
 
@@ -472,6 +516,7 @@ namespace MWRender
                 slot->mSource = &geometry;
             }
             slot->mSeen = mSerial;
+            slot->mStorage->mSeen = mSerial;
             if (slot->mCheckedFrame == mSerial)
                 return slot->mCheckedHandle;
             slot->mCheckedFrame = mSerial;
@@ -481,25 +526,45 @@ namespace MWRender
                 return {};
             if (!slot->mHandle || slot->mRevision != revision)
             {
+                PrepareTimer timer{ mPrepare.mMeshes };
                 const auto topology = topologyRevision(geometry);
                 try
                 {
                     if (slot->mHandle)
                     {
                         if (!slot->mStream || slot->mTopologyRevision != topology)
+                        {
+                            ++mPrepare.mMeshBuilds;
                             slot->mStream = std::make_unique<RenderAssets::MeshStream>(
                                 mImporter.importMeshStream(geometry, uvUnit));
+                        }
                         else
+                        {
+                            ++mPrepare.mMeshUpdates;
                             mImporter.updateMeshStream(geometry, *slot->mStream);
+                        }
                         slot->upload(
                             slot->mStream->mVertices, slot->mStream->mIndices, topology == slot->mTopologyRevision);
+                        ++mMeshChanges;
+                    }
+                    else if (const auto* vbo = geometry.getVertexArray()->getVertexBufferObject();
+                        vbo && (vbo->getUsage() == GL_DYNAMIC_DRAW_ARB || vbo->getUsage() == GL_STREAM_DRAW_ARB))
+                    {
+                        // Rig/morph geometry owns mutable pose arrays. Import
+                        // its retained stream immediately instead of treating
+                        // the first pose as a canonical static mesh, then
+                        // reimporting and copying it on the first animation.
+                        slot->mStream
+                            = std::make_unique<RenderAssets::MeshStream>(mImporter.importMeshStream(geometry, uvUnit));
+                        ++mPrepare.mMeshBuilds;
+                        slot->upload(slot->mStream->mVertices, slot->mStream->mIndices);
                         ++mMeshChanges;
                     }
                     else
                     {
                         auto key = RenderAssets::meshKey(geometry, uvUnit);
                         auto& shared = mSharedMeshes[key.mWords];
-                        auto storage = shared.mKey.alive() ? shared.mStorage.lock() : nullptr;
+                        auto storage = shared.mKey.current() ? shared.mStorage : nullptr;
                         if (storage)
                         {
                             slot->mStorage = std::move(storage);
@@ -510,6 +575,7 @@ namespace MWRender
                         else
                         {
                             const auto data = mImporter.importMesh(geometry, uvUnit);
+                            ++mPrepare.mMeshBuilds;
                             slot->upload(data->mVertices, data->mIndices);
                             ++mMeshChanges;
                             slot->mStorage->mCanonical = true;
@@ -528,6 +594,8 @@ namespace MWRender
                 slot->mTopologyRevision = topology;
                 slot->mRevision = revision;
             }
+            slot->mStorage->mSeen = mSerial;
+            slot->mStorage->mResidency.touch();
             slot->mCheckedHandle = slot->mHandle;
             return slot->mCheckedHandle;
         }
@@ -550,7 +618,8 @@ namespace MWRender
             {
                 mGuiVertices.resize(count);
                 mGuiIndices.resize(count);
-                std::iota(mGuiIndices.begin(), mGuiIndices.end(), 0u);
+                if (!slot->mHandle || slot->mIndices != count)
+                    std::iota(mGuiIndices.begin(), mGuiIndices.end(), 0u);
                 for (std::size_t i = 0; i < count; ++i)
                 {
                     MyGUI::Vertex vertex;
@@ -566,6 +635,7 @@ namespace MWRender
                 slot->mRevision = source.getModifiedCount();
                 ++mMeshChanges;
             }
+            slot->mStorage->mResidency.touch();
             Render::Draw draw{};
             draw.mMesh = slot->mHandle;
             draw.mTexture = texture(sourceTexture, true);
@@ -582,8 +652,8 @@ namespace MWRender
         template <class StateType>
         std::shared_ptr<const Render::LightSet> lights(const StateType& state)
         {
-            const auto* values = state.getUniform("LightBuffer");
-            const auto* countUniform = state.getUniform("PointLightCount");
+            const auto* values = RenderAssets::nativeUniform(state, NativeUniform::LightBuffer);
+            const auto* countUniform = RenderAssets::nativeUniform(state, NativeUniform::PointLightCount);
             int count = 0;
             if (!values || !countUniform || !countUniform->get(count) || count <= 0)
                 return {};
@@ -592,8 +662,15 @@ namespace MWRender
             if (entry.mSource.get() != values || entry.mRevision != values->getModifiedCount() || entry.mCount != count
                 || !entry.mLights)
             {
-                auto result = std::make_shared<Render::LightSet>();
-                result->mPoints.reserve(count);
+                // Draws borrow these CPU light sets only through renderPasses;
+                // the backend packs their bytes before returning. Reuse the
+                // decoded buffer on the next frame instead of allocating a new
+                // shared owner and vector for every changing light state.
+                if (!entry.mLights || entry.mSource.get() != values)
+                    entry.mLights = std::make_shared<Render::LightSet>();
+                auto& points = entry.mLights->mPoints;
+                points.clear();
+                points.reserve(count);
                 for (int i = 0; i < count; ++i)
                 {
                     osg::Matrixf packed;
@@ -607,12 +684,11 @@ namespace MWRender
                     std::copy_n(packed.ptr() + 8, 4, light.mDiffuse.begin());
                     std::copy_n(packed.ptr() + 12, 4, light.mSpecular.begin());
                     light.mAttenuation = { packed.ptr()[3], packed.ptr()[7], packed.ptr()[11], packed.ptr()[15] };
-                    result->mPoints.push_back(light);
+                    points.push_back(light);
                 }
                 entry.mSource = values;
                 entry.mRevision = values->getModifiedCount();
                 entry.mCount = count;
-                entry.mLights = std::move(result);
             }
             entry.mSeen = mSerial;
             return entry.mLights;
@@ -621,7 +697,7 @@ namespace MWRender
         template <class StateType>
         void applyState(Render::Draw& draw, const StateType& state)
         {
-            if (const auto* strength = state.getUniform("distortionStrength"))
+            if (const auto* strength = RenderAssets::nativeUniform(state, NativeUniform::DistortionStrength))
                 strength->get(draw.mDistortionStrength);
             if (const auto* material
                 = dynamic_cast<const SceneUtil::Material*>(state.getAttribute(osg::StateAttribute::MATERIAL)))
@@ -665,25 +741,25 @@ namespace MWRender
                 }
                 draw.mUseVertexColor = draw.mVertexColorMode != 0;
             }
-            const auto vectorUniform = [&](const char* name, std::array<float, 4>& value) {
-                if (const auto* uniform = state.getUniform(name))
+            const auto vectorUniform = [&](NativeUniform name, std::array<float, 4>& value) {
+                if (const auto* uniform = RenderAssets::nativeUniform(state, name))
                 {
                     osg::Vec4f data;
                     if (uniform->get(data))
                         std::copy_n(data.ptr(), 4, value.begin());
                 }
             };
-            vectorUniform("material.diffuse", draw.mDiffuse);
-            vectorUniform("material.ambient", draw.mAmbient);
-            vectorUniform("material.emission", draw.mEmission);
-            vectorUniform("material.specular", draw.mSpecular);
-            vectorUniform("sun.position", draw.mSunPosition);
-            vectorUniform("sun.ambient", draw.mSunAmbient);
-            vectorUniform("sun.diffuse", draw.mSunDiffuse);
-            vectorUniform("sun.specular", draw.mSunSpecular);
-            if (const auto* uniform = state.getUniform("material.shininess"))
+            vectorUniform(NativeUniform::MaterialDiffuse, draw.mDiffuse);
+            vectorUniform(NativeUniform::MaterialAmbient, draw.mAmbient);
+            vectorUniform(NativeUniform::MaterialEmission, draw.mEmission);
+            vectorUniform(NativeUniform::MaterialSpecular, draw.mSpecular);
+            vectorUniform(NativeUniform::SunPosition, draw.mSunPosition);
+            vectorUniform(NativeUniform::SunAmbient, draw.mSunAmbient);
+            vectorUniform(NativeUniform::SunDiffuse, draw.mSunDiffuse);
+            vectorUniform(NativeUniform::SunSpecular, draw.mSunSpecular);
+            if (const auto* uniform = RenderAssets::nativeUniform(state, NativeUniform::MaterialShininess))
                 uniform->get(draw.mShininess);
-            if (const auto* uniform = state.getUniform("material.vertexColorMode"))
+            if (const auto* uniform = RenderAssets::nativeUniform(state, NativeUniform::MaterialVertexColorMode))
             {
                 int mode = 0;
                 if (uniform->get(mode) && mode >= 0 && mode <= 5)
@@ -692,11 +768,10 @@ namespace MWRender
                     draw.mUseVertexColor = mode != 0;
                 }
             }
-            if (const auto* uniform = state.getUniform("material.emissiveMult"))
+            if (const auto* uniform = RenderAssets::nativeUniform(state, NativeUniform::MaterialEmissiveMult))
                 uniform->get(draw.mEmissiveMult);
-            if (const auto* uniform = state.getUniform("material.specStrength"))
+            if (const auto* uniform = RenderAssets::nativeUniform(state, NativeUniform::MaterialSpecStrength))
                 uniform->get(draw.mSpecStrength);
-            draw.mLights = lights(state);
             draw.mClassicFalloff = Settings::shaders().mClassicFalloff;
             if (state.getMode(GL_BLEND) & osg::StateAttribute::ON)
             {
@@ -715,8 +790,8 @@ namespace MWRender
                 draw.mDepthWrite = depth->getWriteMask();
                 draw.mDepthCompare = alphaComparison(depth->getFunction());
             }
-            if (const auto found = state.getModeList().find(GL_DEPTH_TEST); found != state.getModeList().end())
-                draw.mDepthTest = (found->second & osg::StateAttribute::ON) != 0;
+            if (const auto mode = state.getMode(GL_DEPTH_TEST); !(mode & osg::StateAttribute::INHERIT))
+                draw.mDepthTest = (mode & osg::StateAttribute::ON) != 0;
             if (const auto* alpha
                 = dynamic_cast<const osg::AlphaFunc*>(state.getAttribute(osg::StateAttribute::ALPHAFUNC));
                 alpha
@@ -725,21 +800,21 @@ namespace MWRender
             {
                 draw.mAlphaCompare = alphaComparison(alpha->getFunction());
                 draw.mAlphaCutoff = alpha->getReferenceValue();
-                if (const auto* threshold = state.getUniform("alphaRef"))
+                if (const auto* threshold = RenderAssets::nativeUniform(state, NativeUniform::AlphaRef))
                     threshold->get(draw.mAlphaCutoff);
             }
-            for (const char* name : { "alpha", "actorFade" })
-                if (const auto* uniform = state.getUniform(name))
+            for (const auto name : { NativeUniform::Alpha, NativeUniform::ActorFade })
+                if (const auto* uniform = RenderAssets::nativeUniform(state, name))
                 {
                     float value = 1;
                     if (uniform->get(value))
                         draw.mTint[3] *= value;
                 }
-            if (const auto* start = state.getUniform("fog.start"))
+            if (const auto* start = RenderAssets::nativeUniform(state, NativeUniform::FogStart))
                 start->get(draw.mFogStart);
-            if (const auto* end = state.getUniform("fog.end"))
+            if (const auto* end = RenderAssets::nativeUniform(state, NativeUniform::FogEnd))
                 end->get(draw.mFogEnd);
-            if (const auto* color = state.getUniform("fog.color"))
+            if (const auto* color = RenderAssets::nativeUniform(state, NativeUniform::FogColor))
             {
                 osg::Vec4f fog;
                 if (color->get(fog))
@@ -747,32 +822,84 @@ namespace MWRender
             }
         }
 
-        const RenderAssets::OsgState& state(osgUtil::StateGraph* graph)
+        struct State
+        {
+            RenderAssets::OsgStateView mState;
+            Render::Draw mDraw;
+            std::uint64_t mDrawFrame = 0;
+            std::uint64_t mFrame = 0;
+        };
+
+        struct MeshLookupHash
+        {
+            std::size_t operator()(const std::pair<const osg::Geometry*, unsigned>& key) const
+            {
+                auto value = reinterpret_cast<std::uintptr_t>(key.first) >> 4;
+                value ^= value >> 17;
+                return value ^ (std::size_t(key.second) * 0x9e3779b9u);
+            }
+        };
+
+        using TransformKey = std::tuple<const osg::Matrixd*, const osg::Matrixd*, const osg::Uniform*>;
+        struct TransformHash
+        {
+            std::size_t operator()(const TransformKey& key) const
+            {
+                std::size_t value = 0;
+                const auto add = [&](const void* pointer) {
+                    value
+                        ^= (reinterpret_cast<std::uintptr_t>(pointer) >> 4) + 0x9e3779b9u + (value << 6) + (value >> 2);
+                };
+                add(std::get<0>(key));
+                add(std::get<1>(key));
+                add(std::get<2>(key));
+                return value;
+            }
+        };
+        struct Transform
+        {
+            osg::Matrixd mProjection;
+            Render::Matrix mClip{}, mView{}, mNormal = Render::IdentityMatrix;
+            bool mInvertible = false;
+        };
+        const Transform& transform(const osgUtil::RenderLeaf& leaf, const RenderAssets::OsgStateView& state)
+        {
+            auto [entry, inserted] = mTransforms.getOrCreate(
+                { leaf._modelview.get(), leaf._projection.get(), state.getUniform(NativeUniform::ProjectionMatrix) });
+            if (inserted)
+            {
+                ++mPrepare.mTransforms;
+                entry.mProjection
+                    = RenderAssets::clipProjection(state, *leaf._projection, SceneUtil::AutoDepth::isReversed());
+                entry.mClip = matrix(*leaf._modelview * entry.mProjection);
+                entry.mView = matrix(*leaf._modelview);
+                entry.mNormal = Render::IdentityMatrix;
+                osg::Matrixd inverse;
+                entry.mInvertible = inverse.invert(*leaf._modelview);
+                if (entry.mInvertible)
+                {
+                    osg::Matrixd normal;
+                    normal.transpose(inverse);
+                    entry.mNormal = matrix(normal);
+                }
+            }
+            return entry;
+        }
+
+        State& state(osgUtil::StateGraph* graph)
         {
             if (!graph)
                 return mDefaultState;
             auto& entry = mStates[graph];
             if (entry.mFrame != mSerial)
             {
-                const auto& parent = state(graph->_parent);
-                const auto parentVersion = graph->_parent ? mStates.at(graph->_parent).mVersion : 0;
-                const auto* local = graph->getStateSet();
-                if (!entry.mInitialized || entry.mParentVersion != parentVersion
-                    || (local && (!entry.mHasSnapshot || !entry.mSnapshot.matches(*local)))
-                    || (!local && entry.mHasSnapshot))
-                {
-                    entry.mState = parent;
-                    if (local)
-                        entry.mState.merge(*local);
-                    entry.mSnapshot = local ? RenderAssets::OsgState(*local) : RenderAssets::OsgState{};
-                    entry.mHasSnapshot = local != nullptr;
-                    entry.mInitialized = true;
-                    entry.mParentVersion = parentVersion;
-                    entry.mVersion = ++mStateVersion;
-                }
+                const auto& parent = state(graph->_parent).mState;
+                entry.mState.bind(&parent, graph->getStateSet());
+                entry.mState.prepareNativeUniforms();
+                ++mPrepare.mStateBindings;
                 entry.mFrame = mSerial;
             }
-            return entry.mState;
+            return entry;
         }
 
         struct ParticleRecord
@@ -780,11 +907,12 @@ namespace MWRender
             std::unique_ptr<GpuMesh> mMesh;
             std::vector<Render::Vertex> mVertices;
             std::vector<std::uint32_t> mIndices;
-            std::vector<int> mOrder;
+            RenderAssets::ParticleOrder mOrder;
         };
 
         void particles(const osgParticle::ParticleSystem& source, const osgUtil::RenderLeaf& leaf, Render::Draw& draw)
         {
+            PrepareTimer timer{ mPrepare.mParticles };
             auto& record = mParticleMeshes[{ &source, mCurrentStage, mParticleOccurrences[&source]++ }];
             if (!record.mMesh || record.mMesh->mSource.get() != &source)
             {
@@ -797,9 +925,10 @@ namespace MWRender
                 nif->markRendered(mViewer.getFrameStamp()->getFrameNumber());
             draw.mIndexCount = RenderAssets::importParticles(
                 source, *leaf._modelview, record.mVertices, record.mIndices, record.mOrder);
+            mPrepare.mParticleWait += record.mOrder.mLockWaitMs;
             if (!draw.mIndexCount)
                 return;
-            record.mMesh->upload(record.mVertices, record.mIndices, true);
+            record.mMesh->upload(record.mVertices, record.mIndices, true, std::size_t(draw.mIndexCount / 6) * 4);
             ++mMeshChanges;
             draw.mMesh = record.mMesh->mHandle;
             draw.mDoubleSided = true;
@@ -876,16 +1005,26 @@ namespace MWRender
             const auto* particleSystem = dynamic_cast<const osgParticle::ParticleSystem*>(leaf.getDrawable());
             if ((!geometry || !geometry->getVertexArray()) && !particleSystem)
                 return;
-            auto& resolved = state(leaf._parent);
+            auto& cached = state(leaf._parent);
+            const auto& resolved = cached.mState;
+            if (const auto* mask
+                = dynamic_cast<const osg::ColorMask*>(resolved.getAttribute(osg::StateAttribute::COLORMASK));
+                mask && !mask->getRedMask() && !mask->getGreenMask() && !mask->getBlueMask() && !mask->getAlphaMask())
+                return; // GL occlusion-query proxies have no visible output.
             try
             {
                 if (const auto* terrain = dynamic_cast<const Terrain::TerrainDrawable*>(geometry))
                     bakeComposite(terrain->getCompositeMap());
-                Render::Draw draw{};
-                applyState(draw, resolved);
+                if (cached.mDrawFrame != mSerial)
+                {
+                    cached.mDraw = {};
+                    applyState(cached.mDraw, resolved);
+                    cached.mDrawFrame = mSerial;
+                }
+                Render::Draw draw = cached.mDraw;
                 unsigned uvUnit = 0;
                 bool water = false;
-                if (const auto* surface = resolved.getUniform("waterSurface"))
+                if (const auto* surface = RenderAssets::nativeUniform(resolved, NativeUniform::WaterSurface))
                     surface->get(water);
                 draw.mWater = water;
                 if (water)
@@ -912,11 +1051,22 @@ namespace MWRender
                     if (water)
                     {
                         const auto time = mViewer.getFrameStamp()->getSimulationTime();
-                        draw.mUVTransform[2] += static_cast<float>(std::fmod(time * 0.02, 1.0));
-                        draw.mUVTransform[5] += static_cast<float>(std::fmod(time * 0.012, 1.0));
+                        osg::Vec3f position;
+                        if (const auto* node = RenderAssets::nativeUniform(resolved, NativeUniform::NodePosition))
+                            node->get(position);
+                        // Water uses world-space wave coordinates, not the
+                        // simple-water texture coordinates on the huge grid.
+                        draw.mEmission = { position.x(), position.y(), static_cast<float>(std::fmod(time, 200.0)), 1 };
+                        draw.mBlend = Render::BlendMode::Alpha;
+                        draw.mDepthWrite = false;
+                        // The legacy shader outputs alpha=1 after its own
+                        // reflection/refraction mix. Our Fresnel blend weight
+                        // is not an authored alpha-test value.
+                        draw.mAlphaCompare = Render::AlphaCompare::Always;
                     }
                 }
-                if (const auto blendUnit = RenderAssets::textureUnit(resolved, "blendMap"))
+                if (const auto blendUnit
+                    = water ? std::optional<unsigned>{} : RenderAssets::textureUnit(resolved, "blendMap"))
                 {
                     auto* mask = dynamic_cast<const osg::Texture2D*>(
                         resolved.getTextureAttribute(*blendUnit, osg::StateAttribute::TEXTURE));
@@ -942,8 +1092,8 @@ namespace MWRender
                     draw.mFlipWinding = !draw.mFlipWinding;
                 // OSG uses row vectors. Transposing its product is exactly the
                 // column-major matrix consumed by the native vertex pipeline.
-                const auto projection
-                    = RenderAssets::clipProjection(resolved, *leaf._projection, SceneUtil::AutoDepth::isReversed());
+                const auto& transforms = transform(leaf, resolved);
+                const auto& projection = transforms.mProjection;
                 if (mProjectionOutput && !mProjectionOutput->has_value() && !sky)
                 {
                     // Retain the authored projection before combining it with
@@ -954,16 +1104,17 @@ namespace MWRender
                     toGL(3, 2) = -1;
                     *mProjectionOutput = projection * toGL;
                 }
-                draw.mClipFromModel = matrix(particleSystem ? projection : *leaf._modelview * projection);
-                draw.mViewFromModel = particleSystem ? Render::IdentityMatrix : matrix(*leaf._modelview);
-                osg::Matrixd inverse;
-                if (inverse.invert(*leaf._modelview))
+                draw.mClipFromModel = particleSystem ? matrix(projection) : transforms.mClip;
+                draw.mViewFromModel = particleSystem ? Render::IdentityMatrix : transforms.mView;
+                draw.mNormalFromModel = transforms.mNormal;
+                if (transforms.mInvertible)
                 {
-                    osg::Matrixd normal;
-                    normal.transpose(inverse);
-                    draw.mNormalFromModel = matrix(normal);
-                    draw.mLighting = geometry && geometry->getNormalArray()
-                        && (resolved.getUniform("sun.diffuse") || draw.mLights);
+                    if (geometry && geometry->getNormalArray() && !sky && !water)
+                    {
+                        draw.mLights = lights(resolved);
+                        draw.mLighting
+                            = RenderAssets::nativeUniform(resolved, NativeUniform::SunDiffuse) || draw.mLights;
+                    }
                 }
                 if (particleSystem)
                 {
@@ -979,13 +1130,13 @@ namespace MWRender
                     draw.mDepthWrite = false;
                     draw.mFogEnd = 0;
                     draw.mLighting = false;
-                    if (const auto* pass = resolved.getUniform("pass"))
+                    if (const auto* pass = RenderAssets::nativeUniform(resolved, NativeUniform::Pass))
                         pass->get(draw.mSkyPass);
                     if (draw.mSkyPass == 5)
                         return; // An occlusion query proxy has no visible color.
-                    if (const auto* opacity = resolved.getUniform("opacity"))
+                    if (const auto* opacity = RenderAssets::nativeUniform(resolved, NativeUniform::Opacity))
                         opacity->get(draw.mOpacity);
-                    const auto skyVector = [&](const char* name, std::array<float, 4>& output) {
+                    const auto skyVector = [&](NativeUniform name, std::array<float, 4>& output) {
                         if (const auto* uniform = resolved.getUniform(name))
                         {
                             osg::Vec4f value;
@@ -993,9 +1144,9 @@ namespace MWRender
                                 std::copy_n(value.ptr(), 4, output.begin());
                         }
                     };
-                    skyVector("diffuseColor", draw.mDiffuse);
-                    skyVector("moonBlend", draw.mEmission);
-                    skyVector("atmosphereFade", draw.mAmbient);
+                    skyVector(NativeUniform::DiffuseColor, draw.mDiffuse);
+                    skyVector(NativeUniform::MoonBlend, draw.mEmission);
+                    skyVector(NativeUniform::AtmosphereFade, draw.mAmbient);
                     if (draw.mSkyPass == 3)
                         if (const auto unit = RenderAssets::textureUnit(resolved, "maskMap"))
                             draw.mMaskTexture
@@ -1073,7 +1224,7 @@ namespace MWRender
                 if (auto* canvas = dynamic_cast<MWRender::PingPongCanvas*>(leaf._drawable.get()))
                 {
                     mEffectCanvas = canvas;
-                    mEffectState = state(leaf._parent);
+                    mEffectState = state(leaf._parent).mState;
                 }
             };
             for (const auto& entry : bin.getRenderLeafList())
@@ -1184,7 +1335,8 @@ namespace MWRender
                 : std::chrono::duration<double, std::milli>(now - mLastSubmit).count();
             const bool waiting
                 = !mFrameSubmitted && sinceSubmit >= 250 && !(SDL_GetWindowFlags(mWindow) & SDL_WINDOW_MINIMIZED);
-            if ((total >= 250 || outside >= 250 || waiting) && now >= mNextSlowFrameReport)
+            if ((total >= 250 || timing.mMilliseconds[2] >= 32 || outside >= 250 || waiting)
+                && now >= mNextSlowFrameReport)
             {
                 mNextSlowFrameReport = now + std::chrono::seconds(5);
                 const auto& phases = timing.mMilliseconds;
@@ -1195,7 +1347,14 @@ namespace MWRender
                                     << "ms, last submitted draws=" << mLastSubmittedDraws << ", views=" << mViewCount
                                     << ", composites=" << mCompositeViewCount << ", mesh uploads=" << mMeshChanges
                                     << ", image uploads=" << mImageChanges << ", retirement cache=" << mRetireName
-                                    << ", retired=" << mRetired;
+                                    << ", retired=" << mRetired << ", prepare scene=" << mPrepare.mScene
+                                    << "ms effects=" << mPrepare.mEffects << "ms overlay=" << mPrepare.mOverlay
+                                    << "ms (nested mesh=" << mPrepare.mMeshes << "ms texture=" << mPrepare.mTextures
+                                    << "ms target=" << mPrepare.mTargets << "ms), mesh builds=" << mPrepare.mMeshBuilds
+                                    << ", stream updates=" << mPrepare.mMeshUpdates
+                                    << ", particles=" << mPrepare.mParticles << "ms (lock=" << mPrepare.mParticleWait
+                                    << "ms), native states=" << mPrepare.mStateBindings
+                                    << ", transforms=" << mPrepare.mTransforms;
             }
             mLastFrameEnd = FrameTiming::Clock::now();
         }
@@ -1214,6 +1373,7 @@ namespace MWRender
             mFrameSubmitted = false;
             mMeshChanges = 0;
             mImageChanges = 0;
+            mPrepare = {};
             mViewCount = 0;
             mCompositeViewCount = 0;
             const bool ready = backend().ready();
@@ -1221,6 +1381,9 @@ namespace MWRender
             if (!ready)
                 return;
             ++mSerial;
+            mTransforms.beginFrame();
+            mMeshResidency.beginFrame();
+            mTextureResidency.beginFrame();
             mSubmittedComposites.clear();
             mCapturedStages.clear();
             mEffectCanvas = nullptr;
@@ -1251,22 +1414,29 @@ namespace MWRender
             mSceneView->getCullVisitor()->setImageRequestHandler(mViewer.getImagePager());
             mSceneView->cull();
             auto* stage = mSceneView->getRenderStage();
-            stage->sort();
+            // SceneView::cull has already sorted the stage and its children.
             timing.finish(1);
-            captureStage(*stage, true);
-            Render::reserveFor(mPasses, mCompositeViewCount + mViewCount);
-            for (std::size_t i = 0; i < mCompositeViewCount; ++i)
+            // GUI uploads can occur during culling. Keep the nested asset
+            // counters below scoped to preparation, matching its parent time.
+            mPrepare = {};
             {
-                const auto& view = mCompositeViews[i];
-                mPasses.push_back({ view.mDraws, view.mTarget, view.mColor, view.mClear, view.mViewport });
-            }
-            for (std::size_t i = 0; i < mViewCount; ++i)
-            {
-                const auto& view = mViews[i];
-                mPasses.push_back({ view.mDraws, view.mTarget, view.mColor, view.mClear, view.mViewport });
+                PrepareTimer timer{ mPrepare.mScene };
+                captureStage(*stage, true);
+                Render::reserveFor(mPasses, mCompositeViewCount + mViewCount);
+                for (std::size_t i = 0; i < mCompositeViewCount; ++i)
+                {
+                    const auto& view = mCompositeViews[i];
+                    mPasses.push_back({ view.mDraws, view.mTarget, view.mColor, view.mClear, view.mViewport });
+                }
+                for (std::size_t i = 0; i < mViewCount; ++i)
+                {
+                    const auto& view = mViews[i];
+                    mPasses.push_back({ view.mDraws, view.mTarget, view.mColor, view.mClear, view.mViewport });
+                }
             }
             if (mEffectCanvas.valid())
             {
+                PrepareTimer timer{ mPrepare.mEffects };
                 if (!mEffects)
                     mEffects = std::make_unique<Vulkan::Effects>(
                         backend(), [this](const osg::Texture2D* source) { return texture(source, false); });
@@ -1279,23 +1449,32 @@ namespace MWRender
                         projection = mViews[i].mProjection.value_or(projection);
                         break;
                     }
-                mEffects->append(mPasses, *mEffectCanvas, mEffectState, projection, distortion);
+                mEffects->append(
+                    mPasses, *mEffectCanvas, mEffectState, projection, camera->getViewMatrix(), distortion);
             }
             // Interface colors and text remain outside the scene effects.
-            if (mDrawGui && !mGuiDraws.empty())
-                mPasses.push_back({ mGuiDraws, {}, {}, false });
-            if (mStats && mDrawGui)
             {
-                const auto graph = mStats->graph();
-                if (!graph.empty())
-                    mPasses.push_back({ graph, {}, {}, false });
+                PrepareTimer timer{ mPrepare.mOverlay };
+                if (mDrawGui && !mGuiDraws.empty())
+                    mPasses.push_back({ mGuiDraws, {}, {}, false });
+                if (mStats && mDrawGui)
+                {
+                    const auto graph = mStats->graph();
+                    if (!graph.empty())
+                        mPasses.push_back({ graph, {}, {}, false });
+                }
             }
             // Release CPU references held by views that disappeared this frame.
-            for (std::size_t i = mViewCount; i < mViews.size(); ++i)
-                mViews[i].mDraws.clear();
-            for (std::size_t i = mCompositeViewCount; i < mCompositeViews.size(); ++i)
-                mCompositeViews[i].mDraws.clear();
+            {
+                PrepareTimer timer{ mPrepare.mScene };
+                for (std::size_t i = mViewCount; i < mViews.size(); ++i)
+                    mViews[i].mDraws.clear();
+                for (std::size_t i = mCompositeViewCount; i < mCompositeViews.size(); ++i)
+                    mCompositeViews[i].mDraws.clear();
+            }
             timing.finish(2);
+            if (mStats)
+                mStats->prepared(timing.mMilliseconds[2], mPrepare);
             const bool submitted = backend().renderPasses(mPasses);
             timing.finish(3);
             if (submitted)
@@ -1355,18 +1534,34 @@ namespace MWRender
                 case 5:
                     mRetireName = "lights";
                     mRetired = mLightSweep.sweep(
-                        mLightSets, [&](const auto& item) { return item.second.mSeen + 16 < mSerial; }, stop);
+                        mLightSets,
+                        [&](const auto& item) {
+                            return !item.second.mSource.valid()
+                                || item.second.mSeen + (mLightSets.size() > 2048 ? 16 : 600) < mSerial;
+                        },
+                        stop);
                     break;
                 case 6:
                     mRetireName = "states";
                     mRetired = mStateSweep.sweep(
-                        mStates, [&](const auto& item) { return item.second.mFrame + 16 < mSerial; }, stop);
+                        mStates,
+                        [&](const auto& item) {
+                            // Returning to the same direction should reuse the
+                            // CPU state records too, not only GPU resources.
+                            constexpr auto limit = 32 * 1024 * 1024 / sizeof(State);
+                            return item.second.mFrame + (mStates.size() > limit ? 16 : 600) < mSerial;
+                        },
+                        stop);
                     break;
                 case 9:
                     mRetireName = "shared meshes";
                     mRetired = mSharedMeshSweep.sweep(
                         mSharedMeshes,
-                        [](const auto& item) { return item.second.mStorage.expired() || !item.second.mKey.alive(); },
+                        [&](const auto& item) {
+                            const auto& storage = item.second.mStorage;
+                            return !storage || !item.second.mKey.current()
+                                || (storage.use_count() == 1 && mMeshResidency.evict(true, mSerial, storage->mSeen));
+                        },
                         stop);
                     break;
                 case 8:
@@ -1375,7 +1570,9 @@ namespace MWRender
                         mTextureBindings,
                         [&](const auto& item) {
                             return !item.second.mSource.valid()
-                                || std::max(item.second.mFrame[0], item.second.mFrame[1]) + 16 < mSerial;
+                                || std::max(item.second.mFrame[0], item.second.mFrame[1])
+                                    + (mTextureBindings.size() > 8192 ? 16 : 600)
+                                < mSerial;
                         },
                         stop);
                     break;
@@ -1410,15 +1607,15 @@ namespace MWRender
         std::unique_ptr<Vulkan::StatsOverlay> mStats;
         std::chrono::steady_clock::time_point mStatsLastSubmit{};
         osg::observer_ptr<MWRender::PingPongCanvas> mEffectCanvas;
-        RenderAssets::OsgState mEffectState;
+        RenderAssets::OsgStateView mEffectState;
         struct SharedMesh
         {
             RenderAssets::MeshKey mKey;
-            std::weak_ptr<MeshStorage> mStorage;
+            std::shared_ptr<MeshStorage> mStorage;
         };
         std::map<std::vector<std::uintptr_t>, SharedMesh> mSharedMeshes;
-        std::map<std::pair<const osg::Geometry*, unsigned>, std::unique_ptr<GpuMesh>> mMeshes;
-        std::map<const osg::Array*, std::unique_ptr<GpuMesh>> mGuiMeshes;
+        std::unordered_map<std::pair<const osg::Geometry*, unsigned>, std::unique_ptr<GpuMesh>, MeshLookupHash> mMeshes;
+        std::unordered_map<const osg::Array*, std::unique_ptr<GpuMesh>> mGuiMeshes;
         std::map<std::tuple<const osgParticle::ParticleSystem*, const osgUtil::RenderStage*, unsigned>, ParticleRecord>
             mParticleMeshes;
         std::map<const osgParticle::ParticleSystem*, unsigned> mParticleOccurrences;
@@ -1430,28 +1627,19 @@ namespace MWRender
             std::array<std::uint64_t, 2> mFrame{};
             std::array<Render::TextureHandle, 2> mHandles{};
         };
-        std::map<const osg::Texture2D*, TextureBinding> mTextureBindings;
-        struct State
-        {
-            RenderAssets::OsgState mState;
-            RenderAssets::OsgState mSnapshot;
-            bool mInitialized = false;
-            bool mHasSnapshot = false;
-            std::uint64_t mFrame = 0;
-            std::uint64_t mParentVersion = 0;
-            std::uint64_t mVersion = 0;
-        };
-        std::map<osgUtil::StateGraph*, State> mStates;
+        std::unordered_map<const osg::Texture2D*, TextureBinding> mTextureBindings;
+        std::unordered_map<osgUtil::StateGraph*, State> mStates;
+        Render::FrameCache<TransformKey, Transform, TransformHash> mTransforms;
         struct LightRecord
         {
             osg::observer_ptr<const osg::Uniform> mSource;
             unsigned mRevision = 0;
             int mCount = 0;
-            std::shared_ptr<const Render::LightSet> mLights;
+            std::shared_ptr<Render::LightSet> mLights;
             std::uint64_t mSeen = 0;
         };
-        std::map<const osg::Uniform*, LightRecord> mLightSets;
-        RenderAssets::OsgState mDefaultState;
+        std::unordered_map<const osg::Uniform*, LightRecord> mLightSets;
+        State mDefaultState;
         Render::TextureHandle mTransparent;
         std::vector<CapturedView> mViews;
         std::vector<CapturedView> mCompositeViews;
@@ -1470,9 +1658,9 @@ namespace MWRender
         std::vector<std::uint32_t> mGuiIndices;
         std::set<std::string> mWarnings;
         std::uint64_t mSerial = 0;
-        std::uint64_t mStateVersion = 0;
         std::size_t mMeshChanges = 0;
         std::size_t mImageChanges = 0;
+        Vulkan::PrepareStats mPrepare;
         bool mFrameSubmitted = false;
         std::size_t mLastSubmittedDraws = 0;
         FrameTiming::Clock::time_point mLastSubmit{};
@@ -1527,7 +1715,11 @@ namespace MWRender
     }
     void VulkanFrameDriver::stop()
     {
+        if (mImpl->mStopped)
+            return;
         mImpl->mStopped = true;
+        if (mImpl->mEffects)
+            mImpl->mEffects->stop();
         if (mImpl->mStats)
             mImpl->mStats->shutdown();
         mImpl->mViewer.stopThreading();

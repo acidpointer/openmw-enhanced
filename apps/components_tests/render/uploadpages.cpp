@@ -70,6 +70,35 @@ namespace
         EXPECT_TRUE(cached.expired());
     }
 
+    TEST(RenderUploadPages, BoundedRetentionReusesBurstPagesAndEventuallyReleasesThem)
+    {
+        Render::UploadPages<int> pages(64);
+        int created = 0;
+        const auto create = [&](std::uint64_t) { return std::make_shared<int>(++created); };
+        auto burst = pages.allocate(128, 16, create);
+        std::weak_ptr<int> cached = burst.mPage;
+        burst = {};
+        pages.trim(128, 2);
+        EXPECT_FALSE(cached.expired());
+        auto reused = pages.allocate(128, 16, create);
+        EXPECT_EQ(reused.mPage, cached.lock());
+        EXPECT_EQ(created, 1);
+        reused = {};
+        pages.trim(128, 2);
+        pages.trim(128, 2);
+        EXPECT_FALSE(cached.expired());
+        pages.trim(128, 2);
+        EXPECT_TRUE(cached.expired());
+
+        auto live = pages.allocate(256, 16, create);
+        auto spare = pages.allocate(128, 16, create);
+        std::weak_ptr<int> spareOwner = spare.mPage;
+        spare = {};
+        pages.trim(64, 100);
+        EXPECT_TRUE(spareOwner.expired()); // Idle budget overrides the grace period.
+        EXPECT_EQ(live.mPage.use_count(), 2); // In-flight data is never evicted.
+    }
+
     TEST(RenderUploadPages, RejectsInvalidInputsAndHandlesAddressSpaceBoundaries)
     {
         Render::UploadPages<int> pages(64);

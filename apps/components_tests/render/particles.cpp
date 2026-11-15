@@ -8,7 +8,7 @@ namespace
     {
         std::vector<Render::Vertex> mVertices;
         std::vector<std::uint32_t> mIndices;
-        std::vector<int> mOrder;
+        RenderAssets::ParticleOrder mOrder;
         std::uint32_t import(
             const osgParticle::ParticleSystem& source, const osg::Matrixd& view = osg::Matrixd::identity())
         {
@@ -74,6 +74,37 @@ namespace
         ASSERT_EQ(result.import(*source), 12u);
         EXPECT_FLOAT_EQ(result.mVertices[0].mPosition[2], -20);
         EXPECT_FLOAT_EQ(result.mVertices[4].mPosition[2], -10);
+    }
+
+    TEST(RenderParticles, EqualDepthKeepsSourceOrderAndReusesCenterStorage)
+    {
+        osg::ref_ptr<osgParticle::ParticleSystem> source = new osgParticle::ParticleSystem;
+        source->setSortMode(osgParticle::ParticleSystem::SORT_BACK_TO_FRONT);
+        particle(*source);
+        particle(*source);
+        particle(*source);
+        ParticleOutput result;
+        ASSERT_EQ(result.import(*source), 18u);
+        EXPECT_EQ(result.mOrder.mIndices, (std::vector<int>{ 0, 1, 2 }));
+        const auto* storage = result.mOrder.mCenters.data();
+        ASSERT_EQ(result.import(*source, osg::Matrixd::translate(0, 0, 2)), 18u);
+        EXPECT_EQ(result.mOrder.mIndices, (std::vector<int>{ 0, 1, 2 }));
+        EXPECT_EQ(result.mOrder.mCenters.data(), storage);
+        EXPECT_FLOAT_EQ(result.mVertices[0].mPosition[2], -8);
+    }
+
+    TEST(RenderParticles, UnrotatedBillboardsRetainScreenAxesWhenTheCameraTurns)
+    {
+        osg::ref_ptr<osgParticle::ParticleSystem> source = new osgParticle::ParticleSystem;
+        particle(*source);
+        ParticleOutput result;
+        ASSERT_EQ(result.import(*source, osg::Matrixd::rotate(osg::PI / 2, osg::Vec3(0, 0, 1))), 6u);
+        const auto& a = result.mVertices[0].mPosition;
+        const auto& c = result.mVertices[2].mPosition;
+        EXPECT_FLOAT_EQ((a[0] + c[0]) * .5f, -4);
+        EXPECT_FLOAT_EQ((a[1] + c[1]) * .5f, 3);
+        EXPECT_FLOAT_EQ(c[0] - a[0], 4);
+        EXPECT_FLOAT_EQ(c[1] - a[1], 4);
     }
 
     TEST(RenderParticles, HonorsConfiguredAlignmentAndParticleScaleFrame)

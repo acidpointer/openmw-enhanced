@@ -141,6 +141,7 @@ add_component_dir (shader
 add_component_dir (render
     backend resourcepool allocationranges module
     )
+list(APPEND COMPONENT_FILES render/bufferarena.hpp render/framecache.hpp)
 
 add_component_dir (renderassets
     model osgimporter osgstate particles effectshader

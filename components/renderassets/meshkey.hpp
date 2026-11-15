@@ -12,12 +12,27 @@ namespace RenderAssets
     struct MeshKey
     {
         std::vector<std::uintptr_t> mWords;
-        std::vector<osg::observer_ptr<const osg::BufferData>> mBuffers;
+        struct Source
+        {
+            osg::observer_ptr<const osg::BufferData> mBuffer;
+            unsigned mRevision;
+        };
+        std::vector<Source> mBuffers;
         bool alive() const
         {
             for (const auto& buffer : mBuffers)
-                if (!buffer.valid())
+                if (!buffer.mBuffer.valid())
                     return false;
+            return true;
+        }
+        bool current() const
+        {
+            for (const auto& source : mBuffers)
+            {
+                osg::ref_ptr<const osg::BufferData> buffer;
+                if (!source.mBuffer.lock(buffer) || buffer->getModifiedCount() != source.mRevision)
+                    return false;
+            }
             return true;
         }
     };
@@ -34,7 +49,7 @@ namespace RenderAssets
             key.mWords.push_back(reinterpret_cast<std::uintptr_t>(data));
             key.mWords.push_back(data ? data->getModifiedCount() : 0);
             if (data)
-                key.mBuffers.emplace_back(data);
+                key.mBuffers.push_back({ osg::observer_ptr<const osg::BufferData>(data), data->getModifiedCount() });
         };
         for (const auto* array : { geometry.getVertexArray(), geometry.getNormalArray(), geometry.getColorArray(),
                  geometry.getTexCoordArray(uvUnit), geometry.getTexCoordArray(0) })

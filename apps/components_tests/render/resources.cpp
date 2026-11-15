@@ -1,4 +1,6 @@
 #include <components/render/allocationranges.hpp>
+#include <components/render/bufferarena.hpp>
+#include <components/render/framecache.hpp>
 #include <components/render/pipelinecache.hpp>
 #include <components/render/raster.hpp>
 #include <components/render/residency.hpp>
@@ -12,6 +14,118 @@
 
 namespace
 {
+    struct FrameHash
+    {
+        std::size_t operator()(int) const { return 0; }
+    };
+    TEST(RenderFrameCache, GrowthPreservesFrameValuesThroughCollisions)
+    {
+        Render::FrameCache<int, int, FrameHash> cache;
+        cache.beginFrame();
+        for (int i = 0; i < 100; ++i)
+        {
+            auto [value, inserted] = cache.getOrCreate(i);
+            ASSERT_TRUE(inserted);
+            value = i * 7;
+        }
+        EXPECT_EQ(cache.size(), 100u);
+        for (int i = 0; i < 100; ++i)
+        {
+            auto [value, inserted] = cache.getOrCreate(i);
+            EXPECT_FALSE(inserted);
+            EXPECT_EQ(value, i * 7);
+        }
+        const auto capacity = cache.capacity();
+        cache.beginFrame();
+        EXPECT_EQ(cache.size(), 0u);
+        EXPECT_EQ(cache.capacity(), capacity);
+        auto [fresh, inserted] = cache.getOrCreate(7);
+        ASSERT_TRUE(inserted);
+        fresh = 42;
+        auto [same, duplicate] = cache.getOrCreate(7);
+        EXPECT_FALSE(duplicate);
+        EXPECT_EQ(same, 42);
+        EXPECT_EQ(cache.size(), 1u);
+    }
+
+    TEST(RenderBufferArena, PacksDistinctVertexAndIndexRangesInOneBuffer)
+    {
+        Render::BufferArena<int> arena(64);
+        int created = 0;
+        const auto create = [&](std::uint64_t) { return std::make_shared<int>(++created); };
+        auto vertices = arena.allocate(16, 16, create);
+        auto indices = arena.allocate(12, 4, create);
+        auto nextMesh = arena.allocate(16, 16, create);
+        EXPECT_EQ(created, 1);
+        EXPECT_EQ(&vertices.page(), &indices.page());
+        EXPECT_EQ(&vertices.page(), &nextMesh.page());
+        EXPECT_EQ(vertices.offset(), 0u);
+        EXPECT_EQ(indices.offset(), 16u);
+        EXPECT_EQ(nextMesh.offset(), 32u);
+        EXPECT_EQ(indices.size(), 12u);
+    }
+
+    TEST(RenderBufferArena, SubmittedOwnerKeepsItsRangeUntilCompletion)
+    {
+        using Slice = Render::BufferArena<int>::Slice;
+        static_assert(!std::is_copy_constructible_v<Slice>);
+        static_assert(std::is_nothrow_move_constructible_v<Slice>);
+        Render::BufferArena<int> arena(64);
+        int created = 0;
+        const auto create = [&](std::uint64_t) { return std::make_shared<int>(++created); };
+        auto resident = std::make_shared<Slice>(arena.allocate(64, 16, create));
+        auto submitted = resident;
+        const auto* firstPage = &submitted->page();
+        resident.reset();
+        arena.trim();
+        auto next = arena.allocate(64, 16, create);
+        EXPECT_NE(&next.page(), firstPage);
+        submitted.reset();
+        auto reused = arena.allocate(64, 16, create);
+        EXPECT_EQ(&reused.page(), firstPage);
+        EXPECT_EQ(created, 2);
+    }
+
+    TEST(RenderBufferArena, MovingAndClearingKeepOutstandingRangesValid)
+    {
+        Render::BufferArena<int> arena(64);
+        std::weak_ptr<int> page;
+        const auto create = [&](std::uint64_t) {
+            auto result = std::make_shared<int>(7);
+            page = result;
+            return result;
+        };
+        auto first = arena.allocate(16, 16, create);
+        auto second = arena.allocate(16, 16, create);
+        auto tail = arena.allocate(32, 16, create);
+        second = std::move(first);
+        EXPECT_FALSE(first);
+        auto replacement = arena.allocate(16, 16, create);
+        EXPECT_EQ(replacement.offset(), 16u);
+        EXPECT_EQ(second.offset(), 0u);
+        arena.clear();
+        EXPECT_FALSE(page.expired());
+        EXPECT_EQ(second.page(), 7);
+        second = {};
+        EXPECT_FALSE(page.expired());
+        replacement = {};
+        EXPECT_FALSE(page.expired());
+        tail = {};
+        EXPECT_TRUE(page.expired());
+        EXPECT_THROW(arena.allocate(0, 16, create), std::invalid_argument);
+        EXPECT_THROW(arena.allocate(16, 0, create), std::invalid_argument);
+    }
+
+    TEST(RenderTargets, OnlySceneTargetsAllocateDepth)
+    {
+        EXPECT_TRUE(Render::targetHasDepth(Render::TargetFormat::RGBA8));
+        EXPECT_TRUE(Render::targetHasDepth(Render::TargetFormat::SceneRGBA16F));
+        EXPECT_FALSE(Render::targetHasDepth(Render::TargetFormat::ColorRGBA8));
+        EXPECT_FALSE(Render::targetHasDepth(Render::TargetFormat::ColorRGBA16F));
+        EXPECT_FALSE(Render::targetHasDepth(Render::TargetFormat::R32F));
+        EXPECT_FALSE(Render::targetHasDepth(Render::TargetFormat::RG16F));
+    }
+
     TEST(RenderRaster, DefaultDrawPreservesFullScreenClipCoordinates)
     {
         const Render::Draw draw;
@@ -58,6 +172,40 @@ namespace
         word(0, 32);
         word(4, 2);
         EXPECT_FALSE(Render::compatiblePipelineCache(bytes, 0x10de, 0x25b9, uuid));
+    }
+
+    TEST(RenderResidency, VisibleWorkingSetDoesNotConsumeTheWarmCacheAllowance)
+    {
+        Render::Residency cache(100);
+        cache.setLimit(100, 250);
+        Render::Residency::Charge visible(&cache), warm(&cache);
+        visible.set(160);
+        warm.set(80);
+        cache.beginFrame();
+        visible.touch();
+        visible.touch(); // Shared meshes and multiple views count once.
+        EXPECT_EQ(cache.activeBytes(), 160u);
+        EXPECT_FALSE(cache.evict(true, 100, 1)); // 80 bytes fit the warm allowance.
+        warm.set(100);
+        EXPECT_TRUE(cache.evict(true, 100, 1)); // Device ceiling wins over 160+100.
+        EXPECT_FALSE(cache.evict(true, 100, 100)); // Visible data is never evicted.
+        visible.set(170);
+        EXPECT_EQ(cache.activeBytes(), 170u);
+        warm.set(80);
+        EXPECT_FALSE(cache.evict(true, 100, 1));
+        cache.beginFrame();
+        warm.touch();
+        EXPECT_EQ(cache.activeBytes(), 80u);
+        EXPECT_FALSE(cache.evict(true, 101, 1)); // A brief turn keeps the previous working set warm.
+        for (unsigned i = 0; i < 260; ++i)
+        {
+            cache.beginFrame();
+            warm.touch();
+        }
+        EXPECT_TRUE(cache.evict(true, 400, 1)); // The smaller working set eventually replaces its high watermark.
+        warm.set(0);
+        EXPECT_EQ(cache.activeBytes(), 0u);
+        EXPECT_TRUE(cache.evict(false, 101, 101));
     }
 
     TEST(RenderResidency, RetainsLoadedAssetsAcrossCameraTurnsAndEvictsOnlyUnderPressure)
@@ -162,6 +310,24 @@ namespace
         const auto handle = pool.insert(std::make_shared<int>(7));
         pool.erase(handle);
         EXPECT_THROW(pool.erase(handle), std::invalid_argument);
+    }
+
+    TEST(RenderAllocationRanges, AppendPreferenceStillReusesHolesAndInvalidatesFailedFitCacheOnRelease)
+    {
+        Render::AllocationRanges ranges(64);
+        EXPECT_EQ(ranges.allocate(3, 1, true), 0);
+        EXPECT_EQ(ranges.allocate(16, 16, true), 16);
+        EXPECT_EQ(ranges.allocate(13, 1, true), 32);
+        EXPECT_EQ(ranges.allocate(19, 1, true), 45);
+        EXPECT_FALSE(ranges.allocate(14, 1, true));
+        EXPECT_EQ(ranges.allocate(13, 1, true), 3);
+        EXPECT_FALSE(ranges.allocate(1, 1, true));
+        ranges.release(16);
+        EXPECT_EQ(ranges.allocate(16, 16, true), 16);
+        for (auto offset : { 0u, 3u, 16u, 32u, 45u })
+            ranges.release(offset);
+        EXPECT_TRUE(ranges.empty());
+        EXPECT_EQ(ranges.allocate(64, 1, true), 0);
     }
 
     TEST(RenderAllocationRanges, AlignmentPaddingRemainsAvailable)

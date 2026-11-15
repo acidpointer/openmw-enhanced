@@ -4,9 +4,12 @@
 #include "model.hpp"
 
 #include <memory>
+#include <optional>
 #include <string_view>
 
+#include <osg/Array>
 #include <osg/Matrixf>
+#include <osg/observer_ptr>
 
 namespace osg
 {
@@ -26,6 +29,8 @@ namespace RenderAssets
         std::vector<std::uint64_t> mVertexSources;
         std::size_t mSourceVertexCount = 0;
         unsigned mUVUnit = 0;
+        std::array<osg::observer_ptr<const osg::Array>, 3> mStaticChannels;
+        std::array<unsigned, 3> mStaticRevisions{};
     };
 
     // CPU import bridge for existing readers. It consumes raw, immutable
@@ -44,6 +49,12 @@ namespace RenderAssets
         // Live OSG textures upload rows verbatim regardless of origin metadata;
         // fonts, video and generated UI images depend on that convention.
         std::shared_ptr<const Render::ImageAsset> importImage(const osg::Image& image, bool preserveRows = false);
+        // Borrow already uploadable, tightly packed RGBA8/BC mip data. The
+        // image and caller-owned level metadata must outlive the synchronous
+        // backend upload call. Rows are preserved for live OSG images.
+        // Other layouts return no view and use the normal conversion path.
+        static std::optional<Render::TextureData> borrowTexture(
+            const osg::Image& image, std::vector<Render::TextureLevel>& levels, bool mipmaps = true);
         // Import only changed geometry from a CPU cull result. GPU names and
         // GL programs are deliberately not part of this bridge.
         std::shared_ptr<const Render::MeshAsset> importMesh(

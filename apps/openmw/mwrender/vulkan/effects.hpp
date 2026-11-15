@@ -25,9 +25,11 @@ namespace MWRender
             ~Effects();
             // Redirect the scene and append the active OMWFX passes. Resources
             // and CPU uniform spans remain alive until the next append call.
-            void append(std::vector<Render::Pass>& passes, PingPongCanvas& canvas, const RenderAssets::OsgState& state,
-                const osg::Matrixd& projection, std::span<const Render::Draw> distortion = {});
+            void append(std::vector<Render::Pass>& passes, PingPongCanvas& canvas,
+                const RenderAssets::OsgStateView& state, const osg::Matrixd& projection, const osg::Matrixd& view,
+                std::span<const Render::Draw> distortion = {});
             void submitted();
+            void stop();
 
         private:
             struct Impl;

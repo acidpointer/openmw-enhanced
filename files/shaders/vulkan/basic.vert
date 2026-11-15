@@ -1,5 +1,9 @@
 #version 450
 
+// Surface, water, sky, distortion, overlay. Fixed when creating a pipeline,
+// allowing the driver to eliminate unrelated work and varyings.
+layout(constant_id = 0) const uint materialShader = 0u;
+
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec2 inUV;
 layout(location = 2) in vec4 inColor;
@@ -76,12 +80,16 @@ void main()
 {
     InstanceData data = instances[gl_InstanceIndex];
     gl_Position = data.clipFromModel * vec4(inPosition, 1.0);
-    if (data.parameters.w > 3.5)
+    if (materialShader == 2u)
         gl_Position.z = gl_Position.w;
+    else if (materialShader == 1u)
+        gl_Position.z = min(gl_Position.z, gl_Position.w);
     uv = vec2(dot(data.uvRow0.xyz, vec3(inUV, 1.0)), dot(data.uvRow1.xyz, vec3(inUV, 1.0)));
     maskUV = vec2(dot(data.maskRow0.xyz, vec3(inMaskUV, 1.0)), dot(data.maskRow1.xyz, vec3(inMaskUV, 1.0)));
     alphaPolicy = data.parameters.xy;
     materialKind = data.parameters.w;
+    if (materialShader == 1u)
+        uv = (inPosition.xy + data.emission.xy) * (3.0 / (8192.0 * 5.0));
 
     vec4 vertexColor = vec4(inColor.rgb, inAlpha < 0.0 ? inColor.a : inAlpha);
     uint mode = data.lighting.w;
@@ -93,13 +101,20 @@ void main()
     skyMoon = data.emission;
     skyAtmosphere = data.ambient;
     opacity = data.parameters.z;
-    color = materialKind > 3.5 ? vertexColor * data.tint : diffuse * data.tint;
+    color = materialShader == 2u ? vertexColor * data.tint : diffuse * data.tint;
     specularColor = vec3(0.0);
     screenPosition = gl_Position;
+    if (materialShader == 4u)
+    {
+        viewPosition = vec3(0.0);
+        viewNormal = vec3(0.0, 0.0, 1.0);
+        clipDistance = 1.0;
+        return;
+    }
     viewPosition = (data.viewFromModel * vec4(inPosition, 1.0)).xyz;
     viewNormal = safeNormal(mat3(data.normalFromModel) * inNormal);
     clipDistance = (data.lighting.z & 4u) != 0u ? dot(vec4(viewPosition, 1.0), data.clipPlane) : 1.0;
-    if ((data.lighting.z & 1u) == 0u)
+    if (materialShader == 1u || materialShader == 2u || (data.lighting.z & 1u) == 0u)
         return;
 
     vec3 position = viewPosition;

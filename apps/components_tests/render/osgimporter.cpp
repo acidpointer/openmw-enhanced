@@ -13,6 +13,7 @@
 
 #include <osg/AlphaFunc>
 #include <osg/BlendFunc>
+#include <osg/ColorMask>
 #include <osg/Geometry>
 #include <osg/Image>
 #include <osg/Material>
@@ -95,6 +96,184 @@ namespace
         result.getUniform("value")->get(value);
         EXPECT_EQ(value, 3);
         EXPECT_FALSE(result.getMode(GL_DEPTH_TEST) & osg::StateAttribute::ON);
+    }
+
+    TEST(RenderStateView, ProtectedIntermediateStateResetsAnAncestorsOverride)
+    {
+        osg::ref_ptr<osg::StateSet> root = new osg::StateSet, middle = new osg::StateSet, leaf = new osg::StateSet;
+        root->addUniform(new osg::Uniform("value", 1), osg::StateAttribute::OVERRIDE);
+        middle->addUniform(new osg::Uniform("value", 2), osg::StateAttribute::PROTECTED);
+        leaf->addUniform(new osg::Uniform("value", 3));
+        root->setMode(GL_DEPTH_TEST, osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+        middle->setMode(GL_DEPTH_TEST, osg::StateAttribute::OFF | osg::StateAttribute::PROTECTED);
+        RenderAssets::OsgStateView a(nullptr, root), b(&a, middle), c(&b, leaf);
+        int value = 0;
+        ASSERT_TRUE(c.getUniform("value")->get(value));
+        EXPECT_EQ(value, 3);
+        EXPECT_EQ(c.getMode(GL_DEPTH_TEST), osg::StateAttribute::PROTECTED);
+        const auto snapshot = c.snapshot();
+        EXPECT_EQ(snapshot.getUniform("value"), c.getUniform("value"));
+        EXPECT_EQ(snapshot.getMode(GL_DEPTH_TEST), c.getMode(GL_DEPTH_TEST));
+        // Borrowing never registers an OSG parent or owns a source node.
+        EXPECT_EQ(leaf->getUniform("value")->getNumParents(), 1u);
+        leaf->getUniform("value")->set(4);
+        c.getUniform("value")->get(value);
+        EXPECT_EQ(value, 4);
+    }
+
+    TEST(RenderStateView, TextureUnitsRespectInheritedOverrideAndProtectedBindings)
+    {
+        osg::ref_ptr<osg::StateSet> root = new osg::StateSet, child = new osg::StateSet;
+        osg::ref_ptr<osg::Texture2D> first = new osg::Texture2D, second = new osg::Texture2D;
+        root->setTextureAttribute(3, first, osg::StateAttribute::OVERRIDE);
+        child->setTextureAttribute(3, second);
+        RenderAssets::OsgStateView a(nullptr, root), b(&a, child);
+        EXPECT_EQ(b.textureUnits(), 4u);
+        EXPECT_EQ(b.getTextureAttribute(3, osg::StateAttribute::TEXTURE), first.get());
+        child->setTextureAttribute(3, second, osg::StateAttribute::PROTECTED);
+        b.bind(&a, child);
+        EXPECT_EQ(b.getTextureAttribute(3, osg::StateAttribute::TEXTURE), second.get());
+    }
+
+    TEST(RenderStateView, MemoizedBindingsReadLiveValuesAndInvalidateAtFrameBind)
+    {
+        osg::ref_ptr<osg::StateSet> root = new osg::StateSet, child = new osg::StateSet;
+        osg::ref_ptr<osg::Uniform> first = new osg::Uniform("alpha", .5f);
+        root->addUniform(first, osg::StateAttribute::OVERRIDE);
+        child->addUniform(new osg::Uniform("alpha", .2f));
+        root->setMode(GL_BLEND, osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+        RenderAssets::OsgStateView a(nullptr, root), b(&a, child);
+        EXPECT_EQ(b.getUniform("alpha"), first.get());
+        EXPECT_EQ(b.getUniform("waterSurface"), nullptr);
+        EXPECT_TRUE(b.getMode(GL_BLEND) & osg::StateAttribute::ON);
+        EXPECT_EQ(b.getAttribute(osg::StateAttribute::COLORMASK), nullptr);
+        first->set(.75f);
+        float alpha = 0;
+        ASSERT_TRUE(b.getUniform("alpha")->get(alpha));
+        EXPECT_FLOAT_EQ(alpha, .75f);
+
+        osg::ref_ptr<osg::Uniform> replacement = new osg::Uniform("alpha", .3f);
+        child->addUniform(replacement, osg::StateAttribute::PROTECTED);
+        root->addUniform(new osg::Uniform("waterSurface", true));
+        child->setMode(GL_BLEND, osg::StateAttribute::OFF | osg::StateAttribute::PROTECTED);
+        osg::ref_ptr<osg::ColorMask> mask = new osg::ColorMask(false, false, false, false);
+        root->setAttribute(mask);
+        a.bind(nullptr, root);
+        b.bind(&a, child);
+        EXPECT_EQ(b.getUniform("alpha"), replacement.get());
+        EXPECT_EQ(b.getUniform("waterSurface"), root->getUniform("waterSurface"));
+        EXPECT_FALSE(b.getMode(GL_BLEND) & osg::StateAttribute::ON);
+        EXPECT_EQ(b.getAttribute(osg::StateAttribute::COLORMASK), mask.get());
+        EXPECT_EQ(b.getUniform("alpha"), b.snapshot().getUniform("alpha"));
+        osg::ref_ptr<osg::StateSet> descendant = new osg::StateSet;
+        descendant->addUniform(new osg::Uniform("alpha", .4f));
+        RenderAssets::OsgStateView c(&b, descendant);
+        EXPECT_EQ(c.getUniform("alpha"), descendant->getUniform("alpha"));
+        EXPECT_EQ(c.getMode(GL_BLEND), b.getMode(GL_BLEND));
+        EXPECT_EQ(first->getNumParents(), 1u);
+    }
+
+    TEST(RenderStateView, PreparedNativeSlotsMatchNamedBindingsAndRetainOverrideRules)
+    {
+        using RenderAssets::NativeUniform;
+        osg::ref_ptr<osg::StateSet> root = new osg::StateSet, middle = new osg::StateSet, leaf = new osg::StateSet;
+        root->addUniform(new osg::Uniform("alpha", .8f), osg::StateAttribute::OVERRIDE);
+        middle->addUniform(new osg::Uniform("alpha", .4f), osg::StateAttribute::PROTECTED);
+        leaf->addUniform(new osg::Uniform("alpha", .2f));
+        root->addUniform(new osg::Uniform("sun.diffuse", osg::Vec4f(1, 2, 3, 1)));
+        root->addUniform(new osg::Uniform("projectionMatrix", osg::Matrixf::scale(2, 3, 4)));
+        root->addUniform(new osg::Uniform("effectCustomValue", 17.f));
+        for (unsigned unit : { 0u, 3u, 7u })
+        {
+            const auto name = "texMat" + std::to_string(unit);
+            root->addUniform(new osg::Uniform(name.c_str(), osg::Matrixf::scale(unit + 1, 1, 1)));
+        }
+        RenderAssets::OsgStateView a(nullptr, root), b(&a, middle), c(&b, leaf);
+        c.prepareNativeUniforms();
+        EXPECT_EQ(c.getUniform(NativeUniform::Alpha), leaf->getUniform("alpha"));
+        EXPECT_EQ(c.getUniform(NativeUniform::SunDiffuse), root->getUniform("sun.diffuse"));
+        EXPECT_EQ(c.getUniform(NativeUniform::ProjectionMatrix), root->getUniform("projectionMatrix"));
+        EXPECT_EQ(c.getUniform("effectCustomValue"), root->getUniform("effectCustomValue"));
+        EXPECT_EQ(c.getUniform(NativeUniform::WaterSurface), nullptr);
+        EXPECT_EQ(c.getUniform(NativeUniform::Count), nullptr);
+        for (unsigned unit : { 0u, 3u, 7u })
+            EXPECT_FLOAT_EQ(RenderAssets::textureTransform(c, unit)[0], unit + 1);
+        leaf->getUniform("alpha")->set(.3f);
+        float alpha = 0;
+        ASSERT_TRUE(c.getUniform(NativeUniform::Alpha)->get(alpha));
+        EXPECT_FLOAT_EQ(alpha, .3f);
+        root->addUniform(new osg::Uniform("waterSurface", true));
+        a.bind(nullptr, root);
+        b.bind(&a, middle);
+        c.bind(&b, leaf);
+        c.prepareNativeUniforms();
+        EXPECT_EQ(c.getUniform(NativeUniform::WaterSurface), root->getUniform("waterSurface"));
+        EXPECT_EQ(c.getUniform(NativeUniform::Alpha), c.snapshot().getUniform("alpha"));
+        EXPECT_EQ(RenderAssets::nativeUniform(*root, NativeUniform::SunDiffuse), root->getUniform("sun.diffuse"));
+    }
+
+    TEST(RenderStateView, ColorlessOcclusionProxiesKeepTheirInheritedMask)
+    {
+        osg::ref_ptr<osg::StateSet> parent = new osg::StateSet, child = new osg::StateSet;
+        osg::ref_ptr<osg::ColorMask> hidden = new osg::ColorMask(false, false, false, false);
+        parent->setAttributeAndModes(hidden);
+        RenderAssets::OsgStateView a(nullptr, parent), b(&a, child);
+        EXPECT_EQ(b.getAttribute(osg::StateAttribute::COLORMASK), hidden.get());
+    }
+
+    TEST(RenderMeshStream, ByteColorsRetainExactChannelsAndFloatingAlpha)
+    {
+        osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry;
+        osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array(3);
+        (*vertices)[1].x() = 1;
+        (*vertices)[2].y() = 1;
+        osg::ref_ptr<osg::Vec4ubArray> colors = new osg::Vec4ubArray(3);
+        (*colors)[0].set(17, 43, 71, 102);
+        (*colors)[1].set(255, 0, 128, 17);
+        (*colors)[2].set(0, 255, 0, 255);
+        geometry->setVertexArray(vertices);
+        geometry->setColorArray(colors, osg::Array::BIND_PER_VERTEX);
+        geometry->addPrimitiveSet(new osg::DrawArrays(GL_TRIANGLES, 0, 3));
+        RenderAssets::OsgImporter importer;
+        const auto mesh = importer.importMesh(*geometry);
+        ASSERT_EQ(mesh->mVertices.size(), 3u);
+        EXPECT_EQ(mesh->mVertices[0].mColor, (std::array<std::uint8_t, 4>{ 17, 43, 71, 102 }));
+        EXPECT_FLOAT_EQ(mesh->mVertices[0].mAlpha, .4f);
+        EXPECT_EQ(mesh->mVertices[1].mColor, (std::array<std::uint8_t, 4>{ 255, 0, 128, 17 }));
+        EXPECT_FLOAT_EQ(mesh->mVertices[1].mAlpha, static_cast<float>(17.0 / 255.0));
+    }
+
+    TEST(RenderMeshStream, PoseFastPathStillPicksUpChangedUvAndColors)
+    {
+        osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry;
+        const std::array<osg::Vec3f, 3> p{ osg::Vec3(0, 0, 0), osg::Vec3(1, 0, 0), osg::Vec3(0, 1, 0) };
+        const std::array<osg::Vec2f, 3> t{ osg::Vec2(0, 0), osg::Vec2(1, 0), osg::Vec2(0, 1) };
+        osg::ref_ptr<osg::Vec3Array> positions = new osg::Vec3Array(p.begin(), p.end());
+        osg::ref_ptr<osg::Vec2Array> uv = new osg::Vec2Array(t.begin(), t.end());
+        osg::ref_ptr<osg::Vec4Array> colors = new osg::Vec4Array(1);
+        (*colors)[0].set(1, 0, 0, 1);
+        geometry->setVertexArray(positions);
+        geometry->setTexCoordArray(0, uv);
+        geometry->setColorArray(colors, osg::Array::BIND_OVERALL);
+        geometry->addPrimitiveSet(new osg::DrawArrays(GL_TRIANGLES, 0, 3));
+        RenderAssets::OsgImporter importer;
+        auto stream = importer.importMeshStream(*geometry);
+        (*positions)[1].z() = 2;
+        positions->dirty();
+        importer.updateMeshStream(*geometry, stream);
+        EXPECT_FLOAT_EQ(stream.mVertices[1].mPosition[2], 2);
+        (*uv)[1].x() = .25f;
+        uv->dirty();
+        (*colors)[0].set(0, 1, 0, 1);
+        colors->dirty();
+        importer.updateMeshStream(*geometry, stream);
+        EXPECT_FLOAT_EQ(stream.mVertices[1].mUV[0], .25f);
+        EXPECT_EQ(stream.mVertices[1].mColor, (std::array<std::uint8_t, 4>{ 0, 255, 0, 255 }));
+        (*positions)[1].z() = 4;
+        positions->dirty();
+        importer.updateMeshStream(*geometry, stream);
+        EXPECT_FLOAT_EQ(stream.mVertices[1].mPosition[2], 4);
+        EXPECT_FLOAT_EQ(stream.mVertices[1].mUV[0], .25f);
     }
 
     TEST(RenderProjection, FirstPersonDepthCanBeReadInTheWorldProjection)
@@ -197,6 +376,8 @@ namespace
         clone->setVertexArray(new osg::Vec3Array(*static_cast<const osg::Vec3Array*>(original->getVertexArray())));
         EXPECT_NE(key.mWords, RenderAssets::meshKey(*clone, 0).mWords);
         original->getVertexArray()->dirty();
+        EXPECT_TRUE(key.alive());
+        EXPECT_FALSE(key.current());
         EXPECT_NE(key.mWords, RenderAssets::meshKey(*original, 0).mWords);
     }
     TEST(RenderMeshKey, DoesNotKeepSourceArraysAlive)
@@ -208,6 +389,34 @@ namespace
             EXPECT_TRUE(key.alive());
         }
         EXPECT_FALSE(key.alive());
+    }
+
+    TEST(RenderMeshImport, MultiDrawStripsRestartTopologyAtEachRange)
+    {
+        auto geometry = triangle();
+        osg::ref_ptr<osg::MultiDrawArrays> ranges = new osg::MultiDrawArrays(GL_TRIANGLE_STRIP);
+        ranges->setFirsts({ 0, 1 });
+        ranges->setCounts({ 3, 3 });
+        geometry->setPrimitiveSet(0, ranges);
+        RenderAssets::OsgImporter importer;
+        const auto imported = importer.importMesh(*geometry);
+        ASSERT_EQ(imported->mVertices.size(), 4u);
+        EXPECT_EQ(imported->mIndices, (std::vector<std::uint32_t>{ 0, 1, 2, 1, 2, 3 }));
+        ranges->setCounts({ 3, 4 });
+        EXPECT_THROW(importer.importMesh(*geometry), std::invalid_argument);
+    }
+
+    TEST(RenderMeshImport, PerSetChannelsRetainIndependentVerticesAcrossDrawRanges)
+    {
+        auto geometry = triangle();
+        geometry->addPrimitiveSet(new osg::DrawArrays(GL_TRIANGLES, 0, 3));
+        const std::array<osg::Vec4f, 2> colors{ osg::Vec4f(1, 0, 0, 1), osg::Vec4f(0, 1, 0, 1) };
+        geometry->setColorArray(new osg::Vec4Array(colors.begin(), colors.end()), osg::Array::BIND_PER_PRIMITIVE_SET);
+        RenderAssets::OsgImporter importer;
+        const auto imported = importer.importMesh(*geometry);
+        ASSERT_EQ(imported->mVertices.size(), 6u);
+        EXPECT_EQ(imported->mVertices[0].mColor, (std::array<std::uint8_t, 4>{ 255, 0, 0, 255 }));
+        EXPECT_EQ(imported->mVertices[3].mColor, (std::array<std::uint8_t, 4>{ 0, 255, 0, 255 }));
     }
 
     TEST(RenderMeshStream, UpdatesPoseWithoutChangingTopologyOrAllocatingVertexStorage)
@@ -478,6 +687,57 @@ namespace
         const std::array<float, 6> expectedMask{ .8f, 0, .1f, 0, .8f, .1f };
         EXPECT_EQ(RenderAssets::textureTransform(*state, 0), expectedTile);
         EXPECT_EQ(RenderAssets::textureTransform(*state, 1), expectedMask);
+    }
+
+    TEST(RenderImageImport, BorrowsPackedLiveRgbaWithoutCopyingOrFlippingRows)
+    {
+        osg::ref_ptr<osg::Image> source = new osg::Image;
+        source->allocateImage(1, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, 4);
+        source->setOrigin(osg::Image::BOTTOM_LEFT);
+        source->data()[0] = 17;
+        std::vector<Render::TextureLevel> levels;
+        const auto view = RenderAssets::OsgImporter::borrowTexture(*source, levels);
+        ASSERT_TRUE(view);
+        ASSERT_EQ(levels.size(), 1u);
+        EXPECT_EQ(levels[0].mBytes.data(), reinterpret_cast<const std::byte*>(source->data()));
+        EXPECT_EQ(levels[0].mBytes.size(), 8u);
+        EXPECT_EQ(levels[0].mBytes[0], std::byte{ 17 });
+        EXPECT_TRUE(view->mGenerateMipmaps);
+        source->data()[0] = 23;
+        EXPECT_EQ(levels[0].mBytes[0], std::byte{ 23 });
+        const auto noMips = RenderAssets::OsgImporter::borrowTexture(*source, levels, false);
+        ASSERT_TRUE(noMips);
+        EXPECT_FALSE(noMips->mGenerateMipmaps);
+    }
+
+    TEST(RenderImageImport, BorrowingFallsBackForConvertedChannelsAndPaddedRows)
+    {
+        osg::ref_ptr<osg::Image> source = new osg::Image;
+        std::vector<Render::TextureLevel> levels;
+        source->allocateImage(1, 2, 1, GL_BGR, GL_UNSIGNED_BYTE, 4);
+        EXPECT_FALSE(RenderAssets::OsgImporter::borrowTexture(*source, levels));
+        source->allocateImage(1, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, 8);
+        EXPECT_FALSE(RenderAssets::OsgImporter::borrowTexture(*source, levels));
+        EXPECT_TRUE(levels.empty());
+    }
+
+    TEST(RenderImageImport, BorrowsCompressedMipBytesAndPreservesSrgb)
+    {
+        osg::ref_ptr<osg::Image> source = new osg::Image;
+        auto* bytes = new unsigned char[24]{};
+        source->setImage(4, 4, 1, GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT,
+            GL_UNSIGNED_BYTE, bytes, osg::Image::USE_NEW_DELETE);
+        source->setMipmapLevels({ 8, 16 });
+        std::vector<Render::TextureLevel> levels;
+        const auto view = RenderAssets::OsgImporter::borrowTexture(*source, levels);
+        ASSERT_TRUE(view);
+        ASSERT_EQ(levels.size(), 3u);
+        EXPECT_TRUE(view->mSrgb);
+        EXPECT_EQ(view->mFormat, Render::TextureFormat::BC1RGBA);
+        EXPECT_FALSE(view->mGenerateMipmaps);
+        EXPECT_EQ(levels[2].mBytes.data(), reinterpret_cast<const std::byte*>(bytes + 16));
+        EXPECT_EQ(levels[2].mWidth, 1u);
+        EXPECT_EQ(levels[2].mBytes.size(), 8u);
     }
 
     TEST(RenderImageImport, CopiesPackedBGRRowsWithoutIncludingPadding)

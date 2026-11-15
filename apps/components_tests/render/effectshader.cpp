@@ -7,6 +7,21 @@
 
 namespace
 {
+    TEST(NativeEffectShader, CancelledJobsDoNotLaunchACompiler)
+    {
+        std::stop_source stop;
+        stop.request_stop();
+        try
+        {
+            RenderAssets::compileEffectShader("/nonexistent/compiler", "", "", {}, stop.get_token());
+            FAIL() << "A cancelled job must not run";
+        }
+        catch (const std::runtime_error& error)
+        {
+            EXPECT_STREQ(error.what(), "Effect shader compilation cancelled");
+        }
+    }
+
     struct Module
     {
         std::vector<std::uint32_t> words{ 0x07230203, 0x00010300, 0, 128, 0 };
