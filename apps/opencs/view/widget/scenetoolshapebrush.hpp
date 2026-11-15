@@ -20,6 +20,8 @@ class QPoint;
 class QPushButton;
 class QWidget;
 
+Q_MOC_INCLUDE("QDropEvent")
+
 namespace CSMDoc
 {
     class Document;

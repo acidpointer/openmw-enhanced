@@ -31,6 +31,10 @@ namespace Process
 
         void killProcess();
 
+    signals:
+        // Let an owning window restore itself before the failure dialog opens.
+        void processFailed();
+
     private:
         QProcess* mProcess;
 

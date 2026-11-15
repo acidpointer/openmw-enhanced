@@ -15,7 +15,20 @@ endif()
 add_library(maskedoc STATIC ${MOC_SOURCES})
 target_include_directories(maskedoc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # Keep separately targeted ISA implementations isolated during link optimization.
-set_property(TARGET maskedoc PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+# Release-specific IPO takes precedence over the generic target property, and
+# makepkg can independently inject -flto through CXXFLAGS.
+set_target_properties(maskedoc PROPERTIES
+    INTERPROCEDURAL_OPTIMIZATION FALSE
+    INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
+    INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE
+    INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL FALSE
+    INTERPROCEDURAL_OPTIMIZATION_DEBUG FALSE
+)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT MSVC)
+    # The SIMD lane accessors reinterpret vector storage through scalar arrays.
+    # Preserve that aliasing contract without weakening optimizations elsewhere.
+    target_compile_options(maskedoc PRIVATE -fno-lto -fno-strict-aliasing)
+endif()
 
 if(MOC_PROCESSOR MATCHES "^(x86_64|amd64|x64|x86|i[3-6]86)$")
     if(MSVC)

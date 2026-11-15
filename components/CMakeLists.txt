@@ -310,7 +310,7 @@ add_component_dir (esm4
 
 add_component_dir (misc
     barrier budgetmeasurement color compression constants convert coordinateconverter display endianness float16 frameratelimiter framestats
-    guarded hostenvironment math mathutil messageformatparser notnullptr objectpool osgpluginchecker osguservalues progressreporter resourcehelpers
+    guarded hostenvironment math mathutil memoryallocator messageformatparser notnullptr objectpool osgpluginchecker osguservalues progressreporter resourcehelpers
     rng strongtypedef thread timeconvert timer tuplehelpers tuplemeta utf8stream weakcache windows
     )
 
@@ -607,6 +607,10 @@ endif()
 
 add_library(components STATIC ${COMPONENT_FILES})
 target_link_libraries(components openmw-render-core)
+if(OPENMW_USE_MIMALLOC)
+    target_compile_definitions(components PRIVATE OPENMW_USE_MIMALLOC)
+    target_include_directories(components SYSTEM PRIVATE "${OPENMW_MIMALLOC_SOURCE_DIR}/include")
+endif()
 
 if (ANDROID)
     set_property(TARGET components PROPERTY POSITION_INDEPENDENT_CODE ON)

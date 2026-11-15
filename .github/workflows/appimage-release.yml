@@ -1,4 +1,4 @@
-name: AppImage release
+name: Arch Linux release
 
 on:
   release:
@@ -15,10 +15,15 @@ defaults:
   run:
     shell: bash
 
+# GitHub does not offer an Arch-hosted runner. The hosted VM only starts these
+# official Arch containers; dependency installation, builds and publishing all
+# execute in Arch. No Ubuntu packages, PPAs or SDKs are used.
+
 jobs:
   classify:
     name: Validate release and classify tag
     runs-on: ubuntu-24.04
+    container: archlinux:base-devel
     timeout-minutes: 5
     permissions:
       contents: write
@@ -28,6 +33,9 @@ jobs:
       prerelease: ${{ steps.tag.outputs.prerelease }}
       appimage: ${{ steps.tag.outputs.appimage }}
     steps:
+      - name: Install Arch release tools
+        run: pacman -Syu --noconfirm --needed archlinux-keyring github-cli jq python
+
       - name: Accept stable and release-candidate tags
         id: tag
         run: |
@@ -80,15 +88,20 @@ jobs:
           fi
 
   build:
-    name: Build Linux x86_64 AppImage
+    name: Build Arch package and AppImage from one compilation
     needs: classify
     if: needs.classify.outputs.build == 'true'
     runs-on: ubuntu-24.04
+    container: archlinux:base-devel
     timeout-minutes: 180
     env:
       CMAKE_BUILD_TYPE: Release
+      IN_OPENMW_ENHANCED_CONTAINER: '1'
       APPIMAGE_NAME: ${{ needs.classify.outputs.appimage }}
     steps:
+      - name: Install checkout tools in Arch
+        run: pacman -Syu --noconfirm --needed archlinux-keyring git ca-certificates
+
       - name: Check out the released commit
         uses: actions/checkout@v6
         with:
@@ -96,21 +109,39 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Make room for Docker and the CMake tree
+      - name: Install the fork's Arch build dependencies
+        run: ./enhanced/scripts/install-arch-deps.sh appimage
+
+      - name: Prepare an unprivileged package builder
         run: |
-          # These SDKs are unused by the Linux Docker build on this disposable runner.
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          df -h .
+          useradd --create-home --user-group builder
+          install -d -o builder -g builder .build .build/archlinux .build/dist
+          runuser -u builder -- git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
-      - name: Build and package with the fork's Docker script
-        run: ./enhanced/scripts/build-appimage.sh
+      - name: Build the Arch package
+        run: runuser -u builder -- ./enhanced/scripts/build-archlinux.sh --no-install
 
-      - name: Prepare versioned AppImage and checksum
+      - name: Stage the same build as an AppImage
+        run: |
+          build_dir="${GITHUB_WORKSPACE}/.build/archlinux/makepkg/src/build"
+          app_dir="${GITHUB_WORKSPACE}/.build/archlinux/AppDir"
+          DESTDIR="${app_dir}" cmake --install "${build_dir}"
+          BUILD_DIR="${build_dir}" DIST_DIR="${GITHUB_WORKSPACE}/.build/dist" \
+            ./enhanced/scripts/package-appimage.sh "${app_dir}"
+
+      - name: Prepare versioned release files and checksums
         working-directory: .build/dist
         run: |
           test -s OpenMW-Enhanced-x86_64.AppImage
           cp -- OpenMW-Enhanced-x86_64.AppImage "${APPIMAGE_NAME}"
           sha256sum "${APPIMAGE_NAME}" > "${APPIMAGE_NAME}.sha256"
+          shopt -s nullglob
+          packages=(openmw-enhanced-git-*.pkg.tar.zst)
+          if (( ${#packages[@]} != 1 )); then
+            echo 'Expected exactly one Arch package.' >&2
+            exit 1
+          fi
+          sha256sum "${APPIMAGE_NAME}" "${APPIMAGE_NAME}.sha256" "${packages[@]}" > SHA256SUMS
 
       - name: Store release files as a workflow artifact
         uses: actions/upload-artifact@v6
@@ -119,18 +150,21 @@ jobs:
           path: |
             .build/dist/${{ needs.classify.outputs.appimage }}
             .build/dist/${{ needs.classify.outputs.appimage }}.sha256
+            .build/dist/openmw-enhanced-git-*.pkg.tar.zst
+            .build/dist/SHA256SUMS
           if-no-files-found: error
           # A full rerun uses the same name within the same workflow run.
           overwrite: true
-          # The two explicitly selected files live under the hidden .build directory.
+          # Release files live under the hidden .build directory.
           include-hidden-files: true
           compression-level: 0
           retention-days: 30
 
   publish:
-    name: Attach AppImage to the existing release
+    name: Attach Arch package and AppImage to the existing release
     needs: [classify, build]
     runs-on: ubuntu-24.04
+    container: archlinux:base-devel
     timeout-minutes: 10
     permissions:
       contents: write
@@ -143,6 +177,9 @@ jobs:
       APPIMAGE_NAME: ${{ needs.classify.outputs.appimage }}
       EXPECTED_SHA: ${{ github.sha }}
     steps:
+      - name: Install Arch publishing tools
+        run: pacman -Syu --noconfirm --needed archlinux-keyring github-cli jq curl
+
       - name: Download the built release files
         uses: actions/download-artifact@v7
         with:
@@ -152,7 +189,23 @@ jobs:
       - name: Verify release identity and publish missing assets
         working-directory: dist
         run: |
-          sha256sum --check "${APPIMAGE_NAME}.sha256"
+          mapfile -t release_files < <(awk '{print $2}' SHA256SUMS)
+          if (( ${#release_files[@]} != 3 )) \
+            || [[ "${release_files[0]}" != "${APPIMAGE_NAME}" \
+               || "${release_files[1]}" != "${APPIMAGE_NAME}.sha256" \
+               || "${release_files[2]}" != openmw-enhanced-git-*.pkg.tar.zst ]]; then
+            echo 'Release manifest is incomplete or out of order.' >&2
+            exit 1
+          fi
+          for asset in "${release_files[@]}"; do
+            case "${asset}" in
+              "${APPIMAGE_NAME}"|"${APPIMAGE_NAME}.sha256"|openmw-enhanced-git-*.pkg.tar.zst) ;;
+              *) echo "Unexpected release filename: ${asset}" >&2; exit 1 ;;
+            esac
+            [[ "${asset}" != */* ]] || exit 1
+          done
+          sha256sum --check SHA256SUMS
+          release_files+=(SHA256SUMS)
           release="$(gh api "repos/${GH_REPO}/releases/${RELEASE_ID}")"
           if ! jq -e --arg tag "${RELEASE_TAG}" --argjson prerelease "${PRERELEASE}" \
             '.tag_name == $tag and .draft == false and .immutable != true and .prerelease == $prerelease' \
@@ -184,7 +237,7 @@ jobs:
           comparison_file="$(mktemp)"
           trap 'rm -f -- "${comparison_file}"' EXIT
           pending_assets=()
-          for asset in "${APPIMAGE_NAME}" "${APPIMAGE_NAME}.sha256"; do
+          for asset in "${release_files[@]}"; do
             existing="$(jq -c --arg name "${asset}" '.[] | select(.name == $name)' <<< "${assets}")"
             if [[ -n "${existing}" ]]; then
               asset_id="$(jq -r '.id' <<< "${existing}")"

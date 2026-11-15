@@ -52,12 +52,17 @@ namespace Fx
 
         std::string getName() const { return mName; }
 
+        // Only the generated vertex shader guarantees coverage of the entire
+        // viewport. Custom vertex stages may move or clip the fullscreen mesh.
+        bool usesDefaultVertexShader() const { return mDefaultVertex; }
+
         void dirty();
 
     private:
         std::string getPassHeader(Technique& technique, std::string_view preamble, bool fragOut = false);
 
         bool mCompiled;
+        bool mDefaultVertex = false;
 
         osg::ref_ptr<osg::Shader> mVertex;
         osg::ref_ptr<osg::Shader> mFragment;

@@ -16,6 +16,9 @@ namespace CSMTools
     class Search;
 }
 
+// Signal metadata requires the complete argument type.
+Q_MOC_INCLUDE("apps/opencs/model/tools/search.hpp")
+
 namespace CSVTools
 {
     class SearchBox : public QWidget

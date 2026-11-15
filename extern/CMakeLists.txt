@@ -3,6 +3,10 @@
 set_directory_properties(PROPERTIES EXCLUDE_FROM_ALL on)
 set(CMAKE_CXX_CLANG_TIDY "")
 
+if(OPENMW_USE_MIMALLOC)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/mimalloc.cmake")
+endif()
+
 if(NOT OPENMW_USE_SYSTEM_BULLET)
 
     set(BUILD_BULLET3 OFF CACHE BOOL "")

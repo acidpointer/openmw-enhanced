@@ -14,6 +14,8 @@ class QModelIndex;
 class QObject;
 class QWidget;
 
+Q_MOC_INCLUDE("QDropEvent")
+
 namespace CSMDoc
 {
     class Document;

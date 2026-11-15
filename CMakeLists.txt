@@ -131,6 +131,7 @@ endif(EXISTS ${PROJECT_SOURCE_DIR}/.git)
 include(OpenMWMacros)
 include(WholeArchive)
 include(escape_regex_control_characters)
+include(OpenMWMimalloc)
 
 # doxygen main page
 
@@ -1272,4 +1273,12 @@ if (USE_QT)
             DEPENDS ${QM_FILES}
             COMMENT "Copy *.qm files to resources folder")
     endif ()
+endif()
+
+# All OpenMW executables, including tools and optional tests, use one static
+# process allocator. Shared renderer/plugin targets deliberately receive none.
+if(OPENMW_USE_MIMALLOC)
+    openmw_apply_process_allocator("${OpenMW_SOURCE_DIR}")
+    install(FILES "${OPENMW_MIMALLOC_SOURCE_DIR}/LICENSE"
+        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/licenses/openmw/mimalloc")
 endif()

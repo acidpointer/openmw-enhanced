@@ -1,6 +1,6 @@
 #version 450
 
-// Surface, water, sky, distortion, overlay. Fixed when creating a pipeline,
+// Surface, water, sky, distortion, overlay, solid surface. Fixed when creating a pipeline,
 // allowing the driver to eliminate unrelated work and varyings.
 layout(constant_id = 0) const uint materialShader = 0u;
 
@@ -119,30 +119,45 @@ void main()
 
     vec3 position = viewPosition;
     vec3 normal = viewNormal;
-    vec3 eye = safeNormal(-position);
+    bool hasSpecular = data.specular.w > 0.0 && any(notEqual(specular, vec3(0.0)));
+    vec3 eye = hasSpecular ? safeNormal(-position) : vec3(0.0);
     vec3 direction = safeNormal(data.sunPosition.xyz);
     vec3 lit = ambient * data.sunAmbient.rgb + emission;
     lit += diffuse.rgb * data.sunDiffuse.rgb * max(dot(normal, direction), 0.0);
-    vec3 highlights = specular * data.sunSpecular.rgb * specularTerm(normal, direction, eye, data.specular.w);
+    vec3 highlights = vec3(0.0);
+    if (hasSpecular && any(notEqual(data.sunSpecular.rgb, vec3(0.0))))
+        highlights = specular * data.sunSpecular.rgb * specularTerm(normal, direction, eye, data.specular.w);
+    bool classic = (data.lighting.z & 2u) != 0u;
     for (uint i = 0u; i < data.lighting.y; ++i)
     {
-        PointLight light = lights[data.lighting.x + i];
-        vec3 delta = light.position.xyz - position;
-        float distance = length(delta);
-        bool classic = (data.lighting.z & 2u) != 0u;
-        if (!classic && distance >= light.attenuation.w)
+        uint lightIndex = data.lighting.x + i;
+        vec4 falloff = lights[lightIndex].attenuation;
+        vec3 delta = lights[lightIndex].position.xyz - position;
+        float distanceSquared = dot(delta, delta);
+        // Reject lights outside their radius before computing a square root
+        // and reading the rest of their shading data. Classic falloff has no
+        // finite radius and must retain its original attenuation behavior.
+        if (!classic && (falloff.w <= 0.0 || distanceSquared >= falloff.w * falloff.w))
             continue;
+        float distance = sqrt(distanceSquared);
         vec3 toLight = delta / max(distance, 1e-6);
-        float attenuation = 1.0 / max(dot(light.attenuation.xyz, vec3(1.0, distance, distance * distance)), 1e-6);
+        float attenuation = 1.0 / max(dot(falloff.xyz, vec3(1.0, distance, distance * distance)), 1e-6);
         if (!classic)
         {
-            float fade = clamp((distance / max(light.attenuation.w, 1e-6) - 0.75) / 0.25, 0.0, 1.0);
+            float fade = clamp((distance / max(falloff.w, 1e-6) - 0.75) / 0.25, 0.0, 1.0);
             fade = 1.0 - fade * fade;
             attenuation *= fade * fade;
         }
         lit += attenuation
-            * (ambient * light.ambient.rgb + diffuse.rgb * light.diffuse.rgb * max(dot(normal, toLight), 0.0));
-        highlights += attenuation * specular * light.specular.rgb * specularTerm(normal, toLight, eye, data.specular.w);
+            * (ambient * lights[lightIndex].ambient.rgb
+                + diffuse.rgb * lights[lightIndex].diffuse.rgb * max(dot(normal, toLight), 0.0));
+        if (hasSpecular)
+        {
+            vec3 lightSpecular = lights[lightIndex].specular.rgb;
+            if (any(notEqual(lightSpecular, vec3(0.0))))
+                highlights += attenuation * specular * lightSpecular
+                    * specularTerm(normal, toLight, eye, data.specular.w);
+        }
     }
     color.rgb = max(lit, vec3(0.0)) * data.tint.rgb;
     specularColor = max(highlights, vec3(0.0)) * data.tint.rgb;

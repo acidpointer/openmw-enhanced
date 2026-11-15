@@ -1,6 +1,7 @@
 #version 450
 
 layout(constant_id = 0) const uint materialShader = 0u;
+layout(constant_id = 1) const bool writeNormals = true;
 
 layout(set = 0, binding = 0) uniform sampler2D diffuseMap;
 layout(set = 1, binding = 0) uniform sampler2D blendMap;
@@ -30,13 +31,17 @@ layout(location = 1) out vec4 outNormals;
 
 void main()
 {
-    if (materialShader != 4u && clipDistance < 0.0)
+    // Solid surfaces have no alpha test or clipping. Specializing away every
+    // discard lets the driver reject hidden fragments before running this
+    // shader, including the expensive texture and normal attachment work.
+    if (materialShader != 4u && materialShader != 5u && clipDistance < 0.0)
         discard;
     bool waterSurface = materialShader == 1u;
     vec4 sampled = texture(diffuseMap, waterSurface ? uv * 3.75 + skyMoon.z * vec2(-.015, -.005) : uv);
     vec4 result = sampled * color;
-    vec3 surfaceNormal = materialShader == 4u ? vec3(0.0, 0.0, 1.0)
-                                              : viewNormal * inversesqrt(max(dot(viewNormal, viewNormal), 1e-12));
+    vec3 surfaceNormal = vec3(0.0, 0.0, 1.0);
+    if (materialShader == 1u || (writeNormals && materialShader != 2u && materialShader != 4u))
+        surfaceNormal = viewNormal * inversesqrt(max(dot(viewNormal, viewNormal), 1e-12));
     if (materialShader == 1u)
     {
         // The water texture carries normals; reflected color has its own
@@ -71,7 +76,7 @@ void main()
         // replace transmission with an arbitrary opaque blue sheet.
         result = vec4(reflected, fresnel) * color;
     }
-    else if (materialShader == 0u && materialKind > 0.5 && materialKind < 1.5)
+    else if ((materialShader == 0u || materialShader == 5u) && materialKind > 0.5 && materialKind < 1.5)
         result.a = color.a * texture(blendMap, maskUV).a;
     else if (materialShader == 3u)
     {
@@ -109,7 +114,7 @@ void main()
     if (materialShader != 4u)
         result.rgb += specularColor;
     bool accepted = true;
-    switch (materialShader == 4u ? 0 : int(alphaPolicy.y))
+    switch (materialShader == 4u || materialShader == 5u ? 0 : int(alphaPolicy.y))
     {
         case 1:
             accepted = false;
@@ -142,5 +147,6 @@ void main()
         result.rgb = mix(result.rgb, fog.color.rgb, factor);
     }
     outColor = result;
-    outNormals = vec4(materialShader == 2u ? vec3(0.5) : surfaceNormal * 0.5 + 0.5, result.a);
+    if (writeNormals)
+        outNormals = vec4(materialShader == 2u ? vec3(0.5) : surfaceNormal * 0.5 + 0.5, result.a);
 }

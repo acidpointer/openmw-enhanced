@@ -36,6 +36,9 @@ namespace CSMDoc
     class Document;
 }
 
+// Signal and slot metadata requires the complete argument type.
+Q_MOC_INCLUDE("apps/opencs/model/doc/document.hpp")
+
 namespace CSVDoc
 {
     class ViewManager;

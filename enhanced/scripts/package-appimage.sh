@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APPDIR="${1:-/build/appimage/AppDir}"
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+require_arch_container
+APPDIR="${1:-${OPENMW_BUILD_ROOT:-/build}/appimage/on/AppDir}"
 DIST_DIR="${DIST_DIR:-/dist}"
-ROOT="/src"
+ROOT="$(enhanced_root)"
 BUILD_DIR="${BUILD_DIR:-$(dirname -- "${APPDIR}")/build}"
 LINUXDEPLOY="${LINUXDEPLOY:-/opt/linuxdeploy/linuxdeploy-x86_64.AppImage}"
+export QMAKE="${QMAKE:-/usr/bin/qmake6}"
 
 if [[ ! -x "${APPDIR}/usr/bin/openmw-launcher" ]]; then
     echo "Missing ${APPDIR}/usr/bin/openmw-launcher; build/install did not complete." >&2
     exit 1
 fi
+
+"${ROOT}/enhanced/scripts/check-static-allocator.sh" "${BUILD_DIR}" "${APPDIR}"
 
 mkdir -p \
     "${APPDIR}/usr/share/applications" \

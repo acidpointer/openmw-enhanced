@@ -9,6 +9,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cmath>
+#include <memory>
+
 namespace
 {
     struct TestCullVisitor : osgUtil::CullVisitor
@@ -145,6 +149,41 @@ namespace
         visitor.popModelViewMatrix();
         visitor.popProjectionMatrix();
         visitor.popViewport();
+    }
+
+    TEST(OcclusionQueryTest, everyRequestedSimdBackendRasterizesClippedSceneAtProductionResolution)
+    {
+        const osg::Matrixf projection(osg::Matrixd::perspective(90, 1, 1, 1000000));
+        const std::vector<osg::Vec3f> vertices{
+            { -8, -6, -10 }, { 8, -6, -10 }, { 8, 6, -10 }, { -8, 6, -10 },
+            // Long, thin triangles crossing screen edges exercise tight scanline
+            // traversal. The last triangle also crosses the near/camera planes.
+            { -100000, -100000, -30 }, { 100000, 100000, -30 }, { 100000, 100001, -30 },
+            { -100000, 100000, -30 }, { 100000, -100000, -30 }, { 100001, -100000, -30 },
+            { 100, 100, -30 }, { 200, 100, 0 }, { 100, 200, 1 },
+        };
+        const std::vector<unsigned int> indices{ 0, 1, 2, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+        for (const auto implementation : { MaskedOcclusionCulling::SSE2, MaskedOcclusionCulling::SSE41,
+                 MaskedOcclusionCulling::AVX2, MaskedOcclusionCulling::AVX512 })
+        {
+            SCOPED_TRACE(static_cast<int>(implementation));
+            std::unique_ptr<MaskedOcclusionCulling, decltype(&MaskedOcclusionCulling::Destroy)> rasterizer(
+                MaskedOcclusionCulling::Create(implementation), MaskedOcclusionCulling::Destroy);
+            ASSERT_NE(rasterizer, nullptr);
+            rasterizer->SetResolution(512, 256);
+            rasterizer->SetNearClipPlane(1);
+            rasterizer->ClearBuffer();
+            rasterizer->RenderTriangles(reinterpret_cast<const float*>(vertices.data()), indices.data(),
+                static_cast<int>(indices.size() / 3), projection.ptr(), MaskedOcclusionCulling::BACKFACE_NONE,
+                MaskedOcclusionCulling::CLIP_PLANE_ALL, MaskedOcclusionCulling::VertexLayout(12, 4, 8));
+            EXPECT_EQ(rasterizer->TestRect(-0.1f, -0.1f, 0.1f, 0.1f, 20), MaskedOcclusionCulling::OCCLUDED);
+            EXPECT_EQ(rasterizer->TestRect(-0.1f, -0.1f, 0.1f, 0.1f, 5), MaskedOcclusionCulling::VISIBLE);
+            std::vector<float> depth(512 * 256);
+            rasterizer->ComputePixelDepthBuffer(depth.data(), false);
+            EXPECT_TRUE(std::all_of(depth.begin(), depth.end(), [](float z) { return std::isfinite(z) && z >= 0; }));
+            rasterizer->ClearBuffer();
+            EXPECT_EQ(rasterizer->TestRect(-0.1f, -0.1f, 0.1f, 0.1f, 20), MaskedOcclusionCulling::VISIBLE);
+        }
     }
 
     TEST(OcclusionQueryTest, everyRequestedSimdBackendHasSafeCpuFallback)

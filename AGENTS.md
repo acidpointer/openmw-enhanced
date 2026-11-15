@@ -8,6 +8,7 @@ This repository is the actual OpenMW fork. Upstream OpenMW source lives at the r
 
 - OpenMW source files live at repository root.
 - `enhanced/`: Docker builds, AppImage packaging, project docs, patch catalog.
+- `archlinux/`: forked official Arch PKGBUILD, metadata and provenance.
 - `.build/`: generated CMake trees, ccache, AppDir staging, and AppImage output. Never commit it.
 
 ## I/O Budget
@@ -25,7 +26,7 @@ OpenMW builds and AppImage packaging are very I/O heavy. Keep tool usage scoped 
 
 ## Build
 
-Agents must not run builds, Docker image builds, AppImage packaging, or runtime
+Agents must not run builds, Docker image builds, makepkg package builds, AppImage packaging, or runtime
 verification. Ask the user to run build and runtime checks and report the results.
 Static source checks are allowed.
 
@@ -33,9 +34,12 @@ Static source checks are allowed.
 - Fetch upstream: `./enhanced/scripts/sync-openmw-upstream.sh`
 - Merge upstream into current fork branch: `./enhanced/scripts/sync-openmw-upstream.sh --merge`
 - Build AppImage: `./enhanced/scripts/build-appimage.sh`
+- Build Arch package as a normal user: `./enhanced/scripts/build-archlinux.sh`
 - Switch Bullet threading: `./enhanced/scripts/build-appimage.sh --bullet-threading off`
 
 Docker builds must keep host-mounted caches under `.build/` so rebuilds stay fast.
+The toolchain is Arch Linux; active caches live under `.build/archlinux/`.
+Only the explicit migration cleanup script may remove legacy Ubuntu caches.
 
 ## Compatibility Rules
 

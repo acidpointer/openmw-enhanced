@@ -85,6 +85,7 @@ namespace MWRender::Vulkan
         {
             VkRenderPass mClear = VK_NULL_HANDLE;
             VkRenderPass mLoad = VK_NULL_HANDLE;
+            VkRenderPass mOverwrite = VK_NULL_HANDLE;
         };
 
         struct Sampler
@@ -246,6 +247,7 @@ namespace MWRender::Vulkan
             Sky,
             Distortion,
             Overlay,
+            SolidSurface,
             Count
         };
         constexpr std::size_t PipelinesPerTarget = RasterKeys * static_cast<std::size_t>(MaterialShader::Count);
@@ -273,6 +275,7 @@ namespace MWRender::Vulkan
             std::shared_ptr<Effect> mEffect{};
             VkDescriptorSet mEffectDescriptor = VK_NULL_HANDLE;
             bool mPreserveWorldDepth = false;
+            bool mOverwrite = false;
         };
 
         struct InstanceData
@@ -403,8 +406,8 @@ namespace MWRender::Vulkan
             void destroySwapchain();
             void destroyWindowPipelines();
             void refreshSurface();
-            VkRenderPass createRenderPass(
-                VkFormat format, bool offscreen, bool clear, bool normals = false, bool depth = true);
+            VkRenderPass createRenderPass(VkFormat format, bool offscreen, bool clear, bool normals = false,
+                bool depth = true, bool overwrite = false);
             void copyWorldDepth(VkCommandBuffer commands, Image& target);
             void createPipeline(std::size_t index);
             void warmPipelines(std::size_t target);
@@ -557,6 +560,7 @@ namespace MWRender::Vulkan
                 {
                     vkDestroyRenderPass(mDevice, passes.mClear, nullptr);
                     vkDestroyRenderPass(mDevice, passes.mLoad, nullptr);
+                    vkDestroyRenderPass(mDevice, passes.mOverwrite, nullptr);
                 }
                 mDescriptorPools.clear();
                 mSamplers.clear();
@@ -837,7 +841,10 @@ namespace MWRender::Vulkan
                 mTargetPasses[i] = { createRenderPass(TargetVkFormats[i], true, true, hasNormals(targetFormat),
                                          Render::targetHasDepth(targetFormat)),
                     createRenderPass(TargetVkFormats[i], true, false, hasNormals(targetFormat),
-                        Render::targetHasDepth(targetFormat)) };
+                        Render::targetHasDepth(targetFormat)),
+                    Render::targetHasDepth(targetFormat)
+                        ? VK_NULL_HANDLE
+                        : createRenderPass(TargetVkFormats[i], true, false, false, false, true) };
             }
         }
 
@@ -1958,12 +1965,14 @@ namespace MWRender::Vulkan
         }
 
         VkRenderPass VulkanBackend::createRenderPass(
-            VkFormat format, bool offscreen, bool clear, bool normals, bool hasDepth)
+            VkFormat format, bool offscreen, bool clear, bool normals, bool hasDepth, bool overwrite)
         {
             std::array<VkAttachmentDescription, 3> attachments{};
             attachments[0].format = format;
             attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-            attachments[0].loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+            attachments[0].loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                : overwrite               ? VK_ATTACHMENT_LOAD_OP_DONT_CARE
+                                          : VK_ATTACHMENT_LOAD_OP_LOAD;
             attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -2035,7 +2044,10 @@ namespace MWRender::Vulkan
             }
             for (const auto blend : { Render::BlendMode::Opaque, Render::BlendMode::Alpha, Render::BlendMode::Additive,
                      Render::BlendMode::WeightedReplace, Render::BlendMode::PremultipliedAlpha })
+            {
                 warm(MaterialShader::Surface, blend);
+                warm(MaterialShader::SolidSurface, blend);
+            }
             warm(MaterialShader::Water, Render::BlendMode::Alpha);
             warm(MaterialShader::Sky, Render::BlendMode::Opaque);
             warm(MaterialShader::Sky, Render::BlendMode::Alpha);
@@ -2052,8 +2064,15 @@ namespace MWRender::Vulkan
         {
             const auto rasterKey = pipelineIndex % RasterKeys;
             const auto material = static_cast<std::uint32_t>((pipelineIndex % PipelinesPerTarget) / RasterKeys);
-            const VkSpecializationMapEntry materialEntry{ 0, 0, sizeof(material) };
-            const VkSpecializationInfo specialization{ 1, &materialEntry, sizeof(material), &material };
+            const auto targetGroup = pipelineIndex / PipelinesPerTarget;
+            const std::array<std::uint32_t, 2> constants{ material,
+                targetGroup && hasNormals(static_cast<Render::TargetFormat>(targetGroup - 1)) ? VK_TRUE : VK_FALSE };
+            const std::array<VkSpecializationMapEntry, 2> entries{ {
+                { 0, 0, sizeof(std::uint32_t) },
+                { 1, sizeof(std::uint32_t), sizeof(std::uint32_t) },
+            } };
+            const VkSpecializationInfo specialization{ static_cast<std::uint32_t>(entries.size()), entries.data(),
+                sizeof(constants), constants.data() };
             auto& modules = mShaderModules;
             std::array<VkPipelineShaderStageCreateInfo, 2> shaders{};
             const std::array<const char*, 2> names{ "basic.vert.spv", "basic.frag.spv" };
@@ -2363,6 +2382,9 @@ namespace MWRender::Vulkan
                 mPreparedPasses.push_back(
                     { mFrameDraws.size(), pass.mDraws.size(), target, pass.mClearColor, pass.mClear, pass.mViewport });
                 mPreparedPasses.back().mPreserveWorldDepth = pass.mPreserveWorldDepth;
+                mPreparedPasses.back().mOverwrite = pass.mOverwrite;
+                if (pass.mOverwrite && (!pass.mEffect || !target || target->mDepth))
+                    throw std::invalid_argument("Only color-only fullscreen effects can overwrite a target");
                 Render::reserveFor(mFrameDraws, mFrameDraws.size() + pass.mDraws.size());
                 for (const auto& draw : pass.mDraws)
                     mFrameDraws.push_back(&draw);
@@ -2461,7 +2483,8 @@ namespace MWRender::Vulkan
                         && !draw.mMaskTexture && draw.mAlphaCompare == Render::AlphaCompare::Always
                         && (draw.mFogEnd <= draw.mFogStart || draw.mFogEnd <= 0)
                     ? MaterialShader::Overlay
-                    : MaterialShader::Surface;
+                    : draw.mAlphaCompare == Render::AlphaCompare::Always && !draw.mClip ? MaterialShader::SolidSurface
+                                                                                        : MaterialShader::Surface;
                 const std::size_t pipeline
                     = (offscreen ? PipelinesPerTarget * (static_cast<std::size_t>(destination->mTargetFormat) + 1) : 0)
                     + RasterKeys * static_cast<std::size_t>(material)
@@ -2693,9 +2716,10 @@ namespace MWRender::Vulkan
                 clear[1].depthStencil = { 1, 0 };
                 auto pass = vkInfo<VkRenderPassBeginInfo>(VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO);
                 const auto targetSlot = view.mTarget ? static_cast<std::size_t>(view.mTarget->mTargetFormat) : 0;
-                pass.renderPass = view.mTarget
-                    ? (view.mClear ? mTargetPasses[targetSlot].mClear : mTargetPasses[targetSlot].mLoad)
-                    : (view.mClear || !windowWritten ? mRenderPass : mMainLoadPass);
+                pass.renderPass = view.mTarget ? (view.mClear              ? mTargetPasses[targetSlot].mClear
+                                                         : view.mOverwrite ? mTargetPasses[targetSlot].mOverwrite
+                                                                           : mTargetPasses[targetSlot].mLoad)
+                                               : (view.mClear || !windowWritten ? mRenderPass : mMainLoadPass);
                 if (!view.mTarget)
                     windowWritten = true;
                 pass.framebuffer = view.mTarget ? view.mTarget->mFramebuffer

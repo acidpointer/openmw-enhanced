@@ -24,6 +24,32 @@
 
 namespace RenderAssets
 {
+    bool effectMayDiscard(std::span<const std::uint32_t> words)
+    {
+        if (words.size() < 5 || words[0] != 0x07230203)
+            return true;
+        bool fragment = false;
+        for (std::size_t offset = 5; offset < words.size();)
+        {
+            const auto count = words[offset] >> 16;
+            const auto op = words[offset] & 0xffff;
+            if (!count || count > words.size() - offset)
+                return true;
+            if (op == 15 && count >= 4 && words[offset + 1] == 4) // Fragment OpEntryPoint
+                fragment = true;
+            // OpKill, OpTerminateInvocation, OpDemoteToHelperInvocationEXT.
+            if (op == 252 || op == 4416 || op == 5380)
+                return true;
+            // BuiltIn SampleMask can suppress stores without a kill opcode.
+            // Include member decorations for interface blocks as well.
+            if ((op == 71 && count >= 4 && words[offset + 2] == 11 && words[offset + 3] == 20)
+                || (op == 72 && count >= 5 && words[offset + 3] == 11 && words[offset + 4] == 20))
+                return true;
+            offset += count;
+        }
+        return !fragment;
+    }
+
     std::string translateEffectShader(std::string_view source, bool fragment, std::span<const std::string> samplers)
     {
         const std::map<std::string, std::string> macros{ { "OMW_REVERSE_Z", "0" }, { "OMW_USE_BINDINGS", "1" },
@@ -474,6 +500,7 @@ namespace RenderAssets
         EffectShader result;
         result.mVertex = readShader(directory.path / "vert.spv");
         result.mFragment = readShader(directory.path / "frag.spv");
+        result.mMayDiscard = effectMayDiscard(result.mFragment);
         const auto reflect = [&](const auto& code) {
             auto resources = reflectEffectShader(code);
             for (auto& resource : resources)

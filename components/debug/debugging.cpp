@@ -18,6 +18,7 @@
 
 #include <components/crashcatcher/crashcatcher.hpp>
 #include <components/files/conversion.hpp>
+#include <components/misc/memoryallocator.hpp>
 #include <components/misc/strings/conversion.hpp>
 #include <components/misc/strings/lower.hpp>
 
@@ -425,6 +426,7 @@ namespace Debug
             Crash::CrashCatcher::instance()->updateDumpPath(logDir);
         }
 #endif
+        Misc::logMemoryAllocator();
     }
 
     int wrapApplication(

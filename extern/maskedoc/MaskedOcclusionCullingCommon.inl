@@ -912,6 +912,16 @@ public:
 	template<int TEST_Z, int NRIGHT, int NLEFT>
 	FORCE_INLINE int TraverseScanline(int leftOffset, int rightOffset, int tileIdx, int rightEvent, int leftEvent, const __mwi *events, const __mw &zTriMin, const __mw &zTriMax, const __mw &iz0, float zx)
 	{
+		// Reject empty spans before the do-once traversal below. Validate the full
+		// span before any SIMD load/store, including in optimized release builds.
+		// Invalid occlusion queries must remain visible; invalid occluders add no depth.
+		if (rightOffset <= leftOffset)
+			return TEST_Z ? CullingResult::OCCLUDED : CullingResult::VIEW_CULLED;
+		const int tileCount = mTilesWidth * mTilesHeight;
+		if (leftOffset < 0 || rightOffset > mTilesWidth
+			|| tileIdx < 0 || tileIdx >= tileCount || rightOffset > tileCount - tileIdx)
+			return TEST_Z ? CullingResult::VISIBLE : CullingResult::VIEW_CULLED;
+
 		// Floor edge events to integer pixel coordinates (shift out fixed point bits)
 		int eventOffset = leftOffset << TILE_WIDTH_SHIFT;
 		__mwi right[NRIGHT], left[NLEFT];
@@ -1436,8 +1446,6 @@ public:
 		// Split bounding box into bottom - middle - top region.
 		//////////////////////////////////////////////////////////////////////////////
 
-		__mwi bbBottomIdx = _mmw_add_epi32(bbTileMinX, _mmw_mullo_epi32(bbTileMinY, _mmw_set1_epi32(mTilesWidth)));
-		__mwi bbTopIdx = _mmw_add_epi32(bbTileMinX, _mmw_mullo_epi32(_mmw_add_epi32(bbTileMinY, bbTileSizeY), _mmw_set1_epi32(mTilesWidth)));
 		__mwi bbMidIdx = _mmw_add_epi32(bbTileMinX, _mmw_mullo_epi32(midTileY, _mmw_set1_epi32(mTilesWidth)));
 
 		//////////////////////////////////////////////////////////////////////////////
@@ -1461,9 +1469,20 @@ public:
 			// Get dimension of bounding box bottom, mid & top segments
 			int bbWidth = simd_i32(bbTileSizeX)[triIdx];
 			int bbHeight = simd_i32(bbTileSizeY)[triIdx];
-			int tileRowIdx = simd_i32(bbBottomIdx)[triIdx];
+			const int tileX = simd_i32(bbTileMinX)[triIdx];
+			const int tileY = simd_i32(bbTileMinY)[triIdx];
+			if (tileX < 0 || tileY < 0 || tileX >= mTilesWidth || tileY >= mTilesHeight
+				|| bbWidth <= 0 || bbHeight <= 0 || bbWidth > mTilesWidth - tileX || bbHeight > mTilesHeight - tileY)
+			{
+				if (TEST_Z)
+					return CullingResult::VISIBLE;
+				continue;
+			}
+			// Derive traversal limits from the validated coordinates, so malformed
+			// lanes cannot turn a screen-sized triangle into an unbounded row loop.
+			int tileRowIdx = tileX + tileY * mTilesWidth;
 			int tileMidRowIdx = simd_i32(bbMidIdx)[triIdx];
-			int tileEndRowIdx = simd_i32(bbTopIdx)[triIdx];
+			int tileEndRowIdx = tileRowIdx + bbHeight * mTilesWidth;
 
 			if (bbWidth > BIG_TRIANGLE && bbHeight > BIG_TRIANGLE) // For big triangles we use a more expensive but tighter traversal algorithm
 			{

@@ -11,7 +11,7 @@ Build OpenMW inside Docker and package it as:
   .build/dist/OpenMW-Enhanced-x86_64.AppImage
 
 Options:
-  --bullet-threading on|off  Select the bundled Bullet build. Default: on.
+  --bullet-threading on|off  Arch bullet-dp, or a private unthreaded build. Default: on.
   -h, --help                 Show this help.
 EOF
 }
@@ -29,13 +29,10 @@ ROOT="$(enhanced_root)"
 ensure_cache_dirs "${ROOT}"
 
 BULLET_THREADING="$(parse_bullet_threading "$@")"
-IMAGE="${OPENMW_ENHANCED_APPIMAGE_IMAGE:-openmw-enhanced-appimage:ubuntu-24.04}"
+IMAGE="${OPENMW_ENHANCED_APPIMAGE_IMAGE:-openmw-enhanced-appimage:archlinux}"
 
 if [[ "${IN_OPENMW_ENHANCED_CONTAINER:-0}" != "1" ]]; then
-    docker build \
-        -f "${ROOT}/enhanced/docker/Dockerfile.appimage" \
-        -t "${IMAGE}" \
-        "${ROOT}"
+    build_toolchain_image "$ROOT" appimage "$IMAGE"
 
     mount_args=()
     while IFS= read -r -d '' item; do
@@ -51,53 +48,41 @@ if [[ "${IN_OPENMW_ENHANCED_CONTAINER:-0}" != "1" ]]; then
         -e IN_OPENMW_ENHANCED_CONTAINER=1 \
         -e OPENMW_SOURCE_DIR="${OPENMW_SOURCE_DIR:-}" \
         -e OPENMW_BULLET_THREADING="${BULLET_THREADING}" \
-        -e CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
+        -e CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Release}" \
+        -e OPENMW_LTO_BUILD="${OPENMW_LTO_BUILD:-ON}" \
+        -e OPENMW_USE_MIMALLOC="${OPENMW_USE_MIMALLOC:-ON}" \
+        -e OPENMW_MIMALLOC_DIAGNOSTICS="${OPENMW_MIMALLOC_DIAGNOSTICS:-OFF}" \
+        -e OPENMW_BUILD_JOBS="${OPENMW_BUILD_JOBS:-}" \
         -e CCACHE_DIR=/ccache \
-        -e CARGO_HOME=/cargo \
         "${mount_args[@]}" \
         -w /src \
         "${IMAGE}" \
         /src/enhanced/scripts/build-appimage.sh "$@"
 fi
 
-SOURCE_DIR="$(find_openmw_source_dir /src)"
+require_arch_container
+SOURCE_DIR="$(find_openmw_source_dir "$ROOT")"
 # The checkout is owned by the host runner/user; Git runs as root in Docker.
 # Trust only this mounted source directory so release commit metadata is available.
 git config --global --add safe.directory "${SOURCE_DIR}"
-BUILD_ROOT="/build/appimage"
+BUILD_ROOT="${OPENMW_BUILD_ROOT:-/build}/appimage/${BULLET_THREADING}"
 BUILD_DIR="${BUILD_ROOT}/build"
 APPDIR="${BUILD_ROOT}/AppDir"
 JOBS="$(cmake_jobs)"
 
-case "${OPENMW_BULLET_THREADING:-on}" in
-    on) BULLET_PREFIX="/opt/openmw-enhanced/bullet-threaded" ;;
-    off) BULLET_PREFIX="/opt/openmw-enhanced/bullet-unthreaded" ;;
-    *)
-        echo "Invalid OPENMW_BULLET_THREADING=${OPENMW_BULLET_THREADING}. Use on or off." >&2
-        exit 2
-        ;;
-esac
+bullet_args=()
+if [[ "$BULLET_THREADING" == off ]]; then
+    BULLET_PREFIX="$("${ROOT}/enhanced/scripts/prepare-bullet.sh")"
+    bullet_args=(-DCMAKE_PREFIX_PATH="$BULLET_PREFIX" -DBULLET_ROOT="$BULLET_PREFIX" -DBULLET_STATIC=ON)
+fi
 
 rm -rf "${APPDIR}"
-ensure_cmake_build_dir "${SOURCE_DIR}" "${BUILD_DIR}"
-mkdir -p "${APPDIR}" /ccache /cargo
+mkdir -p "${APPDIR}" "${CCACHE_DIR:-/ccache}"
 rm -rf "${BUILD_DIR}/resources/vfs"
 
-cmake -S "${SOURCE_DIR}" -B "${BUILD_DIR}" -G Ninja \
-    -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}" \
-    -DCMAKE_INSTALL_PREFIX=/usr \
-    -DCMAKE_INSTALL_SYSCONFDIR=/etc \
-    -DCMAKE_INSTALL_DATADIR=share/games \
-    -DOPENMW_LOCAL_INSTALL=OFF \
-    -DCMAKE_PREFIX_PATH="${BULLET_PREFIX}" \
-    -DBULLET_ROOT="${BULLET_PREFIX}" \
-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-    -DOPENMW_USE_SYSTEM_BULLET=ON \
-    -DOPENMW_USE_SYSTEM_RECASTNAVIGATION=ON \
-    -DOPENMW_BUILD_VULKAN_RENDERER=ON \
-    -DDEPLOY_QT_TRANSLATIONS=ON
+openmw_configure "${SOURCE_DIR}" "${BUILD_DIR}" "${bullet_args[@]}"
 
 cmake --build "${BUILD_DIR}" --parallel "${JOBS}"
 DESTDIR="${APPDIR}" cmake --install "${BUILD_DIR}"
 
-/src/enhanced/scripts/package-appimage.sh "${APPDIR}"
+"${ROOT}/enhanced/scripts/package-appimage.sh" "${APPDIR}"

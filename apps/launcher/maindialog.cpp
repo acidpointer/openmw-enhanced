@@ -49,16 +49,21 @@ Launcher::MainDialog::MainDialog(const Files::ConfigurationManager& configuratio
     mGameInvoker = new ProcessInvoker();
     mWizardInvoker = new ProcessInvoker();
 
-    if (qEnvironmentVariableIsSet("OPENMW_ENHANCED_APPIMAGE"))
-    {
-        // Exiting the AppImage entry process releases its mount (or extraction
-        // directory). Keep it alive until the engine finishes loading and using
-        // resources and dynamically loaded OSG plugins.
-        mGameInvoker->getProcess()->setProcessChannelMode(QProcess::ForwardedChannels);
-        connect(mGameInvoker->getProcess(), &QProcess::started, this, &MainDialog::hide);
-        connect(mGameInvoker->getProcess(), qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-            [](int, QProcess::ExitStatus) { qApp->quit(); });
-    }
+    // Supervise native launches too: a successfully created process can still
+    // fail immediately during initialization. Keeping the launcher alive also
+    // preserves an AppImage's bundled files for the engine's lifetime.
+    mGameInvoker->getProcess()->setProcessChannelMode(QProcess::ForwardedChannels);
+    connect(mGameInvoker->getProcess(), &QProcess::started, this, &MainDialog::hide);
+    connect(mGameInvoker, &ProcessInvoker::processFailed, this, [this] {
+        show();
+        raise();
+        activateWindow();
+    });
+    connect(mGameInvoker->getProcess(), qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+        [](int exitCode, QProcess::ExitStatus status) {
+            if (status == QProcess::NormalExit && exitCode == 0)
+                qApp->quit();
+        });
 
     connect(mWizardInvoker->getProcess(), &QProcess::started, this, &MainDialog::wizardStarted);
 
@@ -641,6 +646,9 @@ void Launcher::MainDialog::wizardFinished(int exitCode, QProcess::ExitStatus exi
 
 void Launcher::MainDialog::play()
 {
+    if (mGameInvoker->getProcess()->state() != QProcess::NotRunning)
+        return;
+
     if (!writeSettings())
         return qApp->quit();
 
@@ -657,16 +665,12 @@ void Launcher::MainDialog::play()
         return;
     }
 
-    // An AppImage's entry process owns the lifetime of its bundled files.
-    const bool keepAppImageAlive = qEnvironmentVariableIsSet("OPENMW_ENHANCED_APPIMAGE");
-
     QStringList arguments;
     for (const std::filesystem::path& path : mCfgMgr.getActiveConfigPaths())
         arguments << QLatin1String("--config") << Files::pathToQString(path);
 
     mGameInvoker->getProcess()->setProcessEnvironment(mGraphicsPage->gameEnvironment());
-    if (mGameInvoker->startProcess(QLatin1String("openmw"), arguments, !keepAppImageAlive) && !keepAppImageAlive)
-        return qApp->quit();
+    mGameInvoker->startProcess(QLatin1String("openmw"), arguments, false);
 }
 
 void Launcher::MainDialog::help()

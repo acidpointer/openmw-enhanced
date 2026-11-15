@@ -204,6 +204,7 @@ namespace
         EXPECT_EQ(mTechnique->getHDR(), true);
         EXPECT_EQ(mTechnique->getPasses().size(), 1);
         EXPECT_EQ(mTechnique->getPasses().front()->getName(), "main");
+        EXPECT_FALSE(mTechnique->getPasses().front()->usesDefaultVertexShader());
     }
 
     TEST_F(TechniqueTest, screen_space_shadows_skip_interior_filtering)
@@ -226,6 +227,9 @@ namespace
         EXPECT_EQ(technique.getFlags() & Technique::getEnvironmentMask(true, true), 0u);
         EXPECT_EQ(technique.getPasses().size(), 4u);
         EXPECT_TRUE(technique.getNormals());
+
+        for (const auto& pass : technique.getPasses())
+            EXPECT_TRUE(pass->usesDefaultVertexShader());
 
         for (const std::string_view name : { "RT_ShadowRaw", "RT_ShadowDirectional", "RT_ShadowBlur" })
         {

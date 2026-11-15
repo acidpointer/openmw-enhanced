@@ -393,6 +393,7 @@ float omw_EstimateFogCoverageFromUV(vec2 uv)
         mFragment = nullptr;
         mCompute = nullptr;
         mCompiled = false;
+        mDefaultVertex = false;
     }
 
     void Pass::compile(Technique& technique, std::string_view preamble)
@@ -404,6 +405,7 @@ float omw_EstimateFogCoverageFromUV(vec2 uv)
 
         if (mType == Type::Pixel)
         {
+            mDefaultVertex = !mVertex;
             if (!mVertex)
                 mVertex = new osg::Shader(
                     osg::Shader::VERTEX, Stereo::getMultiview() ? s_DefaultVertexMultiview : s_DefaultVertex);

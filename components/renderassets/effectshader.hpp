@@ -39,7 +39,11 @@ namespace RenderAssets
     {
         std::vector<std::uint32_t> mVertex, mFragment;
         std::vector<EffectResource> mResources;
+        bool mMayDiscard = true;
     };
+    // Conservative SPIR-V coverage check. A false result only permits an
+    // overwrite when the caller also guarantees fullscreen vertex coverage.
+    bool effectMayDiscard(std::span<const std::uint32_t> words);
     // Translate the generated API and legacy GLSL spellings without changing
     // the effect files/settings used by the OMWFX parser and editor.
     std::string translateEffectShader(

@@ -1,0 +1,5 @@
+/src/
+/pkg/
+/openmw-enhanced/
+/*.pkg.tar.*
+/*.log

@@ -548,6 +548,41 @@ C++ frontend and source checks are permitted; fixture execution, builds and
 runtime performance verification remain user-operated. These changes do not
 prove the remaining spikes are eliminated or the 65 FPS target is met.
 
+The next GPU-focused pass addresses effect attachment traffic and scene shading.
+The latest user-operated log includes 38 effect composites with screen-space
+shadows, godrays, HDR, FXAA and depth of field queued. That establishes a large
+pass count, not individual GPU durations. Color-only effect outputs previously
+always used LOAD, including passes replacing the entire viewport. The source
+pass now records whether its vertex stage is the generated fullscreen stage;
+compiled fragment SPIR-V is checked for kill, termination, demotion and sample
+mask operations. Only proven fullscreen replacements use a compatible
+DONT_CARE-load render pass. Custom vertex stages and discarding effects retain
+LOAD, preserving partial-region padding, persistent named targets and scratch
+history. Builtin depth merging and exposure passes use the same overwrite path.
+Attachment stores and read/write synchronization remain intact. ABI 11 rejects
+modules built before the new pass contract. This follows Khronos guidance on
+[avoiding unnecessary attachment loads](https://docs.vulkan.org/samples/latest/samples/performance/render_passes/README.html).
+
+Surfaces without alpha testing or a clip plane select a dedicated shader
+specialization with every discard path eliminated. This allows early depth
+rejection of hidden opaque fragments without changing source draw order,
+terrain blending, depth comparisons or reflection clipping. Pipeline keys also
+specialize normal output to the actual target attachments: color-only targets
+and the window no longer compute fragment normals for an unused output. Water
+still computes its Fresnel normal, and effects requesting scene normals retain
+the existing precision and MRT behavior. Vertex lighting skips specular work
+when the material or light has no specular contribution; finite-radius lights
+are rejected before square-root and shading-data work. Classic attenuation
+retains its unlimited range. Draw distance, effect resolution, sample counts,
+formats and user settings are unchanged.
+
+Regression fixture sources cover discard/demotion/termination/sample masking,
+malformed coverage metadata, and generated versus custom vertex stages. Static
+C++ frontend checks and source review are permitted; shader compilation, builds,
+fixture execution and GPU performance verification remain user-operated. These
+changes do not establish that post-processing overhead is halved or that the
+maximum-distance 65 FPS target is achieved.
+
 ## Backend architecture
 
 Use the native Vulkan implementation behind API-independent rendering

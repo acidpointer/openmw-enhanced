@@ -17,6 +17,8 @@ class QModelIndex;
 class QMouseEvent;
 class QObject;
 
+Q_MOC_INCLUDE("QDropEvent")
+
 namespace CSMFilter
 {
     class Node;

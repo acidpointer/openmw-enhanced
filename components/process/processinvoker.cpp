@@ -157,8 +157,10 @@ bool Process::ProcessInvoker::startProcess(const QString& name, const QStringLis
 
 void Process::ProcessInvoker::processError(QProcess::ProcessError error)
 {
-    if (mIgnoreErrors)
+    // A crashed child also emits finished; report that failure once there.
+    if (mIgnoreErrors || error == QProcess::Crashed)
         return;
+    emit processFailed();
     QMessageBox msgBox;
     msgBox.setWindowTitle(tr("Error running executable"));
     msgBox.setIcon(QMessageBox::Critical);
@@ -178,7 +180,14 @@ void Process::ProcessInvoker::processFinished(int exitCode, QProcess::ExitStatus
     {
         if (mIgnoreErrors)
             return;
-        QString error(mProcess->readAllStandardError());
+        emit processFailed();
+        QString error;
+        const auto channels = mProcess->processChannelMode();
+        if (channels == QProcess::MergedChannels)
+            error = QString::fromUtf8(mProcess->readAllStandardOutput());
+        else if (channels != QProcess::ForwardedChannels && channels != QProcess::ForwardedErrorChannel)
+            error = QString::fromUtf8(mProcess->readAllStandardError());
+        error.append(tr("\nExit code: %1\n").arg(exitCode));
         error.append(tr("\nArguments:\n"));
         error.append(mArguments.join(" "));
 

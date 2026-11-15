@@ -23,6 +23,7 @@ file(GLOB UNITTEST_SRC_FILES
 
     misc/compression.cpp
     misc/hostenvironment.cpp
+    misc/memoryallocator.cpp
     misc/osgpluginchecker.cpp
     misc/progressreporter.cpp
     misc/testendianness.cpp
@@ -135,6 +136,17 @@ file(GLOB UNITTEST_SRC_FILES
 source_group(apps\\components-tests FILES ${UNITTEST_SRC_FILES})
 
 openmw_add_executable(components-tests ${UNITTEST_SRC_FILES})
+
+if(OPENMW_USE_MIMALLOC)
+    add_library(openmw-allocator-probe MODULE misc/allocatorprobe.cpp)
+    set_target_properties(openmw-allocator-probe PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN YES
+    )
+    target_compile_definitions(components-tests PRIVATE
+        OPENMW_ALLOCATOR_PROBE_PATH="$<TARGET_FILE:openmw-allocator-probe>")
+    add_dependencies(components-tests openmw-allocator-probe)
+endif()
 
 target_link_libraries(components-tests
     GTest::GTest

@@ -89,6 +89,12 @@
     </message>
     <message>
         <source>
+Exit code: %1
+</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>
 Arguments:
 </source>
         <translation></translation>

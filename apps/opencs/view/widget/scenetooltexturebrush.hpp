@@ -24,6 +24,8 @@ class QSlider;
 class QSpinBox;
 class QWidget;
 
+Q_MOC_INCLUDE("QDropEvent")
+
 namespace CSVRender
 {
     class TerrainTextureMode;

@@ -1,4 +1,10 @@
-# Toolchain images do not consume the local build outputs or Git database.
-# The full working tree is mounted into the container when the build runs.
-.build/
-.git/
+# Toolchain images consume only their bootstrap and package dependency recipe.
+# Mount the checkout at build time instead of sending source/cache trees to Docker.
+**
+!archlinux/
+!archlinux/PKGBUILD
+!enhanced/
+!enhanced/docker/
+!enhanced/docker/Dockerfile
+!enhanced/scripts/
+!enhanced/scripts/install-arch-deps.sh

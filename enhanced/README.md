@@ -77,7 +77,46 @@ Update the current fork branch from upstream:
 ./enhanced/scripts/sync-openmw-upstream.sh --merge
 ```
 
+## Arch Linux builds and packages
+
+The Linux executables use a pinned, statically linked mimalloc 3.6.1 process
+allocator by default. Qt/OSG and renderer modules share that allocator instance;
+no shared mimalloc package or preload environment is needed. See the
+[allocator integration and workload defaults](docs/mimalloc.md) for tuning,
+environment overrides, diagnostics and sanitizer builds.
+
+The maintained toolchain is official `archlinux:base-devel`. The dependency
+list comes from [our Arch PKGBUILD](../archlinux/PKGBUILD), forked from Arch's
+[official OpenMW packaging](https://gitlab.archlinux.org/archlinux/packaging/packages/openmw).
+[Recorded provenance](../archlinux/UPSTREAM.md) includes the exact baseline.
+Arch's `bullet-dp` already enables double precision and multithreading; it is
+used directly by default. OpenGL and the experimental Vulkan backend are built
+in every format, with `glslang` available for runtime OMWFX compilation.
+
+Build a native Arch package from the current working tree as your normal user:
+
+```sh
+./enhanced/scripts/build-archlinux.sh
+```
+
+The resulting `openmw-enhanced-git-*.pkg.tar.zst` goes into `.build/dist/`.
+The helper builds and installs through makepkg/pacman, requesting sudo when
+needed. Use `--no-install` to produce a package only; CI uses that mode. An
+existing package can be installed with `pacman -U` without rebuilding.
+It provides `openmw` and conflicts
+with the official package and alternatives providing it; no `--overwrite` or
+automatic `replaces` is used. The helper includes local edits and uses a copy
+of the recipe so makepkg's version updates do not modify tracked files.
+See [Arch package instructions](../archlinux/README.md) for conventional VCS
+builds, which instead fetch the published fork branch.
+
 ## Docker Builds
+
+One multi-stage `enhanced/docker/Dockerfile` supplies `dev` and `appimage`
+targets. Release builds and LTO are enabled by default; `CMAKE_BUILD_TYPE` and
+`OPENMW_LTO_BUILD` can override them. `OPENMW_BUILD_JOBS` limits compilation
+parallelism. `OPENMW_ARCH_IMAGE` can select a specific official Arch image tag
+or digest instead of `archlinux:base-devel`.
 
 Build a development tree:
 
@@ -97,14 +136,37 @@ Build with Bullet threading disabled:
 ./enhanced/scripts/build-appimage.sh --bullet-threading off
 ```
 
-Docker mounts persistent caches from `.build/` so repeated builds reuse CMake
-outputs, ccache, Cargo downloads, and release artifacts. `.dockerignore` keeps
-these caches and the Git database out of the toolchain image's build context;
-the source checkout, including Git metadata, is mounted at build time.
+Docker mounts persistent CMake, ccache and download caches from
+`.build/archlinux/`; artifacts remain in `.build/dist/`. AppImage CMake trees
+are `.build/archlinux/cmake/appimage/on/build` and `off/build`, keeping the two
+Bullet configurations separate. The optional OFF build compiles only a private,
+checksummed static Bullet; the normal path uses system `bullet-dp`. Development
+builds use `.build/archlinux/cmake/dev`. Relevant Arch dependency/compiler
+package versions are fingerprinted: an ABI/toolchain update invalidates that
+CMake tree, while ordinary source edits keep its cached objects. Host app
+updates outside those dependencies do not invalidate it.
 
-## GitHub release AppImages
+Docker receives only the Dockerfile, bootstrap and PKGBUILD as build context;
+the checkout (including Git metadata) is mounted when building. Container image
+tags are `openmw-enhanced-dev:archlinux` and
+`openmw-enhanced-appimage:archlinux`. No host libraries or pacman database are
+mounted. The last successful AppImage is retained if packaging fails.
 
-The `AppImage release` workflow runs when a release is **published**, including
+Preview/remove the obsolete Ubuntu project caches and exact old toolchain tags:
+
+```sh
+./enhanced/scripts/cleanup-ubuntu-builds.sh
+./enhanced/scripts/cleanup-ubuntu-builds.sh --apply
+```
+
+This retains current Arch caches, completed artifacts and user data. It never
+runs global Docker prune or removes unrelated images/volumes. Docker must be
+running to remove its old tagged images. Untagged shared BuildKit cache cannot
+be safely attributed to this project and is not globally pruned.
+
+## GitHub Arch Linux releases
+
+The sole `Arch Linux release` workflow runs when a release is **published**, including
 a prerelease published from a draft through GitHub's UI. Creating a tag or saving
 a draft alone does not start this workflow.
 
@@ -117,19 +179,28 @@ Tags must have three numeric version components, with an optional `-rc.N`
 suffix; numeric components cannot have leading zeros. Other tag formats are
 skipped. Before building, the workflow sets the GitHub prerelease flag from the
 tag and prevents release candidates from becoming the latest stable release,
-including when the build fails. Regular push CI runs on branches and pull
-requests; tag pushes use the release packaging workflows.
+including when the build fails. The inherited upstream push/test, Windows,
+macOS and upstream-tag release workflows have been removed. This fork retains
+only its published-release pipeline.
 
 Push the workflow and build-script changes before preparing the release. In
 GitHub's Releases UI, select or create the tag on a commit containing those
 changes, prepare your title and notes, and publish it. The workflow builds that
-tagged commit with the existing Docker script in Release mode, with Bullet
-threading enabled. It attaches these files to the existing release:
+tagged commit in an official Arch container using the same PKGBUILD and build
+configuration as local builds. An unprivileged makepkg user compiles once;
+the resulting native package and AppImage staging reuse that one CMake tree.
+The classify and publish jobs also run inside Arch containers. GitHub's hosted
+Ubuntu VM only supplies the container runner, since GitHub has no hosted Arch
+VM label; no Ubuntu dependency installation or build step remains.
+It attaches these files to the existing release:
 
 - `OpenMW-Enhanced-v1.0.0-x86_64.AppImage`
 - `OpenMW-Enhanced-v1.0.0-x86_64.AppImage.sha256`
+- `openmw-enhanced-git-<engine-version-and-revision>-<pkgrel>-x86_64.pkg.tar.zst`
+- `SHA256SUMS` covering the versioned AppImage, its checksum and the Arch package
 
-Prerelease filenames include the full `-rc.N` suffix. The same files are also
+Prerelease AppImage filenames include the full `-rc.N` suffix; the native package
+uses its engine-version/Git-revision package version. The same files are also
 available as a workflow artifact for 30 days. A failed build leaves the manual
 release available without new assets. Re-run failed jobs to retry transient
 failures; a source fix requires a new release tag pointing at the fixed commit.
@@ -150,7 +221,7 @@ If repository release immutability is enabled, it fails before building: GitHub
 requires assets to be attached to the draft before an immutable release is
 published. No additional repository secret is needed. Only the metadata and
 publishing jobs receive `contents: write` through the built-in `GITHUB_TOKEN`;
-the Docker build has read access only.
+the build job has read access only.
 
 ## Manual verification after upstream synchronization
 
@@ -246,16 +317,23 @@ References: [OSG library naming and loading](https://github.com/openscenegraph/O
 
 The Docker build mounts the source and build/download caches, not the host's
 `/usr/lib` or system OpenMW installation. Packaged dependencies are collected
-inside the Ubuntu container. AppDir staging is recreated for each build while
+inside the Arch container. AppDir staging is recreated for each build while
 the compilation caches remain available.
 
-A static audit of the exit capture and exact staged dependencies covered 236
+A historical audit of the former Ubuntu staging and exit capture covered 236
 ELF files, including the launcher's dependency closure. It found no missing
 `DT_NEEDED` providers, required symbol versions, or strong dynamic symbols, and
 no absolute or empty RPATH/RUNPATH entries in bundled ELF files. The only
 multiple-version library families in that capture were OSG 161/162. This is
 also why symbol checks alone cannot certify C++ ABI compatibility or predict
 every future `dlopen` path.
+
+That historical result does not validate the newly migrated Arch dependency
+closure. The first Arch build and runtime check must establish that separately.
+Arch is rolling release: its glibc/libstdc++ requirements can be newer than an
+older distribution provides. An AppImage does not erase that ABI floor. Use a
+host with compatible runtime libraries; this migration does not promise support
+for old Ubuntu releases. Configuration/save/mod locations remain unchanged.
 
 Host glibc, graphics drivers, ALSA, and PipeWire are intentional system
 dependencies; they should not be replaced wholesale with container libraries.
@@ -1280,11 +1358,11 @@ container, then compile the engine/launcher and run the focused tests:
 ```sh
 ./enhanced/scripts/shell.sh
 # The following commands run inside that shell; they are for the user to execute.
-cmake -S /src -B /build/appimage/build -DBUILD_COMPONENTS_TESTS=ON -DOPENMW_USE_SYSTEM_GOOGLETEST=OFF
-cmake --build /build/appimage/build --target openmw openmw-launcher components-tests --parallel 4
-/build/appimage/build/components-tests --gtest_filter='Occlusion*:OccluderMeshTest.*:TerrainOccluderTest.*:ResourceGenericObjectCacheTest.*:RenderGpuTest.*:LauncherSettingsTest.*'
+cmake -S /src -B /build/appimage/on/build -DBUILD_COMPONENTS_TESTS=ON -DOPENMW_USE_SYSTEM_GOOGLETEST=OFF
+cmake --build /build/appimage/on/build --target openmw openmw-launcher components-tests --parallel 4
+/build/appimage/on/build/components-tests --gtest_filter='Occlusion*:OccluderMeshTest.*:TerrainOccluderTest.*:ResourceGenericObjectCacheTest.*:RenderGpuTest.*:LauncherSettingsTest.*'
 # Restore the normal packaging build's test option afterward.
-cmake -S /src -B /build/appimage/build -DBUILD_COMPONENTS_TESTS=OFF
+cmake -S /src -B /build/appimage/on/build -DBUILD_COMPONENTS_TESTS=OFF
 ```
 
 The first test configuration may download the repository's pinned GoogleTest and

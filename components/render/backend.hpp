@@ -289,6 +289,10 @@ namespace Render
         EffectHandle mEffect{};
         std::span<const EffectInput> mEffectInputs{};
         bool mPreserveWorldDepth = false;
+        // The caller guarantees every pixel in the viewport is replaced,
+        // without blending, discard, sample masking, or clipped geometry.
+        // Contents outside the viewport remain untouched.
+        bool mOverwrite = false;
     };
 
     struct DeviceInfo
@@ -400,7 +404,7 @@ namespace Render
     // Private, same-build module ABI. Creation and destruction stay paired in
     // the module; errors are copied into caller-owned memory, never thrown
     // through the exported entry point. No graphics API types cross it.
-    inline constexpr std::uint32_t BackendAbi = 10;
+    inline constexpr std::uint32_t BackendAbi = 11;
     using CreateBackend = Backend* (*)(std::uint32_t abi, const BackendOptions*, char* error, std::size_t errorSize);
     using DestroyBackend = void (*)(Backend*);
 }

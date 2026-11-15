@@ -484,6 +484,7 @@ void main() {
             auto& first = nextWork();
             uniforms(first, *luminance, {}, projection, [&](const std::string&) { return scene; });
             effects.push_back({ {}, lum.mColor, {}, false, {}, luminance->mHandle, first.mInputs });
+            effects.back().mOverwrite = !luminance->mShader.mMayDiscard;
             const auto now = std::chrono::steady_clock::now();
             const auto elapsed = mExposureTime.time_since_epoch().count()
                 ? std::chrono::duration<float>(now - mExposureTime).count()
@@ -503,6 +504,7 @@ void main() {
             uniforms(second, *adapt, RenderAssets::OsgStateView(nullptr, mExposureState), projection,
                 [&](const std::string& name) { return name == "currentLum" ? lum.mColor : previous.mColor; });
             effects.push_back({ {}, current.mColor, {}, false, {}, adapt->mHandle, second.mInputs });
+            effects.back().mOverwrite = !adapt->mShader.mMayDiscard;
             mInitialized.push_back(&current);
             mExposureQueued = true;
             return current.mColor;
@@ -720,6 +722,7 @@ void main(){
                 uniforms(work, *shader, RenderAssets::OsgStateView(nullptr, mDepthState), osg::Matrixf(projection),
                     [&](const std::string& name) { return name == "worldDepth" ? worldDepth : scene.mDepth; });
                 effects.push_back({ {}, merged.mColor, {}, false, {}, shader->mHandle, work.mInputs });
+                effects.back().mOverwrite = !shader->mShader.mMayDiscard;
                 depth = merged.mColor;
             }
             Render::TextureHandle distortionTexture;
@@ -821,6 +824,7 @@ void main(){
                         if (input.mTexture == output)
                             throw std::invalid_argument("OMWFX pass samples its own render target");
                     effects.push_back({ {}, output, {}, false, {}, shader->mHandle, work.mInputs });
+                    effects.back().mOverwrite = source->usesDefaultVertexShader() && !shader->mShader.mMayDiscard;
                 }
             }
             Render::Draw resolve;

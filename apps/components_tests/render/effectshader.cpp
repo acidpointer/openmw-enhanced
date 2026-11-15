@@ -42,6 +42,42 @@ namespace
         }
     };
 
+    TEST(NativeEffectShader, CoveragePreservesDiscardingAndSampleMaskedOutputs)
+    {
+        Module full;
+        full.name(15, { 4, 1 }, "main"); // Fragment OpEntryPoint
+        full.instruction(253, {}); // OpReturn: returning does not discard.
+        EXPECT_FALSE(RenderAssets::effectMayDiscard(full.words));
+        for (unsigned op : { 252u, 4416u, 5380u })
+        {
+            auto partial = full;
+            partial.instruction(op, {});
+            EXPECT_TRUE(RenderAssets::effectMayDiscard(partial.words));
+        }
+        auto masked = full;
+        masked.instruction(71, { 1, 11, 20 }); // BuiltIn SampleMask
+        EXPECT_TRUE(RenderAssets::effectMayDiscard(masked.words));
+        auto block = full;
+        block.instruction(72, { 1, 0, 11, 20 });
+        EXPECT_TRUE(RenderAssets::effectMayDiscard(block.words));
+        auto depth = full;
+        depth.instruction(71, { 1, 11, 22 }); // FragDepth cannot mask a color-only pass.
+        EXPECT_FALSE(RenderAssets::effectMayDiscard(depth.words));
+    }
+
+    TEST(NativeEffectShader, InvalidCoverageMetadataKeepsAttachmentContents)
+    {
+        EXPECT_TRUE(RenderAssets::effectMayDiscard({}));
+        Module invalid;
+        EXPECT_TRUE(RenderAssets::effectMayDiscard(invalid.words));
+        invalid.words.push_back(0);
+        EXPECT_TRUE(RenderAssets::effectMayDiscard(invalid.words));
+        invalid.words.back() = (4u << 16) | 71;
+        EXPECT_TRUE(RenderAssets::effectMayDiscard(invalid.words));
+        invalid.words[0] = 0;
+        EXPECT_TRUE(RenderAssets::effectMayDiscard(invalid.words));
+    }
+
     TEST(NativeEffectShader, CompilerArgumentsReserveASeparateBlockForGlobals)
     {
         for (const auto& samplers :

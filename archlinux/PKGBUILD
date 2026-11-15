@@ -1,0 +1,61 @@
+# Maintainer: acidpointer (https://github.com/acidpointer)
+# Based on Arch Linux's official openmw PKGBUILD; see UPSTREAM.md.
+# Original maintainer: Sven-Hendrik Haase <svenstaro@archlinux.org>
+# Contributors: txtsd <code@ihavea.quest>, Sandy Carter <bwrsandman@gmail.com>
+
+pkgname=openmw-enhanced-git
+pkgver=0.53.0.r39363.ga07226470d
+pkgrel=2
+pkgdesc='OpenMW Enhanced fork with OpenGL and experimental Vulkan renderers'
+arch=('x86_64')
+url='https://github.com/acidpointer/openmw-enhanced'
+license=('GPL-3.0-or-later' 'OFL-1.1' 'LicenseRef-DejaVuLGCSansMono' 'MIT')
+depends=('openal' 'openscenegraph' 'mygui' 'qt6-base' 'qt6-tools' 'qt6-svg'
+         'ffmpeg' 'sdl2' 'unshield' 'libxt' 'boost-libs' 'bullet-dp' 'yaml-cpp'
+         'luajit' 'glibc' 'libgcc' 'libstdc++' 'zlib' 'icu' 'lz4' 'sqlite'
+         'recastnavigation' 'vulkan-icd-loader' 'glslang' 'collada-dom')
+makedepends=('cmake' 'boost' 'ninja' 'git' 'vulkan-headers' 'qt6-translations' 'mold')
+options=('!debug')
+optdepends=('vulkan-driver: Vulkan GPU driver'
+            'qt6-wayland: native Wayland launcher support')
+provides=("openmw=${pkgver%%.r*}" 'openmw-enhanced')
+conflicts=('openmw' 'openmw-enhanced')
+backup=('etc/openmw/openmw.cfg' 'etc/openmw/openmw-enhanced.cfg')
+source=('openmw-enhanced::git+https://github.com/acidpointer/openmw-enhanced.git#branch=enhanced/main'
+        'mimalloc-3.6.1.tar.gz::https://github.com/microsoft/mimalloc/archive/refs/tags/v3.6.1.tar.gz')
+sha512sums=('SKIP'
+            '03090fbcfe16aff6b640ef64f8d26551f0347c9e49fbca4efc48d6874ec87c109227fa05157e21e2031d58fe9374a8af9a5e34cf67a2255806f32e39ce4ca3ed')
+
+_source_dir() {
+  printf '%s\n' "${OPENMW_SOURCE_DIR:-${srcdir}/openmw-enhanced}"
+}
+
+pkgver() {
+  local checkout version
+  checkout="$(_source_dir)"
+  version=$(awk '/^set\(OPENMW_VERSION_(MAJOR|MINOR|RELEASE) / {
+    gsub(/\)/, "", $2); value = value separator $2; separator = "."
+  } END { print value }' "${checkout}/CMakeLists.txt")
+  printf '%s.r%s.g%s\n' "$version" \
+    "$(git -C "$checkout" rev-list --count HEAD)" \
+    "$(git -C "$checkout" rev-parse --short=10 HEAD)"
+}
+
+build() {
+  local checkout
+  checkout="$(_source_dir)"
+  source "${checkout}/enhanced/scripts/common.sh"
+  export CMAKE_POLICY_VERSION_MINIMUM=3.5
+  local -a allocator_args=()
+  if [[ -z "${OPENMW_SOURCE_DIR:-}" ]]; then
+    allocator_args=(-DFETCHCONTENT_SOURCE_DIR_MIMALLOC="${srcdir}/mimalloc-3.6.1")
+  fi
+  openmw_configure "$checkout" "${srcdir}/build" -DOPENMW_LTO_BUILD=ON "${allocator_args[@]}"
+  cmake --build "${srcdir}/build" --parallel "$(cmake_jobs)"
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install "${srcdir}/build"
+  "$(_source_dir)/enhanced/scripts/check-static-allocator.sh" "${srcdir}/build" "$pkgdir"
+  install -Dm644 "$(_source_dir)/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}
