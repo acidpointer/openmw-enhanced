@@ -10,6 +10,7 @@
 #include <components/myguiplatform/myguirendermanager.hpp>
 #include <components/nifosg/particle.hpp>
 #include <components/render/cachesweep.hpp>
+#include <components/render/drawranges.hpp>
 #include <components/render/framecache.hpp>
 #include <components/render/math.hpp>
 #include <components/render/meshindices.hpp>
@@ -25,6 +26,7 @@
 #include <components/renderassets/particles.hpp>
 #include <components/sceneutil/depth.hpp>
 #include <components/sceneutil/material.hpp>
+#include <components/sceneutil/parallelwork.hpp>
 #include <components/sceneutil/texturetype.hpp>
 #include <components/settings/values.hpp>
 #include <components/shader/removedalphafunc.hpp>
@@ -155,6 +157,25 @@ namespace MWRender
             }
         };
 
+        struct GpuMesh;
+        struct SharedMesh
+        {
+            RenderAssets::MeshKey mKey;
+            std::shared_ptr<MeshStorage> mStorage;
+            // Cleared before retirement, including unused/failed frame plans.
+            std::uint64_t mPendingFrame = 0;
+            GpuMesh* mPendingOwner = nullptr;
+        };
+
+        enum class MeshWork
+        {
+            None,
+            Static,
+            BuildStream,
+            UpdateStream,
+            Alias
+        };
+
         struct GpuMesh
         {
             Render::Backend& mBackend;
@@ -170,6 +191,17 @@ namespace MWRender
             std::size_t mTopologyRevision = 0;
             std::unique_ptr<RenderAssets::MeshStream> mStream;
             std::uint64_t mSeen = 0;
+            std::uint64_t mPreparedFrame = 0;
+            std::size_t mPreparedRevision = 0, mPreparedTopology = 0;
+            std::size_t mWorkSize = 0;
+            unsigned mPreparedUV = 0;
+            MeshWork mWork = MeshWork::None;
+            bool mWorkDone = false;
+            osg::ref_ptr<const osg::Geometry> mPreparedSource;
+            RenderAssets::MeshBuffers mPreparedBuffers;
+            std::exception_ptr mPreparationError;
+            GpuMesh* mPreparedOwner = nullptr;
+            SharedMesh* mCanonical = nullptr;
             explicit GpuMesh(Render::Backend& backend, Render::Residency& residency)
                 : mBackend(backend)
                 , mStorage(std::make_shared<MeshStorage>(backend, residency))
@@ -300,6 +332,7 @@ namespace MWRender
             : mViewer(viewer)
             , mWindow(options.mWindow)
             , mModule(Render::BackendModule::load(modulePath(), options))
+            , mMeshWorkers(SceneUtil::ParallelWork::workersFor(std::thread::hardware_concurrency()))
         {
             // CPU scene callbacks (including skinning and terrain selection)
             // run once on the owner thread; they never submit a GL world frame.
@@ -544,7 +577,15 @@ namespace MWRender
             return cached.mHandle;
         }
 
-        Render::MeshHandle mesh(const osg::Geometry& geometry, unsigned uvUnit)
+        void resident(GpuMesh& mesh)
+        {
+            mesh.mStorage->mSeen = mSerial;
+            mesh.mStorage->mResidency.touch();
+            mesh.mCheckedFrame = mSerial;
+            mesh.mCheckedHandle = mesh.mHandle;
+        }
+
+        GpuMesh& planMesh(const osg::Geometry& geometry, unsigned uvUnit)
         {
             auto& slot = mMeshes[{ &geometry, uvUnit }];
             if (!slot || slot->mSource.get() != &geometry)
@@ -552,89 +593,194 @@ namespace MWRender
                 slot = std::make_unique<GpuMesh>(backend(), mMeshResidency);
                 slot->mSource = &geometry;
             }
-            slot->mSeen = mSerial;
-            slot->mStorage->mSeen = mSerial;
-            if (slot->mCheckedFrame == mSerial)
-                return slot->mCheckedHandle;
-            slot->mCheckedFrame = mSerial;
-            slot->mCheckedHandle = {};
-            const auto revision = geometryRevision(geometry, uvUnit);
-            if (slot->mRejectedRevision == revision)
-                return {};
-            if (!slot->mHandle || slot->mRevision != revision)
+            auto& mesh = *slot;
+            mesh.mSeen = mSerial;
+            if (mesh.mCheckedFrame == mSerial || mesh.mPreparedFrame == mSerial)
+                return mesh;
+            mesh.mPreparedFrame = mSerial;
+            mesh.mPreparedRevision = geometryRevision(geometry, uvUnit);
+            if (mesh.mRejectedRevision == mesh.mPreparedRevision)
             {
-                PrepareTimer timer{ mPrepare.mMeshes };
-                const auto topology = topologyRevision(geometry);
-                try
+                mesh.mCheckedFrame = mSerial;
+                mesh.mCheckedHandle = {};
+                return mesh;
+            }
+            if (mesh.mHandle && mesh.mRevision == mesh.mPreparedRevision)
+            {
+                resident(mesh);
+                return mesh;
+            }
+            mesh.mPreparedTopology = topologyRevision(geometry);
+            mesh.mPreparedUV = uvUnit;
+            mesh.mPreparedSource = &geometry;
+            mesh.mPreparationError = nullptr;
+            mesh.mWorkDone = false;
+            mesh.mPreparedOwner = nullptr;
+            mesh.mCanonical = nullptr;
+            Render::reserveFor(mMeshPlans, mMeshPlans.size() + 1);
+            mMeshPlans.push_back(&mesh);
+            if (mesh.mHandle)
+                mesh.mWork = !mesh.mStream || mesh.mTopologyRevision != mesh.mPreparedTopology ? MeshWork::BuildStream
+                                                                                               : MeshWork::UpdateStream;
+            else if (const auto* vbo = geometry.getVertexArray()->getVertexBufferObject();
+                vbo && (vbo->getUsage() == GL_DYNAMIC_DRAW_ARB || vbo->getUsage() == GL_STREAM_DRAW_ARB))
+                mesh.mWork = MeshWork::BuildStream;
+            else
+            {
+                auto key = RenderAssets::meshKey(geometry, uvUnit);
+                auto& shared = mSharedMeshes[key.mWords];
+                if (shared.mKey.current() && shared.mStorage)
                 {
-                    if (slot->mHandle)
+                    mesh.mStorage = shared.mStorage;
+                    mesh.mHandle = mesh.mStorage->mHandle;
+                    mesh.mVertices = mesh.mStorage->mVertices;
+                    mesh.mIndices = mesh.mStorage->mIndices;
+                    mesh.mRevision = mesh.mPreparedRevision;
+                    mesh.mTopologyRevision = mesh.mPreparedTopology;
+                    resident(mesh);
+                    return mesh;
+                }
+                if (shared.mPendingFrame == mSerial && shared.mKey.current())
+                {
+                    mesh.mWork = MeshWork::Alias;
+                    mesh.mPreparedOwner = shared.mPendingOwner;
+                    return mesh;
+                }
+                shared.mKey = std::move(key);
+                shared.mStorage.reset();
+                shared.mPendingFrame = mSerial;
+                shared.mPendingOwner = &mesh;
+                mesh.mCanonical = &shared;
+                mesh.mWork = MeshWork::Static;
+            }
+            if (mesh.mWork == MeshWork::UpdateStream)
+                ++mPrepare.mMeshUpdates;
+            else
+                ++mPrepare.mMeshBuilds;
+            mesh.mWorkSize = mesh.mWork == MeshWork::UpdateStream ? mesh.mStream->mVertices.size()
+                                                                  : geometry.getVertexArray()->getNumElements();
+            if (RenderAssets::OsgImporter::canImportInParallel(geometry, uvUnit))
+            {
+                Render::reserveFor(mMeshJobs, mMeshJobs.size() + 1);
+                mMeshJobs.push_back(&mesh);
+            }
+            return mesh;
+        }
+
+        static void prepareMesh(GpuMesh& mesh) noexcept
+        {
+            try
+            {
+                switch (mesh.mWork)
+                {
+                    case MeshWork::Static:
+                        mesh.mPreparedBuffers
+                            = RenderAssets::OsgImporter::importMeshBuffers(*mesh.mPreparedSource, mesh.mPreparedUV);
+                        break;
+                    case MeshWork::BuildStream:
+                        mesh.mStream = std::make_unique<RenderAssets::MeshStream>(
+                            RenderAssets::OsgImporter::importMeshStream(*mesh.mPreparedSource, mesh.mPreparedUV));
+                        break;
+                    case MeshWork::UpdateStream:
+                        RenderAssets::OsgImporter::updateMeshStream(*mesh.mPreparedSource, *mesh.mStream);
+                        break;
+                    default:
+                        break;
+                }
+            }
+            catch (...)
+            {
+                mesh.mPreparationError = std::current_exception();
+            }
+            mesh.mWorkDone = true;
+        }
+
+        Render::MeshHandle finishMesh(GpuMesh& mesh)
+        {
+            if (mesh.mCheckedFrame == mSerial)
+                return mesh.mCheckedHandle;
+            mesh.mCheckedFrame = mSerial;
+            mesh.mCheckedHandle = {};
+            try
+            {
+                if (mesh.mWork == MeshWork::Alias)
+                {
+                    if (!finishMesh(*mesh.mPreparedOwner))
                     {
-                        if (!slot->mStream || slot->mTopologyRevision != topology)
-                        {
-                            ++mPrepare.mMeshBuilds;
-                            slot->mStream = std::make_unique<RenderAssets::MeshStream>(
-                                mImporter.importMeshStream(geometry, uvUnit));
-                        }
-                        else
-                        {
-                            ++mPrepare.mMeshUpdates;
-                            mImporter.updateMeshStream(geometry, *slot->mStream);
-                        }
-                        slot->upload(
-                            slot->mStream->mVertices, slot->mStream->mIndices, topology == slot->mTopologyRevision);
-                        ++mMeshChanges;
+                        mesh.mRejectedRevision = mesh.mPreparedRevision;
+                        return {};
                     }
-                    else if (const auto* vbo = geometry.getVertexArray()->getVertexBufferObject();
-                        vbo && (vbo->getUsage() == GL_DYNAMIC_DRAW_ARB || vbo->getUsage() == GL_STREAM_DRAW_ARB))
+                    mesh.mStorage = mesh.mPreparedOwner->mStorage;
+                    mesh.mHandle = mesh.mStorage->mHandle;
+                    mesh.mVertices = mesh.mStorage->mVertices;
+                    mesh.mIndices = mesh.mStorage->mIndices;
+                }
+                else
+                {
+                    if (!mesh.mWorkDone)
+                        prepareMesh(mesh); // Late composite/other uncaptured geometry.
+                    if (mesh.mPreparationError)
+                        std::rethrow_exception(mesh.mPreparationError);
+                    if (mesh.mWork == MeshWork::Static)
                     {
-                        // Rig/morph geometry owns mutable pose arrays. Import
-                        // its retained stream immediately instead of treating
-                        // the first pose as a canonical static mesh, then
-                        // reimporting and copying it on the first animation.
-                        slot->mStream
-                            = std::make_unique<RenderAssets::MeshStream>(mImporter.importMeshStream(geometry, uvUnit));
-                        ++mPrepare.mMeshBuilds;
-                        slot->upload(slot->mStream->mVertices, slot->mStream->mIndices);
-                        ++mMeshChanges;
+                        mesh.upload(mesh.mPreparedBuffers.mVertices, mesh.mPreparedBuffers.mIndices);
+                        mesh.mStorage->mCanonical = true;
+                        if (mesh.mCanonical && mesh.mCanonical->mPendingOwner == &mesh)
+                            mesh.mCanonical->mStorage = mesh.mStorage;
+                        mesh.mPreparedBuffers = {};
                     }
                     else
-                    {
-                        auto key = RenderAssets::meshKey(geometry, uvUnit);
-                        auto& shared = mSharedMeshes[key.mWords];
-                        auto storage = shared.mKey.current() ? shared.mStorage : nullptr;
-                        if (storage)
-                        {
-                            slot->mStorage = std::move(storage);
-                            slot->mHandle = slot->mStorage->mHandle;
-                            slot->mVertices = slot->mStorage->mVertices;
-                            slot->mIndices = slot->mStorage->mIndices;
-                        }
-                        else
-                        {
-                            const auto data = mImporter.importMeshBuffers(geometry, uvUnit);
-                            ++mPrepare.mMeshBuilds;
-                            slot->upload(data.mVertices, data.mIndices);
-                            ++mMeshChanges;
-                            slot->mStorage->mCanonical = true;
-                            shared = { std::move(key), slot->mStorage };
-                        }
-                    }
+                        mesh.upload(mesh.mStream->mVertices, mesh.mStream->mIndices,
+                            mesh.mHandle && mesh.mPreparedTopology == mesh.mTopologyRevision);
+                    ++mMeshChanges;
                 }
-                catch (const std::invalid_argument& error)
-                {
-                    slot->mStream.reset();
-                    slot->mRejectedRevision = revision;
-                    if (mWarnings.insert(error.what()).second)
-                        Log(Debug::Warning) << "Vulkan geometry: " << error.what();
-                    return {};
-                }
-                slot->mTopologyRevision = topology;
-                slot->mRevision = revision;
+                mesh.mRevision = mesh.mPreparedRevision;
+                mesh.mTopologyRevision = mesh.mPreparedTopology;
             }
-            slot->mStorage->mSeen = mSerial;
-            slot->mStorage->mResidency.touch();
-            slot->mCheckedHandle = slot->mHandle;
-            return slot->mCheckedHandle;
+            catch (const std::invalid_argument& error)
+            {
+                mesh.mStream.reset();
+                mesh.mRejectedRevision = mesh.mPreparedRevision;
+                if (mWarnings.insert(error.what()).second)
+                    Log(Debug::Warning) << "Vulkan geometry: " << error.what();
+                return {};
+            }
+            resident(mesh);
+            return mesh.mCheckedHandle;
+        }
+
+        Render::MeshHandle mesh(GpuMesh& prepared)
+        {
+            if (prepared.mCheckedFrame == mSerial)
+                return prepared.mCheckedHandle;
+            PrepareTimer timer{ mPrepare.mMeshes };
+            return finishMesh(prepared);
+        }
+
+        Render::MeshHandle mesh(const osg::Geometry& geometry, unsigned uvUnit)
+        {
+            return mesh(planMesh(geometry, uvUnit));
+        }
+
+        void clearMeshPlans()
+        {
+            for (auto* mesh : mMeshPlans)
+            {
+                mesh->mPreparedSource = nullptr;
+                mesh->mPreparedBuffers = {};
+                mesh->mPreparationError = nullptr;
+                mesh->mPreparedOwner = nullptr;
+                if (mesh->mCanonical && mesh->mCanonical->mPendingOwner == mesh)
+                {
+                    mesh->mCanonical->mPendingFrame = 0;
+                    mesh->mCanonical->mPendingOwner = nullptr;
+                }
+                mesh->mCanonical = nullptr;
+                mesh->mPreparedFrame = 0;
+                mesh->mWork = MeshWork::None;
+            }
+            mMeshPlans.clear();
+            mMeshJobs.clear();
         }
 
         void drawGui(
@@ -1128,7 +1274,29 @@ namespace MWRender
             std::weak_ptr<Terrain::CompositeMap> mSource;
             std::uint64_t mQueued = 0;
             bool mReady = false;
+            std::uint64_t mPreparedFrame = 0;
         };
+
+        void planComposite(const std::shared_ptr<Terrain::CompositeMap>& source)
+        {
+            if (!source || !source->mTexture)
+                return;
+            auto& record = mComposites[source.get()];
+            if (record.mSource.lock() != source)
+                record = { source, 0, false, 0 };
+            if (record.mReady || record.mPreparedFrame == mSerial)
+                return;
+            record.mPreparedFrame = mSerial;
+            for (const auto& drawable : source->mDrawables)
+            {
+                if (!drawable)
+                    continue;
+                const auto* geometry = drawable->asGeometry();
+                const auto* state = drawable->getStateSet();
+                if (geometry && geometry->getVertexArray() && state)
+                    planMesh(*geometry, RenderAssets::textureUnit(*state, "diffuseMap").value_or(0));
+            }
+        }
 
         void bakeComposite(const std::shared_ptr<Terrain::CompositeMap>& source)
         {
@@ -1136,7 +1304,7 @@ namespace MWRender
                 return;
             auto& record = mComposites[source.get()];
             if (record.mSource.lock() != source)
-                record = { source, 0, false };
+                record = { source, 0, false, 0 };
             if (record.mReady || record.mQueued == mSerial)
                 return;
             if (mCompositeViewCount == mCompositeViews.size())
@@ -1188,13 +1356,14 @@ namespace MWRender
             mSubmittedComposites.push_back(source);
         }
 
-        void leaf(const osgUtil::RenderLeaf& leaf, std::vector<Render::Draw>& draws, bool sky)
+        void leaf(const osgUtil::RenderLeaf& leaf, std::vector<Render::Draw>& draws, bool sky,
+            State* preparedState = nullptr, GpuMesh* preparedMesh = nullptr)
         {
             const auto* geometry = leaf.getDrawable()->asGeometry();
             const auto* particleSystem = dynamic_cast<const osgParticle::ParticleSystem*>(leaf.getDrawable());
             if ((!geometry || !geometry->getVertexArray()) && !particleSystem)
                 return;
-            auto& cached = state(leaf._parent);
+            auto& cached = preparedState ? *preparedState : state(leaf._parent);
             const auto& resolved = cached.mState;
             if (const auto* mask
                 = dynamic_cast<const osg::ColorMask*>(resolved.getAttribute(osg::StateAttribute::COLORMASK));
@@ -1221,6 +1390,8 @@ namespace MWRender
                 }
                 if (particleSystem)
                     particles(*particleSystem, leaf, draw);
+                else if (preparedMesh && preparedMesh->mSource.get() == geometry && preparedMesh->mPreparedUV == uvUnit)
+                    draw.mMesh = mesh(*preparedMesh);
                 else
                     draw.mMesh = mesh(*geometry, uvUnit);
                 if (!draw.mMesh)
@@ -1342,7 +1513,60 @@ namespace MWRender
             }
         }
 
-        void bin(osgUtil::RenderBin& bin, std::vector<Render::Draw>& draws, bool parentSky = false)
+        struct LeafRequest
+        {
+            const osgUtil::RenderLeaf* mLeaf;
+            State* mState;
+            GpuMesh* mMesh;
+            bool mSky, mProjection, mDistortion = false;
+        };
+        struct DrawPlan
+        {
+            std::vector<LeafRequest> mLeaves;
+            Render::DrawRanges mRanges;
+            void clear()
+            {
+                mLeaves.clear();
+                mRanges.clear();
+            }
+        };
+
+        void queueLeaf(const osgUtil::RenderLeaf& leaf, DrawPlan& plan, bool sky)
+        {
+            const auto* geometry = leaf.getDrawable()->asGeometry();
+            const auto* particle = dynamic_cast<const osgParticle::ParticleSystem*>(leaf.getDrawable());
+            if ((!geometry || !geometry->getVertexArray()) && !particle)
+                return;
+            auto& cached = state(leaf._parent);
+            const auto& resolved = cached.mState;
+            if (const auto* mask
+                = dynamic_cast<const osg::ColorMask*>(resolved.getAttribute(osg::StateAttribute::COLORMASK));
+                !mShadowCasting && mask && !mask->getRedMask() && !mask->getGreenMask() && !mask->getBlueMask()
+                && !mask->getAlphaMask())
+                return;
+            GpuMesh* mesh = nullptr;
+            if (geometry && !particle)
+            {
+                try
+                {
+                    if (const auto* terrain = dynamic_cast<const Terrain::TerrainDrawable*>(geometry))
+                        planComposite(terrain->getCompositeMap());
+                    bool water = false;
+                    if (const auto* uniform = resolved.getUniform(NativeUniform::WaterSurface))
+                        uniform->get(water);
+                    const auto uv = RenderAssets::textureUnit(resolved, water ? "normalMap" : "diffuseMap").value_or(0);
+                    mesh = &planMesh(*geometry, uv);
+                }
+                catch (const std::invalid_argument&)
+                {
+                    // The ordinary leaf path publishes the existing diagnostic.
+                }
+            }
+            Render::reserveFor(plan.mLeaves, plan.mLeaves.size() + 1);
+            plan.mLeaves.push_back({ &leaf, &cached, mesh, sky, mProjectionOutput != nullptr });
+        }
+
+        void bin(osgUtil::RenderBin& bin, DrawPlan& plan, bool parentSky = false)
         {
             if (bin.getBinNum() == RenderBin_Distortion && mDistortionOutput)
             {
@@ -1350,16 +1574,10 @@ namespace MWRender
                 mDistortionOutput = nullptr;
                 auto* projection = mProjectionOutput;
                 mProjectionOutput = nullptr;
-                const auto begin = output->size();
+                const auto begin = output->mLeaves.size();
                 this->bin(bin, *output, parentSky);
-                for (std::size_t i = begin; i < output->size(); ++i)
-                {
-                    auto& draw = (*output)[i];
-                    draw.mDistortion = true;
-                    draw.mLighting = false;
-                    draw.mFogEnd = 0;
-                    draw.mDepthWrite = false;
-                }
+                for (std::size_t i = begin; i < output->mLeaves.size(); ++i)
+                    output->mLeaves[i].mDistortion = true;
                 mDistortionOutput = output;
                 mProjectionOutput = projection;
                 return;
@@ -1368,19 +1586,21 @@ namespace MWRender
             if (bin.getBinNum() == RenderBin_FirstPerson)
                 mProjectionOutput = nullptr;
             const bool sky = parentSky || bin.getBinNum() == RenderBin_Sky;
-            const auto first = draws.size();
+            const auto first = plan.mLeaves.size();
             auto next = bin.getRenderBinList().begin();
             for (; next != bin.getRenderBinList().end() && next->first < 0; ++next)
-                this->bin(*next->second, draws, sky);
+                this->bin(*next->second, plan, sky);
             for (const auto& entry : bin.getRenderLeafList())
-                leaf(*entry, draws, sky);
+                queueLeaf(*entry, plan, sky);
             for (const auto& graph : bin.getStateGraphList())
                 for (const auto& entry : graph->_leaves)
-                    leaf(*entry, draws, sky);
+                    queueLeaf(*entry, plan, sky);
             for (; next != bin.getRenderBinList().end(); ++next)
-                this->bin(*next->second, draws, sky);
-            if (!mShadowCasting && bin.getBinNum() == RenderBin_FirstPerson && draws.size() != first)
-                draws[first].mClearDepthBefore = true;
+                this->bin(*next->second, plan, sky);
+            if (!mShadowCasting && bin.getBinNum() == RenderBin_FirstPerson && plan.mLeaves.size() != first)
+            {
+                plan.mRanges.clearDepth(first, plan.mLeaves.size());
+            }
             mProjectionOutput = projection;
         }
 
@@ -1388,6 +1608,9 @@ namespace MWRender
         {
             std::vector<Render::Draw> mDraws;
             std::vector<Render::Draw> mDistortion;
+            DrawPlan mScenePlan, mDistortionPlan;
+            const osgUtil::RenderStage* mStage = nullptr;
+            std::optional<std::array<float, 4>> mClip;
             std::optional<osg::Matrixd> mProjection;
             Render::TextureHandle mTarget;
             std::array<float, 4> mColor{};
@@ -1395,6 +1618,64 @@ namespace MWRender
             bool mClear = true;
             bool mReversedDepth = true;
         };
+
+        void assemble(DrawPlan& plan, std::vector<Render::Draw>& draws, CapturedView& view)
+        {
+            Render::reserveFor(draws, plan.mLeaves.size());
+            plan.mRanges.begin(plan.mLeaves.size(), draws.size());
+            for (std::size_t i = 0; i < plan.mLeaves.size(); ++i)
+            {
+                const auto& request = plan.mLeaves[i];
+                mProjectionOutput = request.mProjection ? &view.mProjection : nullptr;
+                const auto begin = draws.size();
+                leaf(*request.mLeaf, draws, request.mSky, request.mState, request.mMesh);
+                if (request.mDistortion)
+                    for (auto j = begin; j < draws.size(); ++j)
+                    {
+                        draws[j].mDistortion = true;
+                        draws[j].mLighting = false;
+                        draws[j].mFogEnd = 0;
+                        draws[j].mDepthWrite = false;
+                    }
+                plan.mRanges.emitted(i, draws.size());
+            }
+            plan.mRanges.apply([&](std::size_t draw) { draws[draw].mClearDepthBefore = true; });
+        }
+
+        void prepareViews()
+        {
+            {
+                PrepareTimer timer{ mPrepare.mMeshes };
+                // Start large mod meshes early instead of leaving one large
+                // conversion on a worker after every other task has finished.
+                if (mMeshWorkers.workerCount() && mMeshJobs.size() >= 8)
+                    std::sort(mMeshJobs.begin(), mMeshJobs.end(),
+                        [](const auto* left, const auto* right) { return left->mWorkSize > right->mWorkSize; });
+                mMeshWorkers.run(
+                    mMeshJobs.size(),
+                    [](void* context, std::size_t index) {
+                        auto& owner = *static_cast<Impl*>(context);
+                        prepareMesh(*owner.mMeshJobs[index]);
+                    },
+                    this);
+            }
+            for (std::size_t i = 0; i < mViewCount; ++i)
+            {
+                auto& view = mViews[i];
+                mCurrentStage = view.mStage;
+                mParticleOccurrences.clear();
+                mClipPlane = view.mClip;
+                mShadowCasting = !view.mReversedDepth;
+                assemble(view.mScenePlan, view.mDraws, view);
+                assemble(view.mDistortionPlan, view.mDistortion, view);
+                std::erase_if(view.mDraws, [&](const auto& draw) {
+                    return view.mTarget && (draw.mTexture == view.mTarget || draw.mMaskTexture == view.mTarget);
+                });
+                mShadowCasting = false;
+                mProjectionOutput = nullptr;
+            }
+            mClipPlane.reset();
+        }
 
         void captureEffects(osgUtil::RenderBin& bin)
         {
@@ -1468,8 +1749,7 @@ namespace MWRender
                 if (colorTarget)
                     view.mTarget = target(
                         *colorTarget, view.mViewport[0] + view.mViewport[2], view.mViewport[1] + view.mViewport[3]);
-                mCurrentStage = &stage;
-                mParticleOccurrences.clear();
+                view.mStage = &stage;
                 mClipPlane.reset();
                 for (const auto& [attribute, transform] : stage.getPositionalStateContainer()->getAttrMatrixList())
                     if (const auto* clip = dynamic_cast<const osg::ClipPlane*>(attribute.get());
@@ -1482,20 +1762,18 @@ namespace MWRender
                         std::copy_n(plane.ptr(), 4, value.begin());
                         mClipPlane = value;
                     }
+                view.mClip = mClipPlane;
+                view.mScenePlan.clear();
+                view.mDistortionPlan.clear();
                 view.mDistortion.clear();
                 view.mProjection.reset();
                 mProjectionOutput = shadow ? nullptr : &view.mProjection;
-                mDistortionOutput = shadow ? nullptr : &view.mDistortion;
+                mDistortionOutput = shadow ? nullptr : &view.mDistortionPlan;
                 mShadowCasting = shadow;
-                bin(stage, view.mDraws);
+                bin(stage, view.mScenePlan);
                 mShadowCasting = false;
                 mDistortionOutput = nullptr;
                 mProjectionOutput = nullptr;
-                // A source camera must not read its active color attachment.
-                // The legacy water reflection camera excludes water already.
-                std::erase_if(view.mDraws, [&](const auto& draw) {
-                    return view.mTarget && (draw.mTexture == view.mTarget || draw.mMaskTexture == view.mTarget);
-                });
             }
             for (const auto& [order, child] : stage.getPostRenderList())
                 captureStage(*child);
@@ -1562,6 +1840,11 @@ namespace MWRender
                 const FrameTiming& mTiming;
                 ~Report() { mOwner.reportSlowFrame(mTiming); }
             } report{ *this, timing };
+            struct ClearPlans
+            {
+                Impl& mOwner;
+                ~ClearPlans() { mOwner.clearMeshPlans(); }
+            } clear{ *this };
             mFrameSubmitted = false;
             mMeshChanges = 0;
             mImageChanges = 0;
@@ -1615,6 +1898,7 @@ namespace MWRender
             {
                 PrepareTimer timer{ mPrepare.mScene };
                 captureStage(*stage, true);
+                prepareViews();
                 Render::reserveFor(mPasses, mCompositeViewCount + mViewCount);
                 for (std::size_t i = 0; i < mCompositeViewCount; ++i)
                 {
@@ -1669,6 +1953,7 @@ namespace MWRender
                     mViews[i].mDraws.clear();
                 for (std::size_t i = mCompositeViewCount; i < mCompositeViews.size(); ++i)
                     mCompositeViews[i].mDraws.clear();
+                clearMeshPlans();
             }
             timing.finish(2);
             if (mStats)
@@ -1808,6 +2093,8 @@ namespace MWRender
         std::unique_ptr<Render::BackendModule> mModule;
         osg::ref_ptr<NativeRenderer> mRenderer;
         osg::ref_ptr<osgUtil::SceneView> mSceneView;
+        SceneUtil::ParallelWork mMeshWorkers;
+        std::vector<GpuMesh*> mMeshPlans, mMeshJobs;
         Render::Residency mMeshResidency{ 64 * 1024 * 1024 };
         Render::Residency mTextureResidency{ 256 * 1024 * 1024 };
         RenderAssets::OsgImporter mImporter;
@@ -1816,11 +2103,6 @@ namespace MWRender
         std::chrono::steady_clock::time_point mStatsLastSubmit{};
         osg::observer_ptr<MWRender::PingPongCanvas> mEffectCanvas;
         RenderAssets::OsgStateView mEffectState;
-        struct SharedMesh
-        {
-            RenderAssets::MeshKey mKey;
-            std::shared_ptr<MeshStorage> mStorage;
-        };
         std::map<std::vector<std::uintptr_t>, SharedMesh> mSharedMeshes;
         std::unordered_map<std::pair<const osg::Geometry*, unsigned>, std::unique_ptr<GpuMesh>, MeshLookupHash> mMeshes;
         std::unordered_map<const osg::Array*, std::unique_ptr<GpuMesh>> mGuiMeshes;
@@ -1860,7 +2142,7 @@ namespace MWRender
         std::vector<Render::Pass> mPasses;
         std::map<const osg::Texture2D*, TargetRecord> mTargets;
         std::vector<Render::Draw> mGuiDraws;
-        std::vector<Render::Draw>* mDistortionOutput = nullptr;
+        DrawPlan* mDistortionOutput = nullptr;
         std::optional<osg::Matrixd>* mProjectionOutput = nullptr;
         std::vector<Render::TextureLevel> mLevels;
         std::vector<Render::Vertex> mGuiVertices;

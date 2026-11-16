@@ -119,6 +119,7 @@ file(GLOB UNITTEST_SRC_FILES
     sceneutil/occlusiontraversal.cpp
     sceneutil/screencoverage.cpp
     sceneutil/riggeometry.cpp
+    sceneutil/parallelwork.cpp
 
     sdlutil/startupsignals.cpp
 

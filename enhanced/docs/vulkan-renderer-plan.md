@@ -62,8 +62,25 @@ and reuses diffuse coordinates for an identical mask channel. Common index
 widths and draw ranges avoid per-index virtual calls; uncommon arrays and
 primitives keep the general reader. These changes target synchronous first-use
 conversion and recurring state work without changing visibility or draw order.
-CPU imports and Vulkan resource creation still run on the rendering thread;
-reduced Balmora frame-time spikes have not yet been measured.
+Scene capture now records ordered draw requests and prepares changed meshes in
+a synchronous parallel batch after culling. Static meshes shared by hierarchy
+clones get one conversion job, and animated streams keep their packed storage.
+The render thread participates alongside at most three persistent workers,
+scaled down for small CPUs. Large meshes start first to reduce the final worker
+tail. Job lists and draw plans retain capacity; no futures, source-array clones,
+or per-job callable allocations are introduced. Standard immutable OSG inputs
+can run concurrently; custom array and primitive accessors keep the owner-thread
+path. Small batches and systems unable to create workers use the caller.
+
+All CPU jobs finish before GPU uploads and draw assembly. Source geometry stays
+referenced through preparation, worker errors return to the existing owner-thread
+diagnostic path, and no Vulkan operations run on workers. Draw ranges map skipped
+requests onto the first surviving first-person draw, preserving depth clears,
+clipping, projection selection, distortion output and scene ordering. The existing
+texture-conversion and GPU-resource paths remain on the rendering thread.
+Compiler-evaluated cases cover skipped/nested depth-clear ranges; worker reuse,
+exception draining and custom-input fallback have regression fixture sources.
+Builds, concurrency tests and visual/FPS verification remain user-operated.
 
 Texture sampler variants now share one immutable GPU image generation instead
 of allocating, converting and uploading the same OSG image for every wrapping

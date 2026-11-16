@@ -548,6 +548,34 @@ namespace
         return result;
     }
 
+    TEST(RenderMeshImport, BuiltinDataCanBePreparedInParallelAndCustomAccessorsStayOnTheOwnerThread)
+    {
+        auto geometry = triangle();
+        EXPECT_TRUE(RenderAssets::OsgImporter::canImportInParallel(*geometry));
+        struct CustomPositions : osg::Vec3Array
+        {
+            using osg::Vec3Array::Vec3Array;
+        };
+        osg::ref_ptr<CustomPositions> positions = new CustomPositions(4);
+        const auto* original = static_cast<const osg::Vec3Array*>(geometry->getVertexArray());
+        std::copy(original->begin(), original->end(), positions->begin());
+        geometry->setVertexArray(positions);
+        EXPECT_FALSE(RenderAssets::OsgImporter::canImportInParallel(*geometry));
+        RenderAssets::OsgImporter importer;
+        EXPECT_NO_THROW(importer.importMeshBuffers(*geometry));
+        geometry = triangle();
+        struct CustomIndices : osg::DrawElementsUInt
+        {
+            using osg::DrawElementsUInt::DrawElementsUInt;
+        };
+        osg::ref_ptr<CustomIndices> indices = new CustomIndices(GL_TRIANGLES);
+        for (unsigned index : { 0u, 1u, 2u })
+            indices->push_back(index);
+        geometry->setPrimitiveSet(0, indices);
+        EXPECT_FALSE(RenderAssets::OsgImporter::canImportInParallel(*geometry));
+        EXPECT_NO_THROW(importer.importMeshBuffers(*geometry));
+    }
+
     TEST(RenderMeshImport, ResidentBuffersPreserveFullAssetChannelsForEveryIndexWidth)
     {
         for (unsigned width : { 1u, 2u, 4u })

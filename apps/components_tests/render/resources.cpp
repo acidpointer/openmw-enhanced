@@ -1,6 +1,7 @@
 #include <components/render/allocationranges.hpp>
 #include <components/render/bufferarena.hpp>
 #include <components/render/bufferversions.hpp>
+#include <components/render/drawranges.hpp>
 #include <components/render/framecache.hpp>
 #include <components/render/meshindices.hpp>
 #include <components/render/pipelinecache.hpp>
@@ -19,6 +20,29 @@
 
 namespace
 {
+    static_assert([] {
+        Render::DrawRanges ranges;
+        ranges.clearDepth(1, 4);
+        ranges.clearDepth(2, 3); // Nested weapon range, after rejected geometry.
+        ranges.clearDepth(0, 1); // Empty range must not clear unrelated depth.
+        ranges.begin(4);
+        ranges.emitted(0, 0);
+        ranges.emitted(1, 0);
+        ranges.emitted(2, 1);
+        ranges.emitted(3, 2);
+        std::array<unsigned, 2> marks{};
+        ranges.apply([&](auto index) { ++marks[index]; });
+        if (marks[0] != 2 || marks[1] != 0)
+            return false;
+        ranges.clear();
+        ranges.begin(1, 2);
+        ranges.clearDepth(0, 1);
+        ranges.emitted(0, 3);
+        unsigned first = 0;
+        ranges.apply([&](auto index) { first = index; });
+        return first == 2;
+    }());
+
     // Check the actual cache policy during compilation as well as in the
     // executable suite: revisiting a recent view must not force reuploads.
     static_assert([] {

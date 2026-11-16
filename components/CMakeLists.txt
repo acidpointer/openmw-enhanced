@@ -141,7 +141,7 @@ add_component_dir (shader
 add_component_dir (render
     backend resourcepool allocationranges module
     )
-list(APPEND COMPONENT_FILES render/bufferarena.hpp render/bufferversions.hpp render/framecache.hpp render/meshindices.hpp)
+list(APPEND COMPONENT_FILES render/bufferarena.hpp render/bufferversions.hpp render/drawranges.hpp render/framecache.hpp render/meshindices.hpp)
 
 add_component_dir (renderassets
     model osgimporter osgstate particles effectshader
@@ -151,7 +151,7 @@ list(APPEND COMPONENT_FILES renderassets/meshkey.hpp)
 
 add_component_dir (sceneutil
     clone attach visitor util statesetupdater stateupdater controller skeleton riggeometry morphgeometry lightcontroller
-    lightmanager lightboundsindex lightstatecache lightutil positionattitudetransform workqueue pathgridutil waterutil writescene serialize optimizer
+    lightmanager lightboundsindex lightstatecache lightutil positionattitudetransform workqueue parallelwork pathgridutil waterutil writescene serialize optimizer
     detourdebugdraw navmesh agentpath animblendrules shadow mwshadowtechnique recastmesh shadowsbin osgacontroller rtt
     screencapture depth color riggeometryosgaextension extradata unrefqueue lightcommon clearcolor
     enhancedsettings occlusiontraversal screencoverage occlusioncallback occlusionorder occlusionplan viewpreparation paginganalysis renderstageinventory occlusionpreparation

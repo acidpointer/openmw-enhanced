@@ -65,11 +65,16 @@ namespace RenderAssets
             const osg::Geometry& geometry, unsigned uvUnit = 0, const osg::Matrixf& uvTransform = {});
         // Resident draws already have OSG bounds and packed normals. Import
         // only GPU buffers, without constructing asset-only sidecars or bounds.
-        MeshBuffers importMeshBuffers(const osg::Geometry& geometry, unsigned uvUnit = 0);
+        // These CPU conversion helpers have no shared importer state. Callers
+        // may run independent meshes concurrently while source arrays stay fixed.
+        // Custom array/primitive implementations retain the owner-thread path;
+        // their const accessors may have side effects or private mutable caches.
+        static bool canImportInParallel(const osg::Geometry& geometry, unsigned uvUnit = 0);
+        static MeshBuffers importMeshBuffers(const osg::Geometry& geometry, unsigned uvUnit = 0);
         // Animated streams retain the source mapping and triangle topology.
         // Reimport after changing indices, primitive modes or channel bindings.
-        MeshStream importMeshStream(const osg::Geometry& geometry, unsigned uvUnit = 0);
-        void updateMeshStream(const osg::Geometry& geometry, MeshStream& stream);
+        static MeshStream importMeshStream(const osg::Geometry& geometry, unsigned uvUnit = 0);
+        static void updateMeshStream(const osg::Geometry& geometry, MeshStream& stream);
         static Render::SamplerState importSampler(const osg::Texture& texture);
         void clear();
 

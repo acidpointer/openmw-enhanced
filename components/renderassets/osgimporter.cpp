@@ -1080,6 +1080,33 @@ namespace RenderAssets
         return mesh(geometry, uvUnit, uvTransform);
     }
 
+    bool OsgImporter::canImportInParallel(const osg::Geometry& geometry, unsigned uvUnit)
+    {
+        for (const auto* array : { geometry.getVertexArray(), geometry.getNormalArray(), geometry.getColorArray(),
+                 geometry.getTexCoordArray(uvUnit), geometry.getTexCoordArray(0) })
+        {
+            if (!array)
+                continue;
+            const auto& type = typeid(*array);
+            if (type != typeid(osg::Vec2Array) && type != typeid(osg::Vec3Array) && type != typeid(osg::Vec4Array)
+                && type != typeid(osg::Vec4ubArray) && type != typeid(osg::Vec2dArray)
+                && type != typeid(osg::Vec3dArray) && type != typeid(osg::Vec4dArray)
+                && type != typeid(osg::Vec4usArray))
+                return false;
+        }
+        for (const auto& primitive : geometry.getPrimitiveSetList())
+        {
+            if (!primitive)
+                return false;
+            const auto& type = typeid(*primitive);
+            if (type != typeid(osg::DrawArrays) && type != typeid(osg::DrawArrayLengths)
+                && type != typeid(osg::MultiDrawArrays) && type != typeid(osg::DrawElementsUByte)
+                && type != typeid(osg::DrawElementsUShort) && type != typeid(osg::DrawElementsUInt))
+                return false;
+        }
+        return true;
+    }
+
     MeshBuffers OsgImporter::importMeshBuffers(const osg::Geometry& geometry, unsigned uvUnit)
     {
         auto imported = mesh(geometry, uvUnit, osg::Matrixf{}, nullptr, false);
