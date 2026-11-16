@@ -94,7 +94,7 @@ or filtering combination. A full mip chain also serves base-level-only sampler
 views. Source revisions invalidate the image registry, while already recorded
 views retain the old allocation through their GPU frame. Pending uploads remain
 valid when a source handle is released while sampler views survive. The private
-backend ABI is 15; engine and renderer module must be rebuilt together.
+backend ABI is 17; engine and renderer module must be rebuilt together.
 
 Tightly packed byte textures retain their original RGBA, BGRA, RGB, BGR, red,
 red/green, luminance, luminance/alpha or alpha storage through preparation. Vulkan
@@ -108,7 +108,7 @@ Sampler sharing checks the actual storage format before choosing a compatible
 image generation. GPU staging still performs the required transfer copy; borrowed
 CPU spans eliminate the separate conversion/repacking allocation.
 
-The latest available log contained a 300.33 ms preparation frame during loading:
+An earlier loading log contained a 300.33 ms preparation frame:
 243.31 ms was texture work and 45.09 ms was mesh work. It did not capture warm
 20–30 ms drops under the previous logging threshold. Slow-frame logging now
 captures renderer frames above 20 ms or preparation above 16 ms, still at most
@@ -116,6 +116,65 @@ once every five seconds, with separate texture CPU and creation/staging timings.
 Importer cache cleanup now examines at most 16 entries per saturated insertion
 instead of scanning the entire 4096-entry table under its shared mutex.
 No runtime improvement is claimed from static verification alone.
+
+Saved-game capture now converts the native top-down RGBA readback to tightly
+packed, bottom-up RGB before JPEG encoding, preserving the existing centered crop
+and thumbnail dimensions. The prior path supplied RGBA, which the OSG JPEG writer
+rejects, leaving no saved thumbnail. It also refreshes viewer event/update state
+before the capture, matching the existing screenshot traversal contract.
+
+OMWFX color targets now support declared mip chains, including separate base-level
+framebuffer and full-chain sampler views. A pass requests generation explicitly;
+GPU blits and per-level dependencies complete before subsequent sampling, without
+CPU readback or queue-idle waits. Declared target dimensions, sampling and clear
+colors stay intact. Standard separate RGB/alpha blending factors, add/subtract,
+reverse-subtract, min/max and blend constants now participate in the effect
+pipeline key. Mip generation stays independent of the declared minification filter.
+Blended output loads its destination and uses a final resolve;
+replacement passes retain the overwrite/direct-presentation fast path.
+
+Shader reflection follows reachable functions and pointer references from the
+entry point. Unused API declarations cannot request normal, depth, distortion or
+exposure attachments, and literal operand values are not mistaken for resource
+IDs. Incomplete/library metadata keeps conservative reflection. Within a frame,
+matching engine uniform blocks share camera-corrected storage and one GPU staging
+upload. Matching includes the reflected member layout. Color-only HDR targets no
+longer warm unrelated world pipelines, and unused scratch inputs are resolved
+lazily. Color-only chains can discard the scene depth attachment at pass end;
+water and depth-snapshot consumers retain stores. Effects that read depth keep
+the full stored attachment. The OMWFX sampler parser now keeps source format
+independent of internal storage format. Regression fixture sources and strict syntax checks cover these
+changes; runtime, shader SPIR-V generation, visual and FPS validation remain
+user-operated.
+
+The subsequent post-processing crash log ended with an unsupported pixel
+conversion. Static inspection found that texture import inserted a null cache
+slot before conversion and retirement unconditionally dereferenced it. Uploads
+now publish only completed storage; retirement also rejects empty entries.
+Floating-point and normalized scalar images have a checked conversion path, with
+RGBA32F preserving HDR and signed samples. Packed RGBA float images borrow their
+original bytes. A failed technique rolls back its passes and temporary input
+references while retaining previously assembled techniques.
+
+Scene-only save capture reads the window image before GUI passes and then renders
+those overlays normally in the same submission. It no longer presents a GUI-less
+frame that exposes the unfaded scene. A transfer-to-color dependency protects
+readback from subsequent overlay writes. Native loading screens use the existing
+black GUI texture rather than an unexecuted GL framebuffer-copy callback. The main
+black fader uses a smoothstep curve with the original duration/delay; other faders
+retain their existing timing.
+
+A warm-frame log reported 25.03 ms of texture creation/staging for four uploads,
+with negligible conversion time. Image allocation blocks now scale from 16 to
+64 MiB with local heap size, amortizing allocation calls for large compressed
+textures. Required dedicated allocations remain honored. Large uploads may share
+similarly bounded staging pages; allocation pressure retries the requested size,
+and page metadata records the capacity actually allocated. Small uploads retain
+the original page size. BC6H and BC7 sources now retain native compression and
+color space through GPU upload. Resolution, authored mip chains and material
+visibility are not reduced. Static assertions and regression fixture sources cover
+capture boundaries, fade endpoints, heap-size limits, float samples, compressed
+storage and staging fallback. Runtime and FPS verification remain user-operated.
 
 Mesh and image residency budgets include the union of assets seen over the last
 256 prepared frames, with the existing device ceiling and warm-cache allowance.
@@ -275,9 +334,10 @@ native driver. Supported pixel passes redirect scene color to an offscreen
 target, execute in the existing scratch-routing order, and resolve to the window
 before MyGUI. Technique environment flags, live settings/Lua uniforms, named
 target dimensions, clear colors and history are retained. Native inputs include
-color, sampled forward depth, view-space normals, distortion, custom 2D/3D textures and floating-point HDR
-targets. Engine projection uniforms are converted back to the ordinary GL
-projection expected by OMWFX depth reconstruction. HDR exposure uses a small
+color, reverse depth with normalized OMWFX helpers, view-space normals,
+distortion, custom 2D/3D textures and floating-point HDR targets. Engine projection
+uniforms match the sampled native reverse, zero-to-one depth; builtin helpers
+reconstruct positions directly from raw depth to preserve distance precision. HDR exposure uses a small
 GPU log-luminance reduction and two persistent exposure targets with the
 configured adaptation speed. This samples a 64-by-64 grid rather than reproducing
 the GL full-resolution mip reduction exactly. Effects use the rendering
@@ -292,8 +352,7 @@ per-frame pools/pages. Feedback against an active attachment is rejected, and
 GPU ownership lasts through frame fences. Shader compilation errors and
 unsupported features are logged once instead of being silently ignored.
 
-This is partial OMWFX compatibility: mipmapped effect targets,
-compute/geometry passes, 1D/array/cube samplers, arbitrary pass blending,
+This is partial OMWFX compatibility: compute/geometry passes, 1D/array/cube samplers,
 multiview and a Windows compiler launcher remain outstanding. Such techniques
 are skipped with explicit diagnostics. Packaged Linux builds carry the compiler
 and its dependencies. Runtime compilation and effect output require user
@@ -747,7 +806,7 @@ The public normalized-depth helpers keep their established return convention.
 The bundled linear bloom shader no longer names variables `sample`, a reserved
 word in native GLSL. Explicit `(add, one, zero)` effect passes are accepted as
 replacement, including temporal AO passes; other attachment blend equations,
-compute passes and mipmapped targets still require implementation.
+compute passes still require implementation.
 
 The launcher Enhanced tab exposes the original `[Shadows]` settings: enable,
 actor/player/object/terrain casters, indoor shadows, soft filtering, resolution,

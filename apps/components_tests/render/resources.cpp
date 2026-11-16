@@ -1,13 +1,16 @@
 #include <components/render/allocationranges.hpp>
 #include <components/render/bufferarena.hpp>
 #include <components/render/bufferversions.hpp>
+#include <components/render/capture.hpp>
 #include <components/render/drawranges.hpp>
 #include <components/render/framecache.hpp>
+#include <components/render/memorypolicy.hpp>
 #include <components/render/meshindices.hpp>
 #include <components/render/pipelinecache.hpp>
 #include <components/render/raster.hpp>
 #include <components/render/residency.hpp>
 #include <components/render/resourcepool.hpp>
+#include <components/sceneutil/fade.hpp>
 
 #include <gtest/gtest.h>
 
@@ -20,6 +23,31 @@
 
 namespace
 {
+    constexpr bool captureKeepsPresentationOverlays()
+    {
+        Render::CaptureBoundary thumbnail(true, false);
+        if (thumbnail.before(false, false) || thumbnail.before(true, true) || !thumbnail.before(true, false)
+            || thumbnail.before(true, false) || thumbnail.atEnd())
+            return false;
+        Render::CaptureBoundary full(true, true);
+        if (full.before(false, false) || full.before(true, false) || !full.atEnd() || full.atEnd())
+            return false;
+        Render::CaptureBoundary noGui(true, false);
+        if (noGui.before(false, false) || !noGui.atEnd())
+            return false;
+        Render::CaptureBoundary ordinary(false, false);
+        return !ordinary.before(true, false) && !ordinary.atEnd();
+    }
+    static_assert(captureKeepsPresentationOverlays());
+    static_assert(Render::imageMemoryBlockSize(0) == 16 * 1024 * 1024);
+    static_assert(Render::imageMemoryBlockSize(512ull * 1024 * 1024) == 16 * 1024 * 1024);
+    static_assert(Render::imageMemoryBlockSize(2ull * 1024 * 1024 * 1024) == 32 * 1024 * 1024);
+    static_assert(Render::imageMemoryBlockSize(24ull * 1024 * 1024 * 1024) == 64 * 1024 * 1024);
+    static_assert(SceneUtil::smoothFade(0, 1, -1) == 0 && SceneUtil::smoothFade(0, 1, 2) == 1);
+    static_assert(SceneUtil::smoothFade(0, 1, .5f) == .5f);
+    static_assert(SceneUtil::smoothFade(0, 1, .25f) == .15625f);
+    static_assert(SceneUtil::smoothFade(1, 0, .25f) == .84375f);
+
     static_assert([] {
         Render::DrawRanges ranges;
         ranges.clearDepth(1, 4);

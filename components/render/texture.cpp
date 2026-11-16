@@ -24,8 +24,11 @@ namespace Render
     {
         if (data.mLevels.empty())
             throw std::invalid_argument("Texture has no image levels");
-        if (data.mSrgb && (data.mFormat == TextureFormat::BC4 || data.mFormat == TextureFormat::BC5))
-            throw std::invalid_argument("BC4 and BC5 textures do not have an sRGB encoding");
+        if (data.mSrgb
+            && (data.mFormat == TextureFormat::BC4 || data.mFormat == TextureFormat::BC5
+                || data.mFormat == TextureFormat::RGBA32F || data.mFormat == TextureFormat::BC6Unsigned
+                || data.mFormat == TextureFormat::BC6Signed))
+            throw std::invalid_argument("Texture format does not have an sRGB encoding");
         if (data.mGenerateMipmaps && compressedTexture(data.mFormat))
             throw std::invalid_argument("Automatic mip generation requires uncompressed data");
         auto width = data.mLevels.front().mWidth;

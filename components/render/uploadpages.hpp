@@ -31,7 +31,8 @@ namespace Render
         }
 
         template <class Create>
-        Slice allocate(std::uint64_t size, std::uint64_t alignment, Create&& create)
+        Slice allocate(
+            std::uint64_t size, std::uint64_t alignment, Create&& create, std::uint64_t preferredCapacity = 0)
         {
             if (!size || !alignment)
                 throw std::invalid_argument("Upload size and alignment must be positive");
@@ -48,8 +49,16 @@ namespace Render
                 page.mIdleTrims = 0;
                 return { page.mValue, offset };
             }
-            const auto capacity = std::max(size, mPageSize);
+            const auto minimum = std::max(size, mPageSize);
+            auto capacity = std::max(minimum, preferredCapacity);
             auto value = create(capacity);
+            // A factory can decline optional spare capacity under memory pressure.
+            // Record the capacity actually created, never the larger preference.
+            if (!value && capacity > minimum)
+            {
+                capacity = minimum;
+                value = create(capacity);
+            }
             if (!value)
                 throw std::runtime_error("Cannot create an empty upload page");
             reserveFor(mPages, mPages.size() + 1);

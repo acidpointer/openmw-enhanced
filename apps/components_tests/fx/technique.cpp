@@ -71,6 +71,22 @@ namespace
     technique { passes = main; }
 )" };
 
+    constexpr VFS::Path::NormalizedView samplerFormatsPath("shaders/sampler_formats.omwfx");
+    TestingOpenMW::VFSTestFile samplerFormats{ R"(
+    sampler_2d sized {
+        source = "missing-format-fixture.png";
+        internal_format = r16f;
+        source_type = float;
+        source_format = red;
+    }
+    sampler_2d source_only {
+        source = "missing-format-fixture.png";
+        source_format = rg;
+    }
+    fragment main {}
+    technique { passes = main; }
+)" };
+
     constexpr VFS::Path::NormalizedView missingSamplerSourcePath("shaders/missing_sampler_source.omwfx");
 
     TestingOpenMW::VFSTestFile missingSamplerSource{ R"(
@@ -154,6 +170,7 @@ namespace
                   { techniquePropertiesPath, &techniqueProperties },
                   { rendertargetPropertiesPath, &rendertargetProperties },
                   { uniformPropertiesPath, &uniformProperties },
+                  { samplerFormatsPath, &samplerFormats },
                   { missingSamplerSourcePath, &missingSamplerSource },
                   { repeatedSharedBlockPath, &repeatedSharedBlock },
                   { invalidNumberInfPath, &invalidNumberInf },
@@ -228,6 +245,19 @@ namespace
 
         EXPECT_EQ(mTechnique->getPasses().size(), 2);
         EXPECT_EQ(mTechnique->getPasses()[0]->getTarget(), "rendertarget");
+    }
+
+    TEST_F(TechniqueTest, sampler_source_format_is_independent_of_internal_storage)
+    {
+        // Missing images intentionally use the built-in warning image; these
+        // declarations test sampler metadata without an image codec or GL draw.
+        compile("sampler_formats");
+        ASSERT_EQ(mTechnique->getTextures().size(), 2u);
+        const auto& sized = mTechnique->getTextures()[0];
+        EXPECT_EQ(sized->getInternalFormat(), GL_R16F);
+        EXPECT_EQ(sized->getSourceType(), GL_FLOAT);
+        EXPECT_EQ(sized->getSourceFormat(), GL_RED);
+        EXPECT_EQ(mTechnique->getTextures()[1]->getSourceFormat(), GL_RG);
     }
 
     TEST_F(TechniqueTest, uniform_properties)

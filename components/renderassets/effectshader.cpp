@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 
@@ -156,6 +157,78 @@ namespace RenderAssets
             unsigned op = 0;
             std::vector<std::uint32_t> args;
         };
+        // A generated API header declares all builtin resources. Reflection
+        // must follow the entry point, not make unused helpers request costly
+        // scene attachments (or bind otherwise unavailable sampler inputs).
+        std::optional<std::set<unsigned>> activeGlobals(std::span<const std::uint32_t> words)
+        {
+            struct Function
+            {
+                std::vector<unsigned> mCalls, mReferences;
+            };
+            std::map<unsigned, Function> functions;
+            std::vector<unsigned> entries;
+            unsigned current = 0;
+            for (std::size_t pos = 5; pos < words.size();)
+            {
+                const auto count = words[pos] >> 16;
+                const auto op = words[pos] & 0xffff;
+                if (!count || count > words.size() - pos)
+                    throw std::invalid_argument("Truncated effect instruction");
+                const auto args = words.subspan(pos + 1, count - 1);
+                if (op == 15 && args.size() >= 3) // OpEntryPoint
+                    entries.push_back(args[1]);
+                else if (op == 54 && args.size() == 4) // OpFunction
+                {
+                    current = args[1];
+                    functions.try_emplace(current);
+                }
+                else if (op == 56) // OpFunctionEnd
+                    current = 0;
+                else if (current)
+                {
+                    auto& function = functions[current];
+                    if (op == 57 && args.size() >= 3) // OpFunctionCall
+                    {
+                        function.mCalls.push_back(args[2]);
+                        function.mReferences.insert(function.mReferences.end(), args.begin() + 3, args.end());
+                    }
+                    // Pointer operands only: treating literal operands as IDs
+                    // can falsely activate an unrelated global with that number.
+                    else if ((op == 61 || op == 65 || op == 66 || op == 67 || op == 68 || op == 70 || op == 83)
+                        && args.size() >= 3) // Load, access chains, ArrayLength, CopyObject
+                        function.mReferences.push_back(args[2]);
+                    else if (op == 62 && args.size() >= 2) // OpStore
+                        function.mReferences.push_back(args[0]);
+                    else if ((op == 63 || op == 64) && args.size() >= 2) // CopyMemory, CopyMemorySized
+                        function.mReferences.insert(function.mReferences.end(), args.begin(), args.begin() + 2);
+                    else if (op == 169 && args.size() == 5) // OpSelect
+                        function.mReferences.insert(function.mReferences.end(), args.begin() + 3, args.end());
+                    else if (op == 245 && args.size() >= 4) // OpPhi
+                        for (std::size_t index = 2; index < args.size(); index += 2)
+                            function.mReferences.push_back(args[index]);
+                }
+                pos += count;
+            }
+            // Conservative fallback for metadata-only fixtures or libraries.
+            if (entries.empty() || functions.empty())
+                return {};
+            std::set<unsigned> visited, referenced;
+            while (!entries.empty())
+            {
+                const auto id = entries.back();
+                entries.pop_back();
+                if (!visited.insert(id).second)
+                    continue;
+                const auto found = functions.find(id);
+                if (found == functions.end())
+                    return {}; // Unknown call: keep resources rather than lose one.
+                referenced.insert(found->second.mReferences.begin(), found->second.mReferences.end());
+                entries.insert(entries.end(), found->second.mCalls.begin(), found->second.mCalls.end());
+            }
+            return referenced;
+        }
+
         struct Decoration
         {
             std::optional<unsigned> binding, set, offset;
@@ -348,9 +421,12 @@ namespace RenderAssets
             output.push_back(std::move(member));
             return static_cast<unsigned>(bytes);
         };
+        const auto active = activeGlobals(words);
         std::vector<EffectResource> result;
         for (const auto& [id, variable] : variables)
         {
+            if (active && !active->contains(id))
+                continue;
             const auto storage = variable.second;
             if (storage != 0 && storage != 2)
             {

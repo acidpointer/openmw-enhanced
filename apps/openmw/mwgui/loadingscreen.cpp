@@ -1,5 +1,7 @@
 #include "loadingscreen.hpp"
 
+#include <components/render/presentation.hpp>
+
 #include <array>
 
 #include <osgViewer/Viewer>
@@ -279,6 +281,16 @@ namespace MWGui
 
     void LoadingScreen::setupCopyFramebufferToTextureCallback()
     {
+        if (dynamic_cast<Render::Presentation*>(mViewer->getCamera()->getRenderer()))
+        {
+            // Native frames do not execute GL framebuffer-copy callbacks.
+            // An image-less placeholder would expose the camera clear color.
+            mSplashImage->setVisible(false);
+            mSceneImage->setBackgroundImage("black", false, true);
+            mSceneImage->setVisible(true);
+            return;
+        }
+
         // Copy the current framebuffer onto a texture and display that texture as the background image
         // Note, we could also set the camera to disable clearing and have the background image transparent,
         // but then we get shaking effects on buffer swaps.

@@ -10,7 +10,8 @@ namespace Render
 {
     constexpr bool compressedTexture(TextureFormat format)
     {
-        return format >= TextureFormat::BC1RGB && format <= TextureFormat::BC5;
+        return (format >= TextureFormat::BC1RGB && format <= TextureFormat::BC5)
+            || (format >= TextureFormat::BC6Unsigned && format <= TextureFormat::BC7RGBA);
     }
 
     enum class TextureComponent : unsigned char
@@ -55,6 +56,10 @@ namespace Render
             case TextureFormat::BC2:
             case TextureFormat::BC3:
             case TextureFormat::BC5:
+            case TextureFormat::BC6Unsigned:
+            case TextureFormat::BC6Signed:
+            case TextureFormat::BC7RGBA:
+            case TextureFormat::RGBA32F:
                 return 16;
             default:
                 return 4;
@@ -77,6 +82,10 @@ namespace Render
         std::uint64_t stride = 0;
         switch (format)
         {
+            case TextureFormat::RGBA32F:
+                units = std::uint64_t{ width } * height;
+                stride = 16;
+                break;
             case TextureFormat::RGBA8:
             case TextureFormat::BGRA8:
                 units = std::uint64_t{ width } * height;
@@ -107,6 +116,9 @@ namespace Render
             case TextureFormat::BC2:
             case TextureFormat::BC3:
             case TextureFormat::BC5:
+            case TextureFormat::BC6Unsigned:
+            case TextureFormat::BC6Signed:
+            case TextureFormat::BC7RGBA:
                 units = ((std::uint64_t{ width } + 3) / 4) * ((std::uint64_t{ height } + 3) / 4);
                 stride = 16;
                 break;

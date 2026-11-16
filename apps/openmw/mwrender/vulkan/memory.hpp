@@ -9,10 +9,30 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace MWRender::Vulkan
 {
+    class AllocationFailure : public std::runtime_error
+    {
+    public:
+        AllocationFailure(VkResult result, const char* operation)
+            : std::runtime_error(std::string(operation) + " failed (Vulkan result " + std::to_string(result) + ")")
+            , mResult(result)
+        {
+        }
+        bool retryable() const
+        {
+            return mResult == VK_ERROR_OUT_OF_DEVICE_MEMORY || mResult == VK_ERROR_OUT_OF_HOST_MEMORY
+                || mResult == VK_ERROR_MEMORY_MAP_FAILED;
+        }
+
+    private:
+        VkResult mResult;
+    };
+
     // Keep linear buffers and optimal images in separate blocks, satisfying
     // bufferImageGranularity without padding every small mesh allocation.
     enum class MemoryKind
@@ -78,6 +98,10 @@ namespace MWRender::Vulkan
         {
             return kind == MemoryKind::Upload ? 4 * 1024 * 1024 : 16 * 1024 * 1024;
         }
+        VkDeviceSize preferredBlockSize(MemoryKind kind) const
+        {
+            return kind == MemoryKind::Image ? mImageBlockSize : blockSize(kind);
+        }
         Allocation allocate(const VkMemoryRequirements& requirements, MemoryKind kind,
             const VkMemoryDedicatedAllocateInfo* dedicated = nullptr);
         // Keep one unused block per type/kind for reuse and release excess
@@ -88,6 +112,7 @@ namespace MWRender::Vulkan
     private:
         VkDevice mDevice;
         VkPhysicalDeviceMemoryProperties mProperties;
+        VkDeviceSize mImageBlockSize = blockSize(MemoryKind::Image);
         std::vector<std::shared_ptr<MemoryBlock>> mBlocks;
     };
 }

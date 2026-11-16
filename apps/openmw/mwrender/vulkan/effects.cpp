@@ -126,6 +126,7 @@ namespace MWRender::Vulkan
             Render::TargetFormat mFormat = Render::TargetFormat::RGBA8;
             Render::SamplerState mSampler;
             bool mInitialized = false;
+            bool mMipmaps = false;
             explicit Target(Render::Backend& backend)
                 : mBackend(backend)
             {
@@ -212,6 +213,16 @@ namespace MWRender::Vulkan
             std::vector<Render::EffectInput> mInputs;
         };
         std::deque<Work> mWork;
+        struct EngineBuffer
+        {
+            const osg::BufferData* mSource = nullptr;
+            std::size_t mOffset = 0;
+            std::vector<std::byte> mBytes;
+            std::vector<RenderAssets::EffectMember> mLayout;
+        };
+        // Stable spans survive all pass assembly; capacity survives frames.
+        std::deque<EngineBuffer> mEngineBuffers;
+        std::size_t mEngineBuffersUsed = 0;
         std::size_t mWorkUsed = 0;
         std::vector<Render::Pass> mEffectPasses;
         Work& nextWork()
@@ -272,18 +283,19 @@ namespace MWRender::Vulkan
                 mBackend.releaseMesh(mQuad);
         }
         Target& target(std::unique_ptr<Target>& holder, unsigned width, unsigned height, Render::TargetFormat format,
-            const Render::SamplerState& sampling = {}, bool screen = true)
+            const Render::SamplerState& sampling = {}, bool screen = true, bool mipmaps = false)
         {
             auto sampler = sampling;
             if (screen)
                 sampler.mWrapS = sampler.mWrapT = Render::TextureWrap::Clamp;
-            sampler.mUseMipmaps = false;
+            sampler.mUseMipmaps = sampling.mUseMipmaps && mipmaps;
             if (!holder || holder->mWidth != width || holder->mHeight != height || holder->mFormat != format
-                || holder->mSampler != sampler)
+                || holder->mSampler != sampler || holder->mMipmaps != mipmaps)
             {
                 auto result = std::make_unique<Target>(mBackend);
                 result->mSampler = sampler;
-                result->mColor = mBackend.createRenderTarget(width, height, sampler, format);
+                result->mMipmaps = mipmaps;
+                result->mColor = mBackend.createRenderTarget(width, height, sampler, format, mipmaps);
                 result->mWidth = width;
                 result->mHeight = height;
                 result->mFormat = format;
@@ -397,38 +409,54 @@ namespace MWRender::Vulkan
                     work.mInputs.push_back({ resource.mBinding.mBinding, texture(resource.mName), {} });
                 else
                 {
-                    if (block == work.mData.size())
-                        work.mData.emplace_back();
-                    auto& bytes = work.mData[block++];
-                    bytes.assign(resource.mBinding.mSize, std::byte{});
-                    bool engineBuffer = false;
-                    if (resource.mName == "_data")
+                    const auto* binding = resource.mName == "_data"
+                        ? dynamic_cast<const osg::UniformBufferBinding*>(
+                              state.getAttribute(osg::StateAttribute::UNIFORMBUFFERBINDING,
+                                  static_cast<unsigned>(Resource::SceneManager::UBOBinding::PostProcessor)))
+                        : nullptr;
+                    if (binding && binding->getBufferData() && binding->getOffset() >= 0)
                     {
-                        const auto* binding = dynamic_cast<const osg::UniformBufferBinding*>(
-                            state.getAttribute(osg::StateAttribute::UNIFORMBUFFERBINDING,
-                                static_cast<unsigned>(Resource::SceneManager::UBOBinding::PostProcessor)));
-                        if (binding && binding->getBufferData() && binding->getOffset() >= 0)
+                        const auto* source = binding->getBufferData();
+                        const auto offset = static_cast<std::size_t>(binding->getOffset());
+                        const auto size = resource.mBinding.mSize;
+                        const auto available = source->getTotalDataSize();
+                        if (offset > available || size > available - offset
+                            || size > static_cast<std::size_t>(binding->getSize()))
+                            throw std::invalid_argument("OMWFX engine buffer does not match reflected layout");
+                        auto found = std::find_if(mEngineBuffers.begin(), mEngineBuffers.begin() + mEngineBuffersUsed,
+                            [&](const auto& cached) {
+                                return cached.mSource == source && cached.mOffset == offset
+                                    && cached.mBytes.size() == size && cached.mLayout == resource.mMembers;
+                            });
+                        if (found == mEngineBuffers.begin() + mEngineBuffersUsed)
                         {
-                            const auto offset = static_cast<std::size_t>(binding->getOffset());
-                            const auto available = binding->getBufferData()->getTotalDataSize();
-                            if (offset <= available && bytes.size() <= available - offset
-                                && bytes.size() <= static_cast<std::size_t>(binding->getSize()))
-                            {
-                                std::memcpy(bytes.data(),
-                                    static_cast<const std::byte*>(binding->getBufferData()->getDataPointer()) + offset,
-                                    bytes.size());
-                                engineBuffer = true;
-                            }
-                            else
-                                throw std::invalid_argument("OMWFX engine buffer does not match reflected layout");
+                            if (mEngineBuffersUsed == mEngineBuffers.size())
+                                mEngineBuffers.emplace_back();
+                            auto& cached = mEngineBuffers[mEngineBuffersUsed++];
+                            cached.mSource = source;
+                            cached.mOffset = offset;
+                            if (cached.mLayout != resource.mMembers)
+                                cached.mLayout = resource.mMembers;
+                            cached.mBytes.resize(size);
+                            std::memcpy(cached.mBytes.data(),
+                                static_cast<const std::byte*>(source->getDataPointer()) + offset, size);
+                            for (const auto& member : resource.mMembers)
+                                packMember(cached.mBytes, member, state, mCameraState, projection, inverse, true);
+                            work.mInputs.push_back({ resource.mBinding.mBinding, {}, cached.mBytes });
                         }
+                        else
+                            work.mInputs.push_back({ resource.mBinding.mBinding, {}, found->mBytes });
                     }
-                    for (const auto& member : resource.mMembers)
-                        // A bound GL uniform block supplies its members as one
-                        // buffer, not as individual uniforms in every ancestor.
-                        // Only native camera corrections override that block.
-                        packMember(bytes, member, state, mCameraState, projection, inverse, engineBuffer);
-                    work.mInputs.push_back({ resource.mBinding.mBinding, {}, bytes });
+                    else
+                    {
+                        if (block == work.mData.size())
+                            work.mData.emplace_back();
+                        auto& bytes = work.mData[block++];
+                        bytes.assign(resource.mBinding.mSize, std::byte{});
+                        for (const auto& member : resource.mMembers)
+                            packMember(bytes, member, state, mCameraState, projection, inverse, false);
+                        work.mInputs.push_back({ resource.mBinding.mBinding, {}, bytes });
+                    }
                 }
             }
         }
@@ -566,6 +594,7 @@ void main() {
             mExposureQueued = false;
             mCameraQueued = false;
             mWorkUsed = 0;
+            mEngineBuffersUsed = 0;
             mInitialized.clear();
             mResolve.clear();
             const auto plan = Fx::makeExecutionPlan(canvas.getPasses(), canvas.getMask(), canvas.getPostProcessing());
@@ -619,13 +648,8 @@ void main() {
                     result.passes.clear();
                     for (const auto& pass : node.mPasses)
                     {
-                        if (pass.mMipMap)
-                            throw std::invalid_argument("Mipmapped OMWFX targets are not yet available in Vulkan");
                         RenderAssets::OsgStateView root(&canvasState, node.mRootStateSet);
                         RenderAssets::OsgStateView state(&root, pass.mStateSet);
-                        if (!RenderAssets::effectReplacesDestination(state))
-                            throw std::invalid_argument(
-                                "OMWFX attachment blending requires an unsupported blend equation");
                         auto shader = program(state);
                         if (!mBackend.deviceInfo().mFloatNormals
                             && std::any_of(shader->mShader.mResources.begin(), shader->mShader.mResources.end(),
@@ -664,7 +688,7 @@ void main() {
                 ? (plan.mHDR ? Render::TargetFormat::SceneRGBA16F : Render::TargetFormat::SceneRGBA8)
                 : format;
             auto& scene = target(mScene, width, height, sceneFormat);
-            if (!scene.mDepth)
+            if ((needsDepth || needsDistortion) && !scene.mDepth)
                 scene.mDepth = mBackend.depthTexture(scene.mColor);
             if (needsNormals && !scene.mNormals)
                 scene.mNormals = mBackend.normalTexture(scene.mColor);
@@ -763,83 +787,118 @@ void main(){
                 }
                 return destination.mColor;
             };
+            std::size_t completed = 0;
             for (const auto& item : prepared)
             {
                 const auto& node = *item.node;
-                for (const auto& [name, source] : node.mHandle->getRenderTargetsMap())
+                const auto passCount = effects.size(), initializedCount = mInitialized.size();
+                const auto workCount = mWorkUsed, engineCount = mEngineBuffersUsed;
+                const auto previousRouting = routing;
+                const auto previousDirect = presentDirectly;
+                try
                 {
-                    auto& entry = mNamed[{ node.mHandle.get(), std::string(name) }];
-                    if (entry.mOwner.lock() != node.mHandle || entry.mSource.get() != source.mTarget.get())
+                    for (const auto& [name, source] : node.mHandle->getRenderTargetsMap())
                     {
-                        entry.mTarget.reset();
-                        entry.mOwner = node.mHandle;
-                        entry.mSource = source.mTarget.get();
+                        auto& entry = mNamed[{ node.mHandle.get(), std::string(name) }];
+                        if (entry.mOwner.lock() != node.mHandle || entry.mSource.get() != source.mTarget.get())
+                        {
+                            entry.mTarget.reset();
+                            entry.mOwner = node.mHandle;
+                            entry.mSource = source.mTarget.get();
+                        }
+                        const auto [w, h] = source.mSize.get(width, height);
+                        auto& destination
+                            = target(entry.mTarget, w, h, targetFormat(source.mTarget->getInternalFormat()),
+                                RenderAssets::OsgImporter::importSampler(*source.mTarget), false, source.mMipMap);
+                        if (!destination.mInitialized)
+                        {
+                            effects.push_back({ {}, destination.mColor,
+                                { source.mClearColor.r(), source.mClearColor.g(), source.mClearColor.b(),
+                                    source.mClearColor.a() } });
+                            effects.back().mGenerateMipmaps = source.mMipMap;
+                            mInitialized.push_back(&destination);
+                        }
                     }
-                    const auto [w, h] = source.mSize.get(width, height);
-                    auto& destination = target(entry.mTarget, w, h, targetFormat(source.mTarget->getInternalFormat()),
-                        RenderAssets::OsgImporter::importSampler(*source.mTarget), false);
-                    if (!destination.mInitialized)
+                    for (std::size_t index = 0; index < item.passes.size(); ++index)
                     {
-                        effects.push_back({ {}, destination.mColor,
-                            { source.mClearColor.r(), source.mClearColor.g(), source.mClearColor.b(),
-                                source.mClearColor.a() } });
-                        mInitialized.push_back(&destination);
+                        const auto& [shader, sourceState] = item.passes[index];
+                        RenderAssets::OsgStateView root(&canvasState, node.mRootStateSet);
+                        RenderAssets::OsgStateView state(&root, sourceState);
+                        const auto& source = node.mHandle->getPasses()[index];
+                        const auto name = source->getTarget();
+                        const auto blending = RenderAssets::effectBlend(state);
+                        const bool overwrite
+                            = !blending.mEnabled && source->usesDefaultVertexShader() && !shader->mShader.mMayDiscard;
+                        presentDirectly = &item == &prepared.back() && index + 1 == item.passes.size() && name.empty()
+                            && overwrite && !shader->mShader.mRequiresOffscreen;
+                        auto nextRouting = routing;
+                        const int slot = name.empty() ? nextRouting.selectOutput(index + 1 == item.passes.size()) : -1;
+                        const auto output = !name.empty() ? mNamed.at({ node.mHandle.get(), name }).mTarget->mColor
+                            : presentDirectly             ? Render::TextureHandle{}
+                                                          : scratch(slot);
+                        auto& work = nextWork();
+                        uniforms(work, *shader, state, osg::Matrixf(projection), [&](const std::string& sampler) {
+                            if (sampler == "omw_SamplerDistortion")
+                                return distortionTexture;
+                            if (sampler == "omw_EyeAdaptation")
+                                return eye;
+                            if (sampler == "omw_SamplerLastShader")
+                                return scratch(routing.lastShader());
+                            if (sampler == "omw_SamplerLastPass")
+                                return scratch(routing.lastPass());
+                            if (sampler == "omw_SamplerNormals")
+                                return scene.mNormals;
+                            if (sampler == "omw_SamplerWorldDepth")
+                                return worldDepth;
+                            if (sampler == "omw_SamplerDepth")
+                                return depth;
+                            if (const auto named = mNamed.find({ node.mHandle.get(), sampler }); named != mNamed.end())
+                                return named->second.mTarget->mColor;
+                            const auto unit = RenderAssets::textureUnit(state, sampler);
+                            const auto* attribute
+                                = unit ? state.getTextureAttribute(*unit, osg::StateAttribute::TEXTURE) : nullptr;
+                            if (const auto* image = dynamic_cast<const osg::Texture2D*>(attribute))
+                                return mTextures(image);
+                            if (const auto* image = dynamic_cast<const osg::Texture3D*>(attribute))
+                                return volume(*image);
+                            throw std::invalid_argument("Missing or unsupported OMWFX texture: " + sampler);
+                        });
+                        for (const auto& input : work.mInputs)
+                            if (output && input.mTexture == output)
+                                throw std::invalid_argument("OMWFX pass samples its own render target");
+                        effects.push_back({ {}, output, {}, false, {}, shader->mHandle, work.mInputs });
+                        effects.back().mOverwrite = overwrite;
+                        effects.back().mEffectBlend = blending;
+                        effects.back().mGenerateMipmaps = node.mPasses[index].mMipMap;
+                        routing = nextRouting;
+                        if (presentDirectly)
+                        {
+                            effects.back().mViewport = windowViewport;
+                            effects.back().mClear = true;
+                        }
                     }
+                    ++completed;
                 }
-                for (std::size_t index = 0; index < item.passes.size(); ++index)
+                catch (const std::exception& error)
                 {
-                    const auto& [shader, sourceState] = item.passes[index];
-                    RenderAssets::OsgStateView root(&canvasState, node.mRootStateSet);
-                    RenderAssets::OsgStateView state(&root, sourceState);
-                    const auto lastShader = scratch(routing.lastShader());
-                    const auto lastPass = scratch(routing.lastPass());
-                    const auto& source = node.mHandle->getPasses()[index];
-                    const auto name = source->getTarget();
-                    const bool overwrite = source->usesDefaultVertexShader() && !shader->mShader.mMayDiscard;
-                    presentDirectly = &item == &prepared.back() && index + 1 == item.passes.size() && name.empty()
-                        && overwrite && !shader->mShader.mRequiresOffscreen;
-                    const int slot = name.empty() ? routing.selectOutput(index + 1 == item.passes.size()) : -1;
-                    const auto output = !name.empty() ? mNamed.at({ node.mHandle.get(), name }).mTarget->mColor
-                        : presentDirectly             ? Render::TextureHandle{}
-                                                      : scratch(slot);
-                    auto& work = nextWork();
-                    uniforms(work, *shader, state, osg::Matrixf(projection), [&](const std::string& sampler) {
-                        if (sampler == "omw_SamplerDistortion")
-                            return distortionTexture;
-                        if (sampler == "omw_EyeAdaptation")
-                            return eye;
-                        if (sampler == "omw_SamplerLastShader")
-                            return lastShader;
-                        if (sampler == "omw_SamplerLastPass")
-                            return lastPass;
-                        if (sampler == "omw_SamplerNormals")
-                            return scene.mNormals;
-                        if (sampler == "omw_SamplerWorldDepth")
-                            return worldDepth;
-                        if (sampler == "omw_SamplerDepth")
-                            return depth;
-                        if (const auto named = mNamed.find({ node.mHandle.get(), sampler }); named != mNamed.end())
-                            return named->second.mTarget->mColor;
-                        const auto unit = RenderAssets::textureUnit(state, sampler);
-                        const auto* attribute
-                            = unit ? state.getTextureAttribute(*unit, osg::StateAttribute::TEXTURE) : nullptr;
-                        if (const auto* image = dynamic_cast<const osg::Texture2D*>(attribute))
-                            return mTextures(image);
-                        if (const auto* image = dynamic_cast<const osg::Texture3D*>(attribute))
-                            return volume(*image);
-                        throw std::invalid_argument("Missing or unsupported OMWFX texture: " + sampler);
-                    });
-                    for (const auto& input : work.mInputs)
-                        if (output && input.mTexture == output)
-                            throw std::invalid_argument("OMWFX pass samples its own render target");
-                    effects.push_back({ {}, output, {}, false, {}, shader->mHandle, work.mInputs });
-                    effects.back().mOverwrite = overwrite;
-                    if (presentDirectly)
-                    {
-                        effects.back().mViewport = windowViewport;
-                        effects.back().mClear = true;
-                    }
+                    // Keep prior techniques and their immutable input spans.
+                    // A bad mod texture/pass must not disable the entire chain.
+                    effects.resize(passCount);
+                    mInitialized.resize(initializedCount);
+                    mWorkUsed = workCount;
+                    mEngineBuffersUsed = engineCount;
+                    routing = previousRouting;
+                    presentDirectly = previousDirect;
+                    const auto message = node.mHandle->getName() + ": " + error.what();
+                    if (mWarnings.insert(message).second)
+                        Log(Debug::Warning) << "Vulkan OMWFX skipped " << message;
                 }
+            }
+            if (!completed)
+            {
+                mInitialized.clear();
+                mExposureQueued = false;
+                return;
             }
             if (!presentDirectly)
             {
@@ -861,6 +920,7 @@ void main(){
             passes[sceneIndex].mViewport = { 0, 0, width, height };
             passes[sceneIndex].mTarget = scene.mColor;
             passes[sceneIndex].mPreserveWorldDepth = firstPerson;
+            passes[sceneIndex].mDiscardDepthAfter = !needsDepth && !needsDistortion;
             passes.insert(passes.begin() + sceneIndex + 1, effects.begin(), effects.end());
             if (!presentDirectly)
                 passes.insert(

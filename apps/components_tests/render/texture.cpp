@@ -7,6 +7,12 @@
 
 namespace
 {
+    static_assert(Render::textureLevelSize(Render::TextureFormat::BC7RGBA, 5, 3) == 32);
+    static_assert(Render::textureLevelSize(Render::TextureFormat::BC6Signed, 1, 1) == 16);
+    static_assert(Render::compressedTexture(Render::TextureFormat::BC6Unsigned));
+    static_assert(Render::textureCopyAlignment(Render::TextureFormat::BC7RGBA) == 16);
+    static_assert(Render::textureLevelSize(Render::TextureFormat::RGBA32F, 5, 3) == 240);
+    static_assert(Render::textureCopyAlignment(Render::TextureFormat::RGBA32F) == 16);
     // Evaluate the upload policy used by the real Vulkan path: odd-sized
     // levels cannot overlap and every absolute offset must align to a texel.
     constexpr bool packedMipOffsets()

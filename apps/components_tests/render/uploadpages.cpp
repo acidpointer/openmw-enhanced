@@ -6,6 +6,42 @@
 
 namespace
 {
+    TEST(RenderUploadPages, LargeTextureUploadsSharePreferredPages)
+    {
+        Render::UploadPages<int> pages(4);
+        int created = 0;
+        const auto create = [&](std::uint64_t capacity) {
+            EXPECT_EQ(capacity, 64u);
+            return std::make_shared<int>(++created);
+        };
+        auto a = pages.allocate(21, 1, create, 64);
+        auto b = pages.allocate(21, 1, create, 64);
+        auto c = pages.allocate(21, 1, create, 64);
+        EXPECT_EQ(a.mPage, b.mPage);
+        EXPECT_EQ(a.mPage, c.mPage);
+        EXPECT_EQ(b.mOffset, 21u);
+        EXPECT_EQ(c.mOffset, 42u);
+        auto next = pages.allocate(21, 1, create, 64);
+        EXPECT_NE(next.mPage, a.mPage);
+        EXPECT_EQ(created, 2);
+    }
+
+    TEST(RenderUploadPages, MemoryPressureFallbackRecordsActualCapacity)
+    {
+        Render::UploadPages<int> pages(4);
+        std::vector<std::uint64_t> attempted;
+        const auto create = [&](std::uint64_t capacity) -> std::shared_ptr<int> {
+            attempted.push_back(capacity);
+            return capacity == 64 ? nullptr : std::make_shared<int>(1);
+        };
+        auto first = pages.allocate(21, 1, create, 64);
+        ASSERT_TRUE(first);
+        EXPECT_EQ(attempted, (std::vector<std::uint64_t>{ 64, 21 }));
+        auto next = pages.allocate(1, 1, create);
+        EXPECT_NE(next.mPage, first.mPage);
+        EXPECT_EQ(attempted.back(), 4u);
+    }
+
     TEST(RenderUploadPages, PacksAlignedSlicesWithoutOverlappingLiveUploads)
     {
         Render::UploadPages<int> pages(64);

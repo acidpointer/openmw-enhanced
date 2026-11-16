@@ -181,6 +181,41 @@ void main() { omw_FragColor = texture2D(omw_SamplerLastShader, omw_TexCoord); }
         EXPECT_THROW(RenderAssets::translateEffectShader("#version 120\n#version 450", true), std::invalid_argument);
     }
 
+    TEST(NativeEffectShader, ReflectionFollowsCallsInsteadOfUnusedApiDeclarationsOrLiteralOperands)
+    {
+        Module m;
+        m.instruction(22, { 1, 32 });
+        m.instruction(25, { 2, 1, 1, 0, 0, 0, 1, 0 });
+        m.instruction(27, { 3, 2 });
+        m.instruction(32, { 4, 0, 3 });
+        for (unsigned id : { 5u, 6u, 8u })
+        {
+            m.instruction(59, { 4, id, 0 });
+            m.instruction(71, { id, 33, id });
+            m.instruction(71, { id, 34, 0 });
+        }
+        m.name(5, { 5 }, "scene");
+        m.name(5, { 6 }, "omw_SamplerNormals");
+        m.name(5, { 8 }, "omw_SamplerDepth");
+        m.name(15, { 4, 10 }, "main");
+        m.instruction(54, { 20, 10, 0, 21 });
+        m.instruction(57, { 20, 23, 11 });
+        m.instruction(56, {});
+        m.instruction(54, { 20, 11, 0, 21 });
+        // The optional memory alignment is a literal, not sampler ID 8.
+        m.instruction(61, { 3, 24, 5, 2, 8 });
+        m.instruction(56, {});
+        m.instruction(54, { 20, 12, 0, 21 }); // Never called.
+        m.instruction(61, { 3, 25, 6 });
+        m.instruction(56, {});
+        const auto resources = RenderAssets::reflectEffectShader(m.words);
+        ASSERT_EQ(resources.size(), 1u);
+        EXPECT_EQ(resources[0].mName, "scene");
+        // Incomplete library metadata must retain resources conservatively.
+        m.name(15, { 4, 31 }, "unknown");
+        EXPECT_EQ(RenderAssets::reflectEffectShader(m.words).size(), 3u);
+    }
+
     TEST(NativeEffectShader, ReflectsEngineStructAndColumnMajorProjection)
     {
         Module m;

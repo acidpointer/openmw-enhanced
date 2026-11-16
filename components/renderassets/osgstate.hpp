@@ -14,6 +14,11 @@ namespace osg
     class StateSet;
 }
 
+namespace Render
+{
+    struct EffectBlend;
+}
+
 namespace RenderAssets
 {
     // Order matches the fixed, sorted native name table in osgstate.cpp.
@@ -168,6 +173,7 @@ namespace RenderAssets
         bool reversedNativeDepth = false);
     std::array<float, 4> depthCoefficients(const osg::Matrixd& projection, bool zeroToOne);
     // Explicit (add, one, zero) blending is replacement, just like blending off.
+    Render::EffectBlend effectBlend(const OsgStateView& state);
     bool effectReplacesDestination(const OsgStateView& state);
 
     std::optional<unsigned> textureUnit(const osg::StateSet& state, std::string_view name);

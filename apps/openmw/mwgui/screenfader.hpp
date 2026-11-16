@@ -58,6 +58,8 @@ namespace MWGui
         void notifyAlphaChanged(float alpha);
         void notifyOperationFinished();
         float getCurrentAlpha();
+        void setSmooth(bool value) { mSmooth = value; }
+        bool smooth() const { return mSmooth; }
 
     private:
         void applyAlpha();
@@ -65,6 +67,7 @@ namespace MWGui
         float mCurrentAlpha;
         float mFactor;
 
+        bool mSmooth = false;
         bool mRepeat; // repeat queued operations without removing them
         std::deque<FadeOp::Ptr> mQueue;
     };

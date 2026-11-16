@@ -371,14 +371,7 @@ namespace MWRender
             };
             mRenderer->mPresentMode = [this](Render::PresentMode mode) { backend().setPresentMode(mode); };
             mRenderer->mCapture = [this](bool includeGui) {
-                struct RestoreGui
-                {
-                    bool& mValue;
-                    bool mPrevious;
-                    ~RestoreGui() { mValue = mPrevious; }
-                } restore{ mDrawGui, mDrawGui };
-                mDrawGui = includeGui;
-                backend().requestCapture();
+                backend().requestCapture(includeGui);
                 const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
                 do
                 {
@@ -554,7 +547,10 @@ namespace MWRender
             auto height = static_cast<std::uint32_t>(image->t());
             for (unsigned level = 0; level < image->getNumMipmapLevels(); ++level)
             {
-                const auto size = Render::textureLevelSize(Render::TextureFormat::RGBA8, width, height);
+                const auto size = Render::textureLevelSize(image->getDataType() == GL_UNSIGNED_BYTE
+                        ? Render::TextureFormat::RGBA8
+                        : Render::TextureFormat::RGBA32F,
+                    width, height);
                 if (size > ConversionBudget - mPlannedImageBytes - bytes)
                     return;
                 bytes += size;
@@ -636,11 +632,14 @@ namespace MWRender
                                                                                        : Render::TextureHandle{};
             const auto sampling = RenderAssets::OsgImporter::importSampler(*source);
             const auto key = std::tuple{ reinterpret_cast<std::uintptr_t>(sourceImage), sampling };
-            auto& slot = mTextures[key];
-            if (!slot || slot->mImage.get() != sourceImage || !slot->mHandle
-                || slot->mRevision != sourceImage->getModifiedCount())
+            auto found = mTextures.find(key);
+            if (found == mTextures.end() || !found->second || found->second->mImage.get() != sourceImage
+                || !found->second->mHandle || found->second->mRevision != sourceImage->getModifiedCount())
             {
                 PrepareTimer timer{ mPrepare.mTextures };
+                // Publish only a complete upload. A conversion/device failure
+                // must not leave a null cache entry for retirement to dereference.
+                std::shared_ptr<GpuTexture> replacement;
                 if (auto existingStorage = imageStorage(*sourceImage, sampling))
                 {
                     auto view = std::make_shared<GpuTexture>(backend());
@@ -654,7 +653,7 @@ namespace MWRender
                         view->mHandle = backend().createTextureSamplerView(view->mStorage->mHandle, sampling);
                     }
                     consumedImage(*sourceImage, sampling.mUseMipmaps);
-                    slot = std::move(view);
+                    replacement = std::move(view);
                 }
                 else
                 {
@@ -712,11 +711,12 @@ namespace MWRender
                     }
                     storage->mResidency.set(bytes);
                     mImageVariants.store(*sourceImage, sampling.mUseMipmaps, storage);
-                    slot = std::move(storage);
+                    replacement = std::move(storage);
                     ++mImageChanges;
                 }
+                found = mTextures.insert_or_assign(key, std::move(replacement)).first;
             }
-            auto& cached = *slot;
+            auto& cached = *found->second;
             cached.mSeen = mSerial;
             auto& storage = cached.mStorage ? *cached.mStorage : cached;
             storage.mSeen = mSerial;
@@ -2131,13 +2131,19 @@ namespace MWRender
             // Interface colors and text remain outside the scene effects.
             {
                 PrepareTimer timer{ mPrepare.mOverlay };
-                if (mDrawGui && !mGuiDraws.empty())
+                if (!mGuiDraws.empty())
+                {
                     mPasses.push_back({ mGuiDraws, {}, {}, false });
-                if (mStats && mDrawGui)
+                    mPasses.back().mGui = true;
+                }
+                if (mStats)
                 {
                     const auto graph = mStats->graph();
                     if (!graph.empty())
+                    {
                         mPasses.push_back({ graph, {}, {}, false });
+                        mPasses.back().mGui = true;
+                    }
                 }
             }
             // Release CPU references held by views that disappeared this frame.
@@ -2203,6 +2209,8 @@ namespace MWRender
                     mRetired = mTextureSweep.sweep(
                         mTextures,
                         [&](const auto& item) {
+                            if (!item.second)
+                                return true;
                             const auto& texture = *item.second;
                             osg::ref_ptr<const osg::Image> source;
                             if (!texture.mImage.lock(source) || texture.mRevision != source->getModifiedCount())
@@ -2370,7 +2378,6 @@ namespace MWRender
         const char* mRetireName = "none";
         std::size_t mRetired = 0;
         bool mStopped = false;
-        bool mDrawGui = true;
         std::optional<std::array<float, 4>> mClipPlane;
     };
 

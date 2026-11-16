@@ -495,6 +495,13 @@ namespace RenderAssets
                     return Render::TextureFormat::BC4;
                 case GL_COMPRESSED_RG_RGTC2:
                     return Render::TextureFormat::BC5;
+                case GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:
+                    return Render::TextureFormat::BC6Unsigned;
+                case GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:
+                    return Render::TextureFormat::BC6Signed;
+                case GL_COMPRESSED_RGBA_BPTC_UNORM:
+                case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
+                    return Render::TextureFormat::BC7RGBA;
                 default:
                     return std::nullopt;
             }
@@ -534,6 +541,7 @@ namespace RenderAssets
             {
                 case GL_SRGB8:
                 case GL_SRGB8_ALPHA8:
+                case GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:
                 case GL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
                 case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
                 case GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT:
@@ -551,14 +559,30 @@ namespace RenderAssets
             const auto compressed = compression(source.getPixelFormat());
             if (source.isCompressed() && !compressed)
                 throw std::invalid_argument("Model texture uses an unsupported compression format");
-            if (decode && compressed
-                && (*compressed == Render::TextureFormat::BC4 || *compressed == Render::TextureFormat::BC5))
-                throw std::invalid_argument("CPU fallback for RGTC model textures is not implemented");
+            const bool cpuBlockDecode = compressed && *compressed >= Render::TextureFormat::BC1RGB
+                && *compressed <= Render::TextureFormat::BC3;
+            if (decode && compressed && !cpuBlockDecode)
+                throw std::invalid_argument("Texture compression requires native device support");
             if (source.isCompressed() && !preserveRows && source.getOrigin() != osg::Image::TOP_LEFT)
                 throw std::invalid_argument(
                     "Compressed model textures must be normalized to top-left origin by the image loader");
-            if (!source.isCompressed() && source.getDataType() != GL_UNSIGNED_BYTE)
-                throw std::invalid_argument("Model texture requires an unsupported pixel conversion");
+            if (!source.isCompressed())
+                switch (source.getDataType())
+                {
+                    case GL_UNSIGNED_BYTE:
+                    case GL_BYTE:
+                    case GL_UNSIGNED_SHORT:
+                    case GL_SHORT:
+                    case GL_UNSIGNED_INT:
+                    case GL_INT:
+                    case GL_FLOAT:
+                        break;
+                    default:
+                        throw std::invalid_argument("Unsupported texture sample type "
+                            + std::to_string(source.getDataType()) + " in " + source.getFileName());
+                }
+            const bool scalarConversion = !compressed && source.getDataType() != GL_UNSIGNED_BYTE;
+            const bool floating = scalarConversion && !srgb(source.getInternalTextureFormat());
             if (!source.isCompressed())
                 switch (source.getPixelFormat())
                 {
@@ -577,7 +601,9 @@ namespace RenderAssets
                 }
             auto result = std::make_shared<Render::ImageAsset>();
             result->mName = source.getFileName();
-            result->mFormat = !decode && compressed ? *compressed : Render::TextureFormat::RGBA8;
+            result->mFormat = !decode && compressed ? *compressed
+                : floating                          ? Render::TextureFormat::RGBA32F
+                                                    : Render::TextureFormat::RGBA8;
             result->mSrgb = srgb(source.getInternalTextureFormat());
             auto width = static_cast<std::uint32_t>(source.s());
             auto height = static_cast<std::uint32_t>(source.t());
@@ -625,12 +651,26 @@ namespace RenderAssets
                         source.getPacking());
                     if (level == 0)
                         view->setRowLength(source.getRowLength());
-                    mip.mBytes.resize(Render::textureLevelSize(Render::TextureFormat::RGBA8, width, height));
+                    mip.mBytes.resize(Render::textureLevelSize(result->mFormat, width, height));
                     for (unsigned y = 0; y < height; ++y)
                     {
                         const unsigned sourceY
                             = preserveRows || source.getOrigin() == osg::Image::TOP_LEFT ? y : height - y - 1;
-                        if (!compressed)
+                        if (scalarConversion)
+                        {
+                            auto* output = mip.mBytes.data() + std::size_t(y) * width * (floating ? 16 : 4);
+                            for (unsigned x = 0; x < width; ++x)
+                            {
+                                const auto value = view->getColor(x, sourceY);
+                                if (floating)
+                                    std::memcpy(output + std::size_t(x) * 16, value.ptr(), 16);
+                                else
+                                    for (unsigned channel = 0; channel < 4; ++channel)
+                                        output[x * 4 + channel] = std::byte(static_cast<unsigned char>(
+                                            std::clamp(value[channel], 0.f, 1.f) * 255.f + .5f));
+                            }
+                        }
+                        else if (!compressed)
                         {
                             const auto* row = view->data(0, sourceY);
                             auto* output = mip.mBytes.data() + std::size_t(y) * width * 4;
@@ -694,9 +734,8 @@ namespace RenderAssets
                 width = std::max(1u, width / 2);
                 height = std::max(1u, height / 2);
             }
-            result->mGenerateMipmaps = result->mFormat == Render::TextureFormat::RGBA8 && result->mLevels.size() == 1;
-            if (compressed && !decode && *compressed != Render::TextureFormat::BC4
-                && *compressed != Render::TextureFormat::BC5)
+            result->mGenerateMipmaps = !Render::compressedTexture(result->mFormat) && result->mLevels.size() == 1;
+            if (cpuBlockDecode && !decode)
             {
                 osg::ref_ptr<const osg::Image> retained = &source;
                 result->mDecode = [retained, preserveRows] { return image(*retained, true, preserveRows); };
@@ -834,10 +873,10 @@ namespace RenderAssets
 
     bool OsgImporter::canImportImageInParallel(const osg::Image& source)
     {
-        // Only the builtin immutable byte image: stream/custom const accessors
+        // Only builtin immutable images: stream/custom const accessors
         // may update private caches or pixels. The owner retains those paths.
         return typeid(source) == typeid(osg::Image) && source.getDataVariance() != osg::Object::DYNAMIC
-            && source.getDataType() == GL_UNSIGNED_BYTE && !source.isCompressed()
+            && (source.getDataType() == GL_UNSIGNED_BYTE || source.getDataType() == GL_FLOAT) && !source.isCompressed()
             && pixelLayout(source.getPixelFormat()).has_value();
     }
 
@@ -848,10 +887,21 @@ namespace RenderAssets
         if (source.s() <= 0 || source.t() <= 0 || source.r() != 1 || !source.data())
             throw std::invalid_argument("Live texture must contain a nonempty 2D image");
         const auto compressed = compression(source.getPixelFormat());
-        const auto layout = compressed ? compressed : pixelLayout(source.getPixelFormat());
+        auto layout = compressed ? compressed : pixelLayout(source.getPixelFormat());
+        if (!compressed && source.getDataType() == GL_FLOAT)
+        {
+            // Vulkan has no sRGB float format. Keep that source's encoded
+            // values through the checked RGBA8 conversion instead.
+            if (srgb(source.getInternalTextureFormat()))
+                return {};
+            layout
+                = source.getPixelFormat() == GL_RGBA ? std::optional{ Render::TextureFormat::RGBA32F } : std::nullopt;
+        }
         if (!layout
             || (!compressed
-                && (source.isCompressed() || source.getDataType() != GL_UNSIGNED_BYTE || !source.isDataContiguous())))
+                && (source.isCompressed()
+                    || (source.getDataType() != GL_UNSIGNED_BYTE && source.getDataType() != GL_FLOAT)
+                    || !source.isDataContiguous())))
             return {};
         auto width = static_cast<std::uint32_t>(source.s());
         auto height = static_cast<std::uint32_t>(source.t());
@@ -863,7 +913,7 @@ namespace RenderAssets
             // Vulkan's tightly packed copies cannot consume padded source rows.
             if (!compressed
                 && osg::Image::computeRowWidthInBytes(
-                       width, source.getPixelFormat(), GL_UNSIGNED_BYTE, source.getPacking())
+                       width, source.getPixelFormat(), source.getDataType(), source.getPacking())
                     != Render::textureLevelSize(format, width, 1))
             {
                 levels.clear();

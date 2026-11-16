@@ -128,6 +128,10 @@ namespace Render
         Luminance8,
         LuminanceAlpha8,
         Alpha8,
+        RGBA32F,
+        BC6Unsigned,
+        BC6Signed,
+        BC7RGBA,
         Count,
     };
 
@@ -316,6 +320,42 @@ namespace Render
         std::array<float, 4> mDepthProjection{};
     };
 
+    enum class EffectBlendFactor : std::uint8_t
+    {
+        Zero,
+        One,
+        SourceColor,
+        OneMinusSourceColor,
+        DestinationColor,
+        OneMinusDestinationColor,
+        SourceAlpha,
+        OneMinusSourceAlpha,
+        DestinationAlpha,
+        OneMinusDestinationAlpha,
+        ConstantColor,
+        OneMinusConstantColor,
+        ConstantAlpha,
+        OneMinusConstantAlpha,
+        SourceAlphaSaturate,
+    };
+    enum class EffectBlendOp : std::uint8_t
+    {
+        Add,
+        Subtract,
+        ReverseSubtract,
+        Min,
+        Max
+    };
+    struct EffectBlend
+    {
+        bool mEnabled = false;
+        std::array<EffectBlendFactor, 4> mFactors{ EffectBlendFactor::One, EffectBlendFactor::Zero,
+            EffectBlendFactor::One, EffectBlendFactor::Zero };
+        std::array<EffectBlendOp, 2> mOperations{ EffectBlendOp::Add, EffectBlendOp::Add };
+        std::array<float, 4> mConstant{};
+        auto operator<=>(const EffectBlend&) const = default;
+    };
+
     struct Pass
     {
         std::span<const Draw> mDraws;
@@ -335,6 +375,15 @@ namespace Render
         // Draw clip matrices and sampled depth follow this pass convention.
         // Comparison functions retain their logical forward-depth meaning.
         bool mReversedDepth = false;
+        // Rebuild a color target's lower levels after this pass writes level zero.
+        bool mGenerateMipmaps = false;
+        EffectBlend mEffectBlend{};
+        // No later consumer needs this pass's depth contents. The backend
+        // retains depth when an internal water/world-depth copy still needs it.
+        bool mDiscardDepthAfter = false;
+        // Save thumbnails read scene color before these overlay passes, while
+        // presentation still draws the interface and fade-to-black normally.
+        bool mGui = false;
     };
 
     struct DeviceInfo
@@ -385,7 +434,7 @@ namespace Render
         virtual ~Backend() = default;
         virtual const DeviceInfo& deviceInfo() const = 0;
         virtual bool ready() { return true; }
-        virtual void requestCapture() {}
+        virtual void requestCapture(bool = true) {}
         virtual CapturedImage takeCapture() { return {}; }
         virtual void setPresentMode(PresentMode) {}
         virtual MeshHandle createMesh(std::span<const Vertex> vertices, std::span<const std::uint32_t> indices) = 0;
@@ -418,7 +467,7 @@ namespace Render
             throw std::runtime_error("Volume textures are unavailable");
         }
         virtual TextureHandle createRenderTarget(
-            std::uint32_t, std::uint32_t, const SamplerState& = {}, TargetFormat = TargetFormat::RGBA8)
+            std::uint32_t, std::uint32_t, const SamplerState& = {}, TargetFormat = TargetFormat::RGBA8, bool = false)
         {
             throw std::runtime_error("This renderer does not support offscreen targets");
         }
@@ -459,7 +508,7 @@ namespace Render
     // Private, same-build module ABI. Creation and destruction stay paired in
     // the module; errors are copied into caller-owned memory, never thrown
     // through the exported entry point. No graphics API types cross it.
-    inline constexpr std::uint32_t BackendAbi = 15;
+    inline constexpr std::uint32_t BackendAbi = 17;
     using CreateBackend = Backend* (*)(std::uint32_t abi, const BackendOptions*, char* error, std::size_t errorSize);
     using DestroyBackend = void (*)(Backend*);
 }

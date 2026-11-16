@@ -3,6 +3,7 @@
 #include <components/renderassets/meshkey.hpp>
 #include <components/renderassets/osgimporter.hpp>
 #include <components/renderassets/osgstate.hpp>
+#include <components/renderassets/screenshot.hpp>
 #include <components/sceneutil/depth.hpp>
 #include <components/sceneutil/material.hpp>
 #include <components/sceneutil/texturetype.hpp>
@@ -14,6 +15,7 @@
 #include <cstring>
 
 #include <osg/AlphaFunc>
+#include <osg/BlendColor>
 #include <osg/BlendEquation>
 #include <osg/BlendFunc>
 #include <osg/ColorMask>
@@ -416,6 +418,48 @@ namespace
         importer.updateMeshStream(*geometry, stream);
         EXPECT_FLOAT_EQ(stream.mVertices[1].mPosition[2], 4);
         EXPECT_FLOAT_EQ(stream.mVertices[1].mUV[0], .25f);
+    }
+
+    TEST(RenderSaveScreenshot, ProducesPackedRgbWithCorrectCropOrientationAndIgnoresCaptureAlpha)
+    {
+        Render::CapturedImage pixels{ 4, 2, std::vector<std::byte>(32) };
+        for (unsigned index = 0; index < 8; ++index)
+            pixels.mRgba[index * 4] = std::byte(index + 1);
+        osg::ref_ptr<osg::Image> image = new osg::Image;
+        RenderAssets::saveScreenshot(pixels, 2, 2, *image);
+        EXPECT_EQ(image->getPixelFormat(), GL_RGB);
+        EXPECT_EQ(image->getOrigin(), osg::Image::BOTTOM_LEFT);
+        EXPECT_EQ(image->getPacking(), 1u);
+        EXPECT_TRUE(image->isDataContiguous());
+        EXPECT_EQ(image->data(0, 0)[0], 6);
+        EXPECT_EQ(image->data(0, 0)[3], 7);
+        EXPECT_EQ(image->data(0, 1)[0], 2);
+        EXPECT_EQ(image->data(0, 1)[3], 3);
+        EXPECT_EQ(pixels.mRgba[0], std::byte{ 1 });
+        pixels.mRgba.pop_back();
+        EXPECT_THROW(RenderAssets::saveScreenshot(pixels, 2, 2, *image), std::invalid_argument);
+        EXPECT_THROW(RenderAssets::saveScreenshot(pixels, 0, 2, *image), std::invalid_argument);
+    }
+
+    TEST(RenderEffectState, NativeBlendingPreservesSeparateFactorsEquationsAndConstants)
+    {
+        using F = Render::EffectBlendFactor;
+        using O = Render::EffectBlendOp;
+        osg::ref_ptr<osg::StateSet> state = new osg::StateSet;
+        state->setAttributeAndModes(
+            new osg::BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE), osg::StateAttribute::ON);
+        state->setAttribute(new osg::BlendEquation(osg::BlendEquation::FUNC_ADD, osg::BlendEquation::RGBA_MAX));
+        state->setAttribute(new osg::BlendColor(osg::Vec4f(.1f, .2f, .3f, .4f)));
+        const auto blend = RenderAssets::effectBlend({ nullptr, state });
+        EXPECT_TRUE(blend.mEnabled);
+        EXPECT_EQ(blend.mFactors, (std::array{ F::SourceAlpha, F::OneMinusSourceAlpha, F::One, F::One }));
+        EXPECT_EQ(blend.mOperations, (std::array{ O::Add, O::Max }));
+        EXPECT_FLOAT_EQ(blend.mConstant[2], .3f);
+        state->setAttribute(new osg::BlendFunc(GL_ONE, GL_ZERO));
+        state->setAttribute(new osg::BlendEquation(osg::BlendEquation::FUNC_ADD));
+        EXPECT_FALSE(RenderAssets::effectBlend({ nullptr, state }).mEnabled);
+        state->removeAttribute(osg::StateAttribute::BLENDFUNC);
+        EXPECT_FALSE(RenderAssets::effectBlend({ nullptr, state }).mEnabled);
     }
 
     TEST(RenderEffectState, ExplicitReplacementBlendingSupportsTemporalAoWithoutAcceptingAdditivePasses)
@@ -1038,6 +1082,74 @@ namespace
         EXPECT_EQ(levels[1].mBytes.data(), reinterpret_cast<const std::byte*>(source->data()) + 9);
         EXPECT_EQ(levels[1].mBytes.size(), 1u);
         EXPECT_FALSE(view->mGenerateMipmaps);
+    }
+
+    TEST(RenderImageImport, BptcImagesStayCompressedAndKeepTheirColorSpace)
+    {
+        for (const auto format : { GL_COMPRESSED_RGBA_BPTC_UNORM, GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM,
+                 GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT, GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT })
+        {
+            osg::ref_ptr<osg::Image> image = new osg::Image;
+            image->setImage(
+                4, 4, 1, format, format, GL_UNSIGNED_BYTE, new unsigned char[16]{}, osg::Image::USE_NEW_DELETE, 1);
+            image->setOrigin(osg::Image::TOP_LEFT);
+            std::vector<Render::TextureLevel> levels;
+            const auto data = RenderAssets::OsgImporter::borrowTexture(*image, levels);
+            ASSERT_TRUE(data);
+            EXPECT_TRUE(Render::compressedTexture(data->mFormat));
+            EXPECT_FALSE(data->mGenerateMipmaps);
+            EXPECT_EQ(data->mSrgb, format == GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM);
+            EXPECT_EQ(levels[0].mBytes.data(), reinterpret_cast<const std::byte*>(image->data()));
+            EXPECT_EQ(levels[0].mBytes.size(), 16u);
+            RenderAssets::OsgImporter importer;
+            const auto asset = importer.importImage(*image, true);
+            EXPECT_EQ(asset->mFormat, data->mFormat);
+            EXPECT_FALSE(asset->mDecode);
+        }
+    }
+
+    TEST(RenderImageImport, FloatImagesPreserveHdrAndNegativeSamples)
+    {
+        const std::array<float, 4> values{ -2.f, .25f, 8.f, .5f };
+        osg::ref_ptr<osg::Image> image = new osg::Image;
+        image->allocateImage(1, 1, 1, GL_RGBA, GL_FLOAT);
+        std::memcpy(image->data(), values.data(), sizeof(values));
+        std::vector<Render::TextureLevel> levels;
+        const auto borrowed = RenderAssets::OsgImporter::borrowTexture(*image, levels);
+        ASSERT_TRUE(borrowed);
+        EXPECT_EQ(borrowed->mFormat, Render::TextureFormat::RGBA32F);
+        EXPECT_EQ(levels[0].mBytes.data(), reinterpret_cast<const std::byte*>(image->data()));
+        EXPECT_EQ(levels[0].mBytes.size(), sizeof(values));
+        RenderAssets::OsgImporter importer;
+        const auto converted = importer.importImage(*image, true);
+        ASSERT_EQ(converted->mFormat, Render::TextureFormat::RGBA32F);
+        std::array<float, 4> actual;
+        std::memcpy(actual.data(), converted->mLevels[0].mBytes.data(), sizeof(actual));
+        EXPECT_EQ(actual, values);
+        image = new osg::Image;
+        image->allocateImage(1, 1, 1, GL_RGB, GL_FLOAT);
+        std::memcpy(image->data(), values.data(), 3 * sizeof(float));
+        EXPECT_FALSE(RenderAssets::OsgImporter::borrowTexture(*image, levels));
+        const auto rgb = importer.importImage(*image, true);
+        std::memcpy(actual.data(), rgb->mLevels[0].mBytes.data(), sizeof(actual));
+        EXPECT_EQ(actual, (std::array<float, 4>{ -2.f, .25f, 8.f, 1.f }));
+    }
+
+    TEST(RenderImageImport, SrgbFloatImagesRetainEncodedColorSpace)
+    {
+        const std::array<float, 4> values{ 0.f, .25f, 1.f, .5f };
+        osg::ref_ptr<osg::Image> image = new osg::Image;
+        image->allocateImage(1, 1, 1, GL_RGBA, GL_FLOAT);
+        image->setInternalTextureFormat(GL_SRGB8_ALPHA8);
+        std::memcpy(image->data(), values.data(), sizeof(values));
+        std::vector<Render::TextureLevel> levels;
+        EXPECT_FALSE(RenderAssets::OsgImporter::borrowTexture(*image, levels));
+        RenderAssets::OsgImporter importer;
+        const auto converted = importer.importImage(*image, true);
+        EXPECT_EQ(converted->mFormat, Render::TextureFormat::RGBA8);
+        EXPECT_TRUE(converted->mSrgb);
+        EXPECT_EQ(converted->mLevels[0].mBytes,
+            (std::vector<std::byte>{ std::byte{ 0 }, std::byte{ 64 }, std::byte{ 255 }, std::byte{ 128 } }));
     }
 
     TEST(RenderImageImport, StreamsAndCustomImagesStayOnOwnerThread)

@@ -1,7 +1,10 @@
 #include "osgstate.hpp"
 
+#include <components/render/backend.hpp>
+
 #include <components/sceneutil/texturetype.hpp>
 
+#include <osg/BlendColor>
 #include <osg/BlendEquation>
 #include <osg/BlendFunc>
 #include <osg/StateSet>
@@ -10,6 +13,7 @@
 #include <osg/Uniform>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <set>
 #include <string>
@@ -324,6 +328,89 @@ namespace RenderAssets
         return result;
     }
 
+    Render::EffectBlend effectBlend(const OsgStateView& state)
+    {
+        Render::EffectBlend result;
+        if (effectReplacesDestination(state))
+            return result;
+        result.mEnabled = true;
+        const auto factor = [](GLenum value) -> Render::EffectBlendFactor {
+            using F = Render::EffectBlendFactor;
+            switch (value)
+            {
+                case GL_ZERO:
+                    return F::Zero;
+                case GL_ONE:
+                    return F::One;
+                case GL_SRC_COLOR:
+                    return F::SourceColor;
+                case GL_ONE_MINUS_SRC_COLOR:
+                    return F::OneMinusSourceColor;
+                case GL_DST_COLOR:
+                    return F::DestinationColor;
+                case GL_ONE_MINUS_DST_COLOR:
+                    return F::OneMinusDestinationColor;
+                case GL_SRC_ALPHA:
+                    return F::SourceAlpha;
+                case GL_ONE_MINUS_SRC_ALPHA:
+                    return F::OneMinusSourceAlpha;
+                case GL_DST_ALPHA:
+                    return F::DestinationAlpha;
+                case GL_ONE_MINUS_DST_ALPHA:
+                    return F::OneMinusDestinationAlpha;
+                case GL_CONSTANT_COLOR:
+                    return F::ConstantColor;
+                case GL_ONE_MINUS_CONSTANT_COLOR:
+                    return F::OneMinusConstantColor;
+                case GL_CONSTANT_ALPHA:
+                    return F::ConstantAlpha;
+                case GL_ONE_MINUS_CONSTANT_ALPHA:
+                    return F::OneMinusConstantAlpha;
+                case GL_SRC_ALPHA_SATURATE:
+                    return F::SourceAlphaSaturate;
+                default:
+                    throw std::invalid_argument("Unsupported OMWFX blend factor");
+            }
+        };
+        if (const auto* binding
+            = dynamic_cast<const osg::BlendFunc*>(state.getAttribute(osg::StateAttribute::BLENDFUNC)))
+            result.mFactors = { factor(binding->getSourceRGB()), factor(binding->getDestinationRGB()),
+                factor(binding->getSourceAlpha()), factor(binding->getDestinationAlpha()) };
+        const auto operation = [](GLenum value) -> Render::EffectBlendOp {
+            using O = Render::EffectBlendOp;
+            switch (value)
+            {
+                case GL_FUNC_ADD:
+                    return O::Add;
+                case GL_FUNC_SUBTRACT:
+                    return O::Subtract;
+                case GL_FUNC_REVERSE_SUBTRACT:
+                    return O::ReverseSubtract;
+                case GL_MIN:
+                    return O::Min;
+                case GL_MAX:
+                    return O::Max;
+                default:
+                    throw std::invalid_argument("Unsupported OMWFX blend operation");
+            }
+        };
+        if (const auto* binding
+            = dynamic_cast<const osg::BlendEquation*>(state.getAttribute(osg::StateAttribute::BLENDEQUATION)))
+            result.mOperations = { operation(binding->getEquationRGB()), operation(binding->getEquationAlpha()) };
+        if (const auto* binding
+            = dynamic_cast<const osg::BlendColor*>(state.getAttribute(osg::StateAttribute::BLENDCOLOR)))
+        {
+            const auto& color = binding->getConstantColor();
+            for (unsigned i = 0; i < 4; ++i)
+            {
+                if (!std::isfinite(color[i]))
+                    throw std::invalid_argument("Nonfinite OMWFX blend color");
+                result.mConstant[i] = std::clamp(color[i], 0.f, 1.f);
+            }
+        }
+        return result;
+    }
+
     bool effectReplacesDestination(const OsgStateView& state)
     {
         if (!(state.getMode(GL_BLEND) & osg::StateAttribute::ON))
@@ -331,8 +418,9 @@ namespace RenderAssets
         const auto* blend = dynamic_cast<const osg::BlendFunc*>(state.getAttribute(osg::StateAttribute::BLENDFUNC));
         const auto* equation
             = dynamic_cast<const osg::BlendEquation*>(state.getAttribute(osg::StateAttribute::BLENDEQUATION));
-        return blend && blend->getSourceRGB() == GL_ONE && blend->getDestinationRGB() == GL_ZERO
-            && blend->getSourceAlpha() == GL_ONE && blend->getDestinationAlpha() == GL_ZERO
+        return (!blend
+                   || (blend->getSourceRGB() == GL_ONE && blend->getDestinationRGB() == GL_ZERO
+                       && blend->getSourceAlpha() == GL_ONE && blend->getDestinationAlpha() == GL_ZERO))
             && (!equation
                 || (equation->getEquationRGB() == GL_FUNC_ADD && equation->getEquationAlpha() == GL_FUNC_ADD));
     }

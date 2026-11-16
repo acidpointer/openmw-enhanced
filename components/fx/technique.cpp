@@ -520,8 +520,8 @@ namespace Fx
             sampler->setInternalFormat(proxy.mInternalFormat.value());
         if (proxy.mSourceType.has_value())
             sampler->setSourceType(proxy.mSourceType.value());
-        if (proxy.mInternalFormat.has_value())
-            sampler->setSourceFormat(proxy.mInternalFormat.value());
+        if (proxy.mSourceFormat.has_value())
+            sampler->setSourceFormat(proxy.mSourceFormat.value());
         sampler->setName(std::string{ mBlockName });
         sampler->setResizeNonPowerOfTwoHint(false);
 

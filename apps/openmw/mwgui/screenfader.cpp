@@ -1,5 +1,7 @@
 #include "screenfader.hpp"
 
+#include <components/sceneutil/fade.hpp>
+
 #include <MyGUI_Gui.h>
 #include <MyGUI_ImageBox.h>
 
@@ -40,6 +42,22 @@ namespace MWGui
         if (mStartAlpha == mTargetAlpha)
         {
             finish();
+            return;
+        }
+
+        if (mFader->smooth())
+        {
+            mRemainingTime -= std::max(dt, 0.f);
+            if (mRemainingTime > mTargetTime)
+                return;
+            if (mRemainingTime <= 0)
+            {
+                mFader->notifyAlphaChanged(mTargetAlpha);
+                finish();
+                return;
+            }
+            const auto progress = mTargetTime > 0 ? 1.f - mRemainingTime / mTargetTime : 1.f;
+            mFader->notifyAlphaChanged(SceneUtil::smoothFade(mStartAlpha, mTargetAlpha, progress));
             return;
         }
 

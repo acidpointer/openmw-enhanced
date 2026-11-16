@@ -2,10 +2,10 @@
 
 #include <algorithm>
 #include <condition_variable>
-#include <cstring>
 #include <mutex>
 
 #include <components/render/presentation.hpp>
+#include <components/renderassets/screenshot.hpp>
 
 #include <components/stereo/multiview.hpp>
 #include <components/stereo/stereomanager.hpp>
@@ -109,20 +109,10 @@ namespace MWRender
         {
             // Native frames never execute GL draw callbacks. In particular,
             // waiting for NotifyDrawCompletedCallback here would deadlock saves.
+            mViewer->eventTraversal();
+            mViewer->updateTraversal();
             auto pixels = presentation->capture(false);
-            if (!pixels.mWidth || !pixels.mHeight)
-                throw std::runtime_error("Native renderer returned an empty screenshot");
-            const auto cropWidth = std::clamp<std::uint64_t>(std::uint64_t(pixels.mHeight) * w / h, 1, pixels.mWidth);
-            const auto cropHeight = std::clamp<std::uint64_t>(std::uint64_t(pixels.mWidth) * h / w, 1, pixels.mHeight);
-            const auto left = (pixels.mWidth - cropWidth) / 2;
-            const auto top = (pixels.mHeight - cropHeight) / 2;
-            image->allocateImage(cropWidth, cropHeight, 1, GL_RGBA, GL_UNSIGNED_BYTE);
-            image->setOrigin(osg::Image::TOP_LEFT);
-            for (std::uint32_t row = 0; row < cropHeight; ++row)
-                std::memcpy(image->data(0, row),
-                    pixels.mRgba.data() + (std::size_t(top + row) * pixels.mWidth + left) * 4,
-                    std::size_t(cropWidth) * 4);
-            image->scaleImage(w, h, 1);
+            RenderAssets::saveScreenshot(pixels, w, h, *image);
             mViewer->advance(mViewer->getFrameStamp()->getSimulationTime());
             return;
         }

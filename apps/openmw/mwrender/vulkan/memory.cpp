@@ -2,6 +2,8 @@
 
 #include "check.hpp"
 
+#include <components/render/memorypolicy.hpp>
+
 #include <algorithm>
 #include <cstddef>
 #include <set>
@@ -20,7 +22,9 @@ namespace MWRender::Vulkan
         info.pNext = dedicated;
         info.allocationSize = size;
         info.memoryTypeIndex = type;
-        check(vkAllocateMemory(mDevice, &info, nullptr, &mMemory), "Allocate Vulkan memory");
+        const auto allocated = vkAllocateMemory(mDevice, &info, nullptr, &mMemory);
+        if (allocated != VK_SUCCESS)
+            throw AllocationFailure(allocated, "Allocate Vulkan memory");
         if (kind == MemoryKind::Upload)
         {
             void* mapped = nullptr;
@@ -29,7 +33,7 @@ namespace MWRender::Vulkan
             {
                 vkFreeMemory(mDevice, mMemory, nullptr);
                 mMemory = VK_NULL_HANDLE;
-                check(result, "Map Vulkan upload memory");
+                throw AllocationFailure(result, "Map Vulkan upload memory");
             }
             mMapped = static_cast<std::byte*>(mapped);
         }
@@ -92,6 +96,11 @@ namespace MWRender::Vulkan
         : mDevice(device)
         , mProperties(properties)
     {
+        VkDeviceSize local = 0;
+        for (std::uint32_t heap = 0; heap < properties.memoryHeapCount; ++heap)
+            if (properties.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                local = std::max(local, properties.memoryHeaps[heap].size);
+        mImageBlockSize = Render::imageMemoryBlockSize(local);
     }
     void MemoryAllocator::beginShutdown()
     {
@@ -119,9 +128,20 @@ namespace MWRender::Vulkan
                     if (const auto offset = block->allocate(requirements.size, requirements.alignment))
                         return Allocation(block, *offset);
 
-        const VkDeviceSize pageSize = blockSize(kind);
+        const VkDeviceSize pageSize = preferredBlockSize(kind);
         const VkDeviceSize size = dedicated ? requirements.size : std::max(requirements.size, pageSize);
-        auto block = std::make_shared<MemoryBlock>(mDevice, size, type, kind, dedicated);
+        std::shared_ptr<MemoryBlock> block;
+        try
+        {
+            block = std::make_shared<MemoryBlock>(mDevice, size, type, kind, dedicated);
+        }
+        catch (const AllocationFailure& error)
+        {
+            // A preferred pool must not reject an image that still fits exactly.
+            if (dedicated || size == requirements.size || !error.retryable())
+                throw;
+            block = std::make_shared<MemoryBlock>(mDevice, requirements.size, type, kind, nullptr);
+        }
         const auto offset = block->allocate(requirements.size, requirements.alignment);
         if (!offset)
             throw std::logic_error("A new Vulkan memory block cannot fit its first allocation");

@@ -505,6 +505,7 @@ namespace MWGui
         mWindows.push_back(std::move(hitFader));
 
         auto screenFader = std::make_unique<ScreenFader>("black");
+        screenFader->setSmooth(true);
         mScreenFader = screenFader.get();
         mWindows.push_back(std::move(screenFader));
 
