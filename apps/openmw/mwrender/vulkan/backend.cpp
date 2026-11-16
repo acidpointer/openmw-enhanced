@@ -4,6 +4,8 @@
 #include "memory.hpp"
 
 #include <components/render/bufferarena.hpp>
+#include <components/render/bufferversions.hpp>
+#include <components/render/framecache.hpp>
 #include <components/render/meshindices.hpp>
 #include <components/render/pipelinecache.hpp>
 #include <components/render/raster.hpp>
@@ -77,7 +79,8 @@ namespace MWRender::Vulkan
         constexpr std::array TargetVkFormats{ VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_FORMAT_R8_UNORM, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8B8A8_UNORM,
-            VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT };
+            VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_FORMAT_R8_UNORM };
         static_assert(TargetVkFormats.size() == TargetFormats);
         bool hasNormals(Render::TargetFormat format)
         {
@@ -117,10 +120,16 @@ namespace MWRender::Vulkan
             ~Buffer() { vkDestroyBuffer(mDevice, mBuffer, nullptr); }
         };
 
+        struct GeometryBuffer
+        {
+            Render::BufferArena<Buffer>::Slice mRange;
+            std::uint64_t mLastSubmission = 0;
+        };
+
         struct Mesh
         {
-            Render::BufferArena<Buffer>::Slice mVertices;
-            Render::BufferArena<Buffer>::Slice mIndices;
+            Render::BufferVersions<GeometryBuffer> mVertices;
+            Render::BufferVersions<GeometryBuffer> mIndices;
             std::uint32_t mIndexCount = 0;
             VkIndexType mIndexType = VK_INDEX_TYPE_UINT32;
             std::size_t mVertexBytes = 0;
@@ -154,6 +163,11 @@ namespace MWRender::Vulkan
             std::uint32_t mWidth = 0;
             std::uint32_t mHeight = 0;
             std::uint32_t mMipLevels = 1;
+            // Only immutable uploaded 2D textures may share image/sampler views.
+            std::optional<Render::TextureFormat> mTextureFormat;
+            bool mSrgb = false;
+            std::shared_ptr<Image> mStorage;
+            std::size_t mSamplerViews = 0;
             VkSampler mSampler = VK_NULL_HANDLE;
             bool mTarget = false;
             Render::TargetFormat mTargetFormat = Render::TargetFormat::RGBA8;
@@ -179,8 +193,13 @@ namespace MWRender::Vulkan
                     --mPool->mLive;
                 }
                 vkDestroyFramebuffer(mDevice, mFramebuffer, nullptr);
-                vkDestroyImageView(mDevice, mView, nullptr);
-                vkDestroyImage(mDevice, mImage, nullptr);
+                if (mStorage)
+                    --mStorage->mSamplerViews;
+                else
+                {
+                    vkDestroyImageView(mDevice, mView, nullptr);
+                    vkDestroyImage(mDevice, mImage, nullptr);
+                }
             }
         };
 
@@ -220,6 +239,7 @@ namespace MWRender::Vulkan
             bool mIndices = false;
             std::vector<VkBufferImageCopy> mImageCopies;
             bool mGenerateMipmaps = false;
+            std::shared_ptr<GeometryBuffer> mPreserve{};
         };
 
         struct Frame
@@ -237,7 +257,6 @@ namespace MWRender::Vulkan
             std::unique_ptr<Buffer> mLights;
             std::size_t mLightCapacity = 0;
             VkDescriptorSet mDataDescriptor = VK_NULL_HANDLE;
-            bool mDataDescriptorDirty = true;
             std::vector<VkDescriptorPool> mEffectPools;
             std::size_t mEffectPoolIndex = 0;
             std::optional<std::uint32_t> mAcquiredImage;
@@ -258,6 +277,9 @@ namespace MWRender::Vulkan
             Distortion,
             Overlay,
             SolidSurface,
+            Shadow,
+            SurfaceShadowed,
+            SolidSurfaceShadowed,
             Count
         };
         constexpr std::size_t PipelinesPerTarget = RasterKeys * static_cast<std::size_t>(MaterialShader::Count);
@@ -273,6 +295,9 @@ namespace MWRender::Vulkan
             std::uint32_t mIndexCount;
             std::array<float, 8> mFog;
             bool mWater = false;
+            VkDescriptorSet mDataDescriptor = VK_NULL_HANDLE;
+            bool mReversedDepth = false;
+            std::array<float, 2> mDepthBias{};
         };
 
         struct PreparedPass
@@ -285,6 +310,7 @@ namespace MWRender::Vulkan
             std::array<std::uint32_t, 4> mViewport;
             std::shared_ptr<Effect> mEffect{};
             VkDescriptorSet mEffectDescriptor = VK_NULL_HANDLE;
+            bool mReversedDepth = false;
             bool mPreserveWorldDepth = false;
             bool mOverwrite = false;
             bool mWater = false;
@@ -393,6 +419,8 @@ namespace MWRender::Vulkan
             void updateMesh(Render::MeshHandle handle, std::span<const Render::Vertex> vertices,
                 std::span<const std::uint32_t> indices) override;
             using Render::Backend::createTexture;
+            Render::TextureHandle createTextureSamplerView(
+                Render::TextureHandle texture, const Render::SamplerState& state) override;
             bool supportsTextureFormat(Render::TextureFormat format, bool srgb) const override;
             Render::TextureHandle createTexture(
                 const Render::TextureData& data, const Render::SamplerState& sampler = {}) override;
@@ -429,7 +457,10 @@ namespace MWRender::Vulkan
             void loadPipelineCache();
             void savePipelineCache() noexcept;
             VkPipeline effectPipeline(Effect& effect, const Image* target);
+            VkDescriptorSet allocateFrameDescriptor(Frame& frame, VkDescriptorSetLayout layout);
+            VkDescriptorSet dataDescriptor(Frame& frame, const Render::ShadowSet* shadows);
             VkDescriptorSet effectDescriptor(Frame& frame, Effect& effect, std::span<const Render::EffectInput> inputs);
+            void retainGeometry(Frame& frame, const std::shared_ptr<GeometryBuffer>& buffer);
             void recordUploads(Frame& frame, VkDeviceSize instanceBytes, VkDeviceSize lightBytes);
             void cancelUpload(std::optional<std::size_t>& index);
             bool renderFrame(std::span<const Render::Pass> passes);
@@ -439,6 +470,7 @@ namespace MWRender::Vulkan
                 std::uint32_t depth = 1);
             Staging allocateStaging(VkDeviceSize size, VkDeviceSize alignment = 16);
             Staging stage(std::span<const std::byte> bytes);
+            std::shared_ptr<GeometryBuffer> allocateGeometry(VkDeviceSize size, VkDeviceSize alignment);
             void allocateDescriptor(Image& image);
             VkSampler sampler(Render::SamplerState state);
 
@@ -515,6 +547,7 @@ namespace MWRender::Vulkan
             Render::UploadPages<Buffer> mStagingPages{ MemoryAllocator::blockSize(MemoryKind::Upload) };
             Render::BufferArena<Buffer> mGeometryPages{ MemoryAllocator::blockSize(MemoryKind::Geometry) };
             std::vector<PreparedDraw> mPrepared;
+            Render::FrameCache<const Render::ShadowSet*, VkDescriptorSet> mShadowDescriptors;
             std::vector<VkWriteDescriptorSet> mEffectWrites;
             std::vector<VkDescriptorBufferInfo> mEffectBuffers;
             std::vector<VkDescriptorImageInfo> mEffectImages;
@@ -780,6 +813,7 @@ namespace MWRender::Vulkan
             vkGetPhysicalDeviceFeatures(mPhysicalDevice, &supported);
             mFeatures.textureCompressionBC = supported.textureCompressionBC;
             mFeatures.samplerAnisotropy = supported.samplerAnisotropy;
+            mFeatures.depthClamp = supported.depthClamp;
             info.pEnabledFeatures = &mFeatures;
             check(vkCreateDevice(mPhysicalDevice, &info, nullptr, &mDevice), "Create Vulkan device");
             if (mDynamicRaster)
@@ -839,9 +873,10 @@ namespace MWRender::Vulkan
             }
             if (mDepthFormat == VK_FORMAT_UNDEFINED)
                 throw std::runtime_error("Vulkan device has no supported depth attachment format");
-            // Encoded normals need ten bits per component rather than a full
-            // float16 attachment. Keep the old format as a checked fallback.
-            for (const auto candidate : { VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_R16G16B16A16_SFLOAT })
+            // Match OpenMW's floating-point normal target. Additive terrain
+            // passes may exceed [0,1] before their final weighted result; UNORM
+            // clamping destroys that information and corrupts AO inputs.
+            for (const auto candidate : { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT })
             {
                 VkFormatProperties properties{};
                 vkGetPhysicalDeviceFormatProperties(mPhysicalDevice, candidate, &properties);
@@ -854,6 +889,7 @@ namespace MWRender::Vulkan
                     break;
                 }
             }
+            mInfo.mFloatNormals = mNormalFormat != VK_FORMAT_UNDEFINED;
             for (std::size_t i = 0; i < TargetFormats; ++i)
             {
                 auto& properties = mTargetProperties[i];
@@ -892,22 +928,28 @@ namespace MWRender::Vulkan
             check(vkCreateDescriptorSetLayout(mDevice, &descriptor, nullptr, &mDescriptorLayout),
                 "Create texture layout");
             auto layout = vkInfo<VkPipelineLayoutCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
-            std::array<VkDescriptorSetLayoutBinding, 2> dataBindings{};
+            std::array<VkDescriptorSetLayoutBinding, 11> dataBindings{};
             for (unsigned i = 0; i < dataBindings.size(); ++i)
             {
                 dataBindings[i].binding = i;
-                dataBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                dataBindings[i].descriptorType = i < 2 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                    : i == 2                           ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                                       : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                 dataBindings[i].descriptorCount = 1;
-                dataBindings[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+                dataBindings[i].stageFlags = i < 2 ? VK_SHADER_STAGE_VERTEX_BIT
+                    : i == 2                       ? VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
+                                                   : VK_SHADER_STAGE_FRAGMENT_BIT;
             }
             descriptor.bindingCount = dataBindings.size();
             descriptor.pBindings = dataBindings.data();
             check(vkCreateDescriptorSetLayout(mDevice, &descriptor, nullptr, &mDataLayout), "Create frame data layout");
-            const VkDescriptorPoolSize dataSize{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * FramesInFlight };
+            const std::array dataSizes{ VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * FramesInFlight },
+                VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, FramesInFlight },
+                VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8 * FramesInFlight } };
             auto pool = vkInfo<VkDescriptorPoolCreateInfo>(VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO);
             pool.maxSets = FramesInFlight;
-            pool.poolSizeCount = 1;
-            pool.pPoolSizes = &dataSize;
+            pool.poolSizeCount = dataSizes.size();
+            pool.pPoolSizes = dataSizes.data();
             check(vkCreateDescriptorPool(mDevice, &pool, nullptr, &mDataPool), "Create frame data descriptor pool");
             const std::array materialLayouts{ mDescriptorLayout, mDescriptorLayout, mDataLayout, mDescriptorLayout };
             layout.setLayoutCount = materialLayouts.size();
@@ -1136,6 +1178,19 @@ namespace MWRender::Vulkan
             return staging;
         }
 
+        std::shared_ptr<GeometryBuffer> VulkanBackend::allocateGeometry(VkDeviceSize size, VkDeviceSize alignment)
+        {
+            auto buffer = std::make_shared<GeometryBuffer>();
+            // Whole-vertex offsets allow shared page bindings with baseVertex.
+            buffer->mRange = mGeometryPages.allocate(size, alignment, [&](VkDeviceSize capacity) {
+                return createBuffer(capacity,
+                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+                        | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                    MemoryKind::Geometry);
+            });
+            return buffer;
+        }
+
         Render::MeshHandle VulkanBackend::createMesh(
             std::span<const Render::Vertex> vertices, std::span<const std::uint32_t> indices)
         {
@@ -1150,17 +1205,10 @@ namespace MWRender::Vulkan
             mesh->mIndexType = narrow ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
             mesh->mVertexBytes = vertices.size_bytes();
             mesh->mIndexBytes = Render::meshIndexBytes(indices.size(), narrow);
-            const auto createPage = [&](VkDeviceSize capacity) -> std::shared_ptr<Buffer> {
-                return createBuffer(capacity,
-                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT
-                        | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                    MemoryKind::Geometry);
-            };
-            // Whole-vertex offsets let draws share one page binding and select
-            // their mesh through baseVertex instead of rebinding every slice.
-            mesh->mVertices = mGeometryPages.allocate(
-                vertices.size_bytes(), std::lcm(std::size_t{ 16 }, sizeof(Render::Vertex)), createPage);
-            mesh->mIndices = mGeometryPages.allocate(mesh->mIndexBytes, 4, createPage);
+            mesh->mVertices.writable([&] {
+                return allocateGeometry(vertices.size_bytes(), std::lcm(std::size_t{ 16 }, sizeof(Render::Vertex)));
+            });
+            mesh->mIndices.writable([&] { return allocateGeometry(mesh->mIndexBytes, 4); });
             auto vertexStaging = stage(std::as_bytes(vertices));
             auto indexStaging = allocateStaging(mesh->mIndexBytes);
             Render::writeMeshIndices(
@@ -1220,8 +1268,20 @@ namespace MWRender::Vulkan
                 {
                     auto staging = allocateStaging(size);
                     write(staging);
+                    auto& versions = index ? mesh->mIndices : mesh->mVertices;
+                    const auto capacity = index ? mesh->mIndexBytes : mesh->mVertexBytes;
+                    std::shared_ptr<GeometryBuffer> preserve;
+                    // A prefix update must retain the previous tail when the
+                    // current range is still leased by an unfinished GPU frame.
+                    if (size < capacity && versions.current().use_count() > 1)
+                        preserve = versions.current();
+                    versions.writable([&] {
+                        return allocateGeometry(
+                            capacity, index ? 4 : std::lcm(std::size_t{ 16 }, sizeof(Render::Vertex)));
+                    });
                     pending = mPendingUploads.size();
-                    mPendingUploads.push_back({ std::move(staging), mesh, {}, size, index, {}, false });
+                    mPendingUploads.push_back(
+                        { std::move(staging), mesh, {}, size, index, {}, false, std::move(preserve) });
                 }
             }
         }
@@ -1320,6 +1380,8 @@ namespace MWRender::Vulkan
                 VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
                     | (generate && levels > 1 ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0),
                 VK_IMAGE_ASPECT_COLOR_BIT, levels);
+            image->mTextureFormat = data.mFormat;
+            image->mSrgb = data.mSrgb;
             image->mSampler = sampler(state);
             allocateDescriptor(*image);
             std::size_t bytes = 0;
@@ -1352,6 +1414,33 @@ namespace MWRender::Vulkan
             image->mUpload = mPendingUploads.size();
             mPendingUploads.push_back(std::move(upload));
             return handle;
+        }
+
+        Render::TextureHandle VulkanBackend::createTextureSamplerView(
+            Render::TextureHandle texture, const Render::SamplerState& state)
+        {
+            const auto& source = mTextures.get(texture);
+            const auto& storage = source->mStorage ? source->mStorage : source;
+            if (!storage->mTextureFormat)
+                throw std::invalid_argument("Sampler views require an immutable uploaded 2D texture");
+            const auto& properties
+                = mTextureProperties[static_cast<std::size_t>(*storage->mTextureFormat)][storage->mSrgb];
+            if ((state.mMinFilter == Render::TextureFilter::Linear || state.mMagFilter == Render::TextureFilter::Linear)
+                && !(properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+                throw std::invalid_argument("Texture format does not support linear filtering");
+            auto view = std::make_shared<Image>(mDevice);
+            view->mStorage = storage;
+            ++storage->mSamplerViews;
+            view->mImage = storage->mImage;
+            view->mView = storage->mView;
+            view->mWidth = storage->mWidth;
+            view->mHeight = storage->mHeight;
+            view->mMipLevels = storage->mMipLevels;
+            view->mTextureFormat = storage->mTextureFormat;
+            view->mSrgb = storage->mSrgb;
+            view->mSampler = sampler(state);
+            allocateDescriptor(*view);
+            return mTextures.insert(std::move(view));
         }
 
         Render::TextureHandle VulkanBackend::createRenderTarget(std::uint32_t width, std::uint32_t height,
@@ -1671,8 +1760,7 @@ namespace MWRender::Vulkan
             return effect.mPipelines[slot];
         }
 
-        VkDescriptorSet VulkanBackend::effectDescriptor(
-            Frame& frame, Effect& effect, std::span<const Render::EffectInput> inputs)
+        VkDescriptorSet VulkanBackend::allocateFrameDescriptor(Frame& frame, VkDescriptorSetLayout layout)
         {
             VkDescriptorSet descriptor = VK_NULL_HANDLE;
             for (;;)
@@ -1680,7 +1768,8 @@ namespace MWRender::Vulkan
                 if (frame.mEffectPoolIndex == frame.mEffectPools.size())
                 {
                     const std::array sizes{ VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024 },
-                        VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 256 } };
+                        VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 256 },
+                        VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 128 } };
                     auto pool = vkInfo<VkDescriptorPoolCreateInfo>(VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO);
                     pool.maxSets = 64;
                     pool.poolSizeCount = sizes.size();
@@ -1692,7 +1781,7 @@ namespace MWRender::Vulkan
                 auto info = vkInfo<VkDescriptorSetAllocateInfo>(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO);
                 info.descriptorPool = frame.mEffectPools[frame.mEffectPoolIndex];
                 info.descriptorSetCount = 1;
-                info.pSetLayouts = &effect.mDescriptorLayout;
+                info.pSetLayouts = &layout;
                 const auto result = vkAllocateDescriptorSets(mDevice, &info, &descriptor);
                 if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL)
                 {
@@ -1702,6 +1791,82 @@ namespace MWRender::Vulkan
                 check(result, "Allocate effect descriptor");
                 break;
             }
+            return descriptor;
+        }
+
+        VkDescriptorSet VulkanBackend::dataDescriptor(Frame& frame, const Render::ShadowSet* shadows)
+        {
+            auto [cached, inserted] = mShadowDescriptors.getOrCreate(shadows);
+            if (!inserted)
+                return cached;
+            if (shadows && shadows->mCount > Render::ShadowSet::MaxMaps)
+                throw std::invalid_argument("Invalid native shadow cascade count");
+            const auto descriptor = shadows ? allocateFrameDescriptor(frame, mDataLayout) : frame.mDataDescriptor;
+            struct ShadowData
+            {
+                std::array<std::array<float, 16>, 8> mMatrices{};
+                std::array<std::array<float, 16>, 8> mRegions{};
+                std::array<float, 4> mParameters{};
+                std::array<unsigned, 4> mFlags{};
+            } data;
+            static_assert(sizeof(ShadowData) == 1056);
+            if (shadows)
+            {
+                data.mMatrices = shadows->mViewToShadow;
+                data.mRegions = shadows->mValidRegions;
+                data.mParameters = { shadows->mMaximumDistance, shadows->mFadeStart, shadows->mNormalOffset, 0 };
+                data.mFlags = { shadows->mCount, shadows->mSoft ? 1u : 0u, shadows->mRegionMask, 0 };
+            }
+            auto staging = allocateStaging(
+                sizeof(data), std::max(VkDeviceSize{ 16 }, mProperties.limits.minUniformBufferOffsetAlignment));
+            std::memcpy(staging.mPage->mMemory.mapped() + staging.mOffset, &data, sizeof(data));
+            if (staging.mPage->mLastUploadSubmission != mSubmission)
+            {
+                frame.mUploads.push_back(staging.mPage);
+                staging.mPage->mLastUploadSubmission = mSubmission;
+            }
+            const std::array buffers{ VkDescriptorBufferInfo{ frame.mInstances->mBuffer, 0, VK_WHOLE_SIZE },
+                VkDescriptorBufferInfo{ frame.mLights->mBuffer, 0, VK_WHOLE_SIZE },
+                VkDescriptorBufferInfo{ staging.mPage->mBuffer, staging.mOffset, sizeof(data) } };
+            std::array<VkDescriptorImageInfo, 8> images{};
+            std::array<VkWriteDescriptorSet, 11> writes{};
+            for (unsigned i = 0; i < writes.size(); ++i)
+            {
+                auto& write = writes[i];
+                write = vkInfo<VkWriteDescriptorSet>(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
+                write.dstSet = descriptor;
+                write.dstBinding = i;
+                write.descriptorCount = 1;
+                if (i < buffers.size())
+                {
+                    write.descriptorType
+                        = i < 2 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                    write.pBufferInfo = &buffers[i];
+                }
+                else
+                {
+                    const auto map = i - 3;
+                    const auto& image
+                        = mTextures.get(shadows && map < shadows->mCount ? shadows->mTextures[map] : mWhiteTexture);
+                    images[map] = { image->mSampler, image->mView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                    if (image->mLastSubmission != mSubmission)
+                    {
+                        frame.mResources.push_back(image);
+                        image->mLastSubmission = mSubmission;
+                    }
+                    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    write.pImageInfo = &images[map];
+                }
+            }
+            vkUpdateDescriptorSets(mDevice, writes.size(), writes.data(), 0, nullptr);
+            cached = descriptor;
+            return descriptor;
+        }
+
+        VkDescriptorSet VulkanBackend::effectDescriptor(
+            Frame& frame, Effect& effect, std::span<const Render::EffectInput> inputs)
+        {
+            const auto descriptor = allocateFrameDescriptor(frame, effect.mDescriptorLayout);
             auto& writes = mEffectWrites;
             auto& buffers = mEffectBuffers;
             auto& images = mEffectImages;
@@ -1783,7 +1948,8 @@ namespace MWRender::Vulkan
                 throw std::invalid_argument("Cannot release the backend's default texture");
             const auto resource = mTextures.get(texture);
             mTextures.erase(texture);
-            cancelUpload(resource->mUpload);
+            if (resource->mSamplerViews == 0)
+                cancelUpload(resource->mUpload);
         }
 
         void VulkanBackend::destroySwapchain()
@@ -2161,11 +2327,13 @@ namespace MWRender::Vulkan
             const auto rasterKey = pipelineIndex % RasterKeys;
             const auto material = static_cast<std::uint32_t>((pipelineIndex % PipelinesPerTarget) / RasterKeys);
             const auto targetGroup = pipelineIndex / PipelinesPerTarget;
-            const std::array<std::uint32_t, 2> constants{ material,
-                targetGroup && hasNormals(static_cast<Render::TargetFormat>(targetGroup - 1)) ? VK_TRUE : VK_FALSE };
-            const std::array<VkSpecializationMapEntry, 2> entries{ {
+            const std::array<std::uint32_t, 3> constants{ material,
+                targetGroup && hasNormals(static_cast<Render::TargetFormat>(targetGroup - 1)) ? VK_TRUE : VK_FALSE,
+                mFeatures.depthClamp };
+            const std::array<VkSpecializationMapEntry, 3> entries{ {
                 { 0, 0, sizeof(std::uint32_t) },
                 { 1, sizeof(std::uint32_t), sizeof(std::uint32_t) },
+                { 2, 2 * sizeof(std::uint32_t), sizeof(std::uint32_t) },
             } };
             const VkSpecializationInfo specialization{ static_cast<std::uint32_t>(entries.size()), entries.data(),
                 sizeof(constants), constants.data() };
@@ -2216,6 +2384,8 @@ namespace MWRender::Vulkan
             raster.polygonMode = VK_POLYGON_MODE_FILL;
             raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
             raster.lineWidth = 1;
+            raster.depthClampEnable = material == static_cast<unsigned>(MaterialShader::Shadow) && mFeatures.depthClamp;
+            raster.depthBiasEnable = material == static_cast<unsigned>(MaterialShader::Shadow);
             auto samples = vkInfo<VkPipelineMultisampleStateCreateInfo>(
                 VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO);
             samples.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
@@ -2236,11 +2406,12 @@ namespace MWRender::Vulkan
             blending.attachmentCount = 1;
             blending.pAttachments = &blend;
             const std::array dynamicStates{ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
-                VK_DYNAMIC_STATE_CULL_MODE_EXT, VK_DYNAMIC_STATE_FRONT_FACE_EXT, VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE_EXT,
-                VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE_EXT, VK_DYNAMIC_STATE_DEPTH_COMPARE_OP_EXT };
+                VK_DYNAMIC_STATE_DEPTH_BIAS, VK_DYNAMIC_STATE_CULL_MODE_EXT, VK_DYNAMIC_STATE_FRONT_FACE_EXT,
+                VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE_EXT, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE_EXT,
+                VK_DYNAMIC_STATE_DEPTH_COMPARE_OP_EXT };
             auto dynamic
                 = vkInfo<VkPipelineDynamicStateCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO);
-            dynamic.dynamicStateCount = mDynamicRaster ? static_cast<std::uint32_t>(dynamicStates.size()) : 2;
+            dynamic.dynamicStateCount = mDynamicRaster ? static_cast<std::uint32_t>(dynamicStates.size()) : 3;
             dynamic.pDynamicStates = dynamicStates.data();
             auto pipeline = vkInfo<VkGraphicsPipelineCreateInfo>(VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO);
             pipeline.stageCount = static_cast<std::uint32_t>(shaders.size());
@@ -2275,6 +2446,8 @@ namespace MWRender::Vulkan
                 VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_EQUAL, VK_COMPARE_OP_NOT_EQUAL,
                 VK_COMPARE_OP_GREATER_OR_EQUAL, VK_COMPARE_OP_GREATER };
             depth.depthCompareOp = comparisons[rasterKey / CompareStride];
+            if (material == static_cast<unsigned>(MaterialShader::Shadow))
+                blend.colorWriteMask = 0;
             blend.blendEnable = mode != 0;
             blend.srcColorBlendFactor = mode == static_cast<std::size_t>(Render::BlendMode::PremultipliedAlpha)
                 ? VK_BLEND_FACTOR_ONE
@@ -2294,17 +2467,26 @@ namespace MWRender::Vulkan
                 "Create Vulkan material pipeline");
         }
 
+        void VulkanBackend::retainGeometry(Frame& frame, const std::shared_ptr<GeometryBuffer>& buffer)
+        {
+            if (buffer->mLastSubmission != mSubmission)
+            {
+                frame.mResources.push_back(buffer);
+                buffer->mLastSubmission = mSubmission;
+            }
+        }
+
         void VulkanBackend::recordUploads(Frame& frame, VkDeviceSize instanceBytes, VkDeviceSize lightBytes)
         {
             bool copiedBuffers = instanceBytes != 0 || lightBytes != 0;
-            // Mesh updates share the graphics queue. Order previous frame
-            // vertex reads and earlier copies before overwriting resident data.
+            // Writable geometry versions have no outstanding GPU readers.
+            // Only order transfer writes before copies (including preserved tails),
+            // allowing uploads to overlap unrelated vertex/index reads.
             auto before = vkInfo<VkMemoryBarrier>(VK_STRUCTURE_TYPE_MEMORY_BARRIER);
-            before.srcAccessMask
-                = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-            before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            vkCmdPipelineBarrier(frame.mCommands, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+            before.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(frame.mCommands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
+                &before, 0, nullptr, 0, nullptr);
             if (instanceBytes)
             {
                 const VkBufferCopy copy{ 0, 0, instanceBytes };
@@ -2316,7 +2498,7 @@ namespace MWRender::Vulkan
                 vkCmdCopyBuffer(frame.mCommands, frame.mLightUpload->mBuffer, frame.mLights->mBuffer, 1, &copy);
             }
             Render::reserveFor(frame.mUploads, frame.mUploads.size() + mPendingUploads.size());
-            Render::reserveFor(frame.mResources, frame.mResources.size() + mPendingUploads.size());
+            Render::reserveFor(frame.mResources, frame.mResources.size() + mPendingUploads.size() * 3);
             for (auto& upload : mPendingUploads)
             {
                 if (!upload.mStaging && !upload.mImage)
@@ -2324,11 +2506,31 @@ namespace MWRender::Vulkan
                 if (upload.mMesh)
                 {
                     (upload.mIndices ? upload.mMesh->mIndexUpload : upload.mMesh->mVertexUpload).reset();
-                    const auto& destination = upload.mIndices ? upload.mMesh->mIndices : upload.mMesh->mVertices;
+                    const auto& version
+                        = (upload.mIndices ? upload.mMesh->mIndices : upload.mMesh->mVertices).current();
+                    const auto& destination = version->mRange;
+                    if (upload.mPreserve)
+                    {
+                        const auto& source = upload.mPreserve->mRange;
+                        const auto capacity = upload.mIndices ? upload.mMesh->mIndexBytes : upload.mMesh->mVertexBytes;
+                        if (upload.mSize < capacity)
+                        {
+                            const VkBufferCopy tail{ source.offset() + upload.mSize,
+                                destination.offset() + upload.mSize, capacity - upload.mSize };
+                            vkCmdCopyBuffer(
+                                frame.mCommands, source.page().mBuffer, destination.page().mBuffer, 1, &tail);
+                        }
+                        retainGeometry(frame, upload.mPreserve);
+                    }
+                    retainGeometry(frame, version);
                     const VkBufferCopy copy{ upload.mStaging.mOffset, destination.offset(), upload.mSize };
                     vkCmdCopyBuffer(
                         frame.mCommands, upload.mStaging.mPage->mBuffer, destination.page().mBuffer, 1, &copy);
-                    frame.mResources.push_back(upload.mMesh);
+                    if (upload.mMesh->mLastSubmission != mSubmission)
+                    {
+                        frame.mResources.push_back(upload.mMesh);
+                        upload.mMesh->mLastSubmission = mSubmission;
+                    }
                     copiedBuffers = true;
                 }
                 else
@@ -2465,6 +2667,7 @@ namespace MWRender::Vulkan
         bool VulkanBackend::renderFrame(std::span<const Render::Pass> passes)
         {
             mFrameDraws.clear();
+            mShadowDescriptors.beginFrame();
             mPreparedPasses.clear();
             for (const auto& pass : passes)
             {
@@ -2479,6 +2682,7 @@ namespace MWRender::Vulkan
                     { mFrameDraws.size(), pass.mDraws.size(), target, pass.mClearColor, pass.mClear, pass.mViewport });
                 mPreparedPasses.back().mPreserveWorldDepth = pass.mPreserveWorldDepth;
                 mPreparedPasses.back().mOverwrite = pass.mOverwrite;
+                mPreparedPasses.back().mReversedDepth = pass.mReversedDepth;
                 if (pass.mOverwrite && (!pass.mEffect || (target && target->mDepth)))
                     throw std::invalid_argument("Only color-only fullscreen effects can overwrite a target");
                 Render::reserveFor(mFrameDraws, mFrameDraws.size() + pass.mDraws.size());
@@ -2531,7 +2735,7 @@ namespace MWRender::Vulkan
                 mAllocator->trim();
             }
             Render::reserveFor(mPrepared, draws.size());
-            Render::reserveFor(frame.mResources, draws.size() * 3 + mPendingUploads.size());
+            Render::reserveFor(frame.mResources, draws.size() * 5 + mPendingUploads.size() * 3 + passes.size() * 4);
             ++mSubmission;
             for (std::size_t i = 0; i < mPreparedPasses.size(); ++i)
             {
@@ -2586,19 +2790,27 @@ namespace MWRender::Vulkan
                     throw std::invalid_argument("A render target cannot sample its own attachment");
                 const bool offscreen = destination != nullptr;
                 ++drawNumber;
+                const bool reversedDepth = mPreparedPasses[drawPass].mReversedDepth;
+                const auto comparison
+                    = reversedDepth ? Render::reverseDepthComparison(draw.mDepthCompare) : draw.mDepthCompare;
                 const std::size_t rasterKey = 4 * static_cast<std::size_t>(draw.mBlend) + (draw.mDoubleSided ? 2 : 0)
                     + (draw.mFlipWinding ? 1 : 0)
                     + (draw.mDepthTest ? draw.mDepthWrite ? DepthStride * 2 : DepthStride : 0)
-                    + CompareStride * static_cast<std::size_t>(draw.mDepthCompare);
-                const auto material = draw.mDistortion ? MaterialShader::Distortion
-                    : draw.mSky                        ? MaterialShader::Sky
-                    : draw.mWater                      ? MaterialShader::Water
+                    + CompareStride * static_cast<std::size_t>(comparison);
+                auto material = draw.mShadowCasting ? MaterialShader::Shadow
+                    : draw.mDistortion              ? MaterialShader::Distortion
+                    : draw.mSky                     ? MaterialShader::Sky
+                    : draw.mWater                   ? MaterialShader::Water
                     : !offscreen && !draw.mLighting && !draw.mDepthTest && !draw.mDepthWrite && !draw.mClip
                         && !draw.mMaskTexture && draw.mAlphaCompare == Render::AlphaCompare::Always
                         && (draw.mFogEnd <= draw.mFogStart || draw.mFogEnd <= 0)
                     ? MaterialShader::Overlay
                     : draw.mAlphaCompare == Render::AlphaCompare::Always && !draw.mClip ? MaterialShader::SolidSurface
                                                                                         : MaterialShader::Surface;
+                if (draw.mShadows && material == MaterialShader::Surface)
+                    material = MaterialShader::SurfaceShadowed;
+                else if (draw.mShadows && material == MaterialShader::SolidSurface)
+                    material = MaterialShader::SolidSurfaceShadowed;
                 const std::size_t pipeline
                     = (offscreen ? PipelinesPerTarget * (static_cast<std::size_t>(destination->mTargetFormat) + 1) : 0)
                     + RasterKeys * static_cast<std::size_t>(material)
@@ -2614,6 +2826,8 @@ namespace MWRender::Vulkan
                 if (mesh->mLastSubmission != mSubmission)
                 {
                     frame.mResources.push_back(mesh);
+                    retainGeometry(frame, mesh->mVertices.current());
+                    retainGeometry(frame, mesh->mIndices.current());
                     mesh->mLastSubmission = mSubmission;
                 }
                 if (texture->mLastSubmission != mSubmission)
@@ -2633,6 +2847,8 @@ namespace MWRender::Vulkan
                     { draw.mFogColor[0], draw.mFogColor[1], draw.mFogColor[2], draw.mFogColor[3], draw.mFogStart,
                         draw.mFogEnd, 0, 0 },
                     draw.mWater });
+                mPrepared.back().mReversedDepth = reversedDepth;
+                mPrepared.back().mDepthBias = { draw.mDepthBiasConstant, draw.mDepthBiasSlope };
             }
             if (draws.size() > frame.mInstanceCapacity)
             {
@@ -2647,7 +2863,6 @@ namespace MWRender::Vulkan
                 frame.mInstanceUpload = std::move(upload);
                 frame.mInstances = std::move(instances);
                 frame.mInstanceCapacity = capacity;
-                frame.mDataDescriptorDirty = true;
             }
             mLightData.clear();
             // At most one entry per draw, with a load factor <= 1/2. A flat
@@ -2697,30 +2912,12 @@ namespace MWRender::Vulkan
                 frame.mLightUpload = std::move(upload);
                 frame.mLights = std::move(data);
                 frame.mLightCapacity = capacity;
-                frame.mDataDescriptorDirty = true;
             }
             if (!mLightData.empty())
                 std::memcpy(frame.mLightUpload->mMemory.mapped(), mLightData.data(),
                     mLightData.size() * sizeof(Render::PointLight));
-            if (!draws.empty() && frame.mDataDescriptorDirty)
-            {
-                const std::array<VkDescriptorBufferInfo, 2> bindings{ {
-                    { frame.mInstances->mBuffer, 0, VK_WHOLE_SIZE },
-                    { frame.mLights->mBuffer, 0, VK_WHOLE_SIZE },
-                } };
-                std::array<VkWriteDescriptorSet, 2> writes{};
-                for (unsigned i = 0; i < writes.size(); ++i)
-                {
-                    writes[i] = vkInfo<VkWriteDescriptorSet>(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
-                    writes[i].dstSet = frame.mDataDescriptor;
-                    writes[i].dstBinding = i;
-                    writes[i].descriptorCount = 1;
-                    writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                    writes[i].pBufferInfo = &bindings[i];
-                }
-                vkUpdateDescriptorSets(mDevice, writes.size(), writes.data(), 0, nullptr);
-                frame.mDataDescriptorDirty = false;
-            }
+            for (std::size_t i = 0; i < draws.size(); ++i)
+                mPrepared[i].mDataDescriptor = dataDescriptor(frame, draws[i]->mShadows.get());
             for (std::size_t i = 0; i < draws.size(); ++i)
             {
                 const auto& draw = *draws[i];
@@ -2756,7 +2953,8 @@ namespace MWRender::Vulkan
                             ? static_cast<std::uint32_t>(draw.mLights->mPoints.size())
                             : 0,
                         (draw.mLighting && !draw.mWater && !draw.mSky ? 1u : 0u) | (draw.mClassicFalloff ? 2u : 0u)
-                            | (draw.mClip ? 4u : 0u),
+                            | (draw.mClip ? 4u : 0u) | (mPrepared[i].mReversedDepth ? 8u : 0u)
+                            | (draw.mShadowAlphaTest ? 16u : 0u),
                         draw.mUseVertexColor ? draw.mVertexColorMode : 0u },
                     draw.mClipPlane };
                 std::memcpy(
@@ -2846,7 +3044,7 @@ namespace MWRender::Vulkan
                 std::array<VkClearValue, 3> clear{};
                 clear[2].color = { { .5f, .5f, .5f, 0.f } };
                 std::copy(view.mClearColor.begin(), view.mClearColor.end(), clear[0].color.float32);
-                clear[1].depthStencil = { 1, 0 };
+                clear[1].depthStencil = { view.mReversedDepth ? 0.f : 1.f, 0 };
                 auto pass = vkInfo<VkRenderPassBeginInfo>(VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO);
                 const auto targetSlot = view.mTarget ? static_cast<std::size_t>(view.mTarget->mTargetFormat) : 0;
                 pass.renderPass = view.mTarget
@@ -2871,15 +3069,15 @@ namespace MWRender::Vulkan
                 std::size_t boundRaster = std::numeric_limits<std::size_t>::max();
                 VkDescriptorSet boundTexture = VK_NULL_HANDLE;
                 VkDescriptorSet boundMask = VK_NULL_HANDLE;
+                VkDescriptorSet boundData = VK_NULL_HANDLE;
                 VkBuffer boundVertices = VK_NULL_HANDLE;
                 VkBuffer boundIndices = VK_NULL_HANDLE;
                 VkIndexType boundIndexType = VK_INDEX_TYPE_UINT32;
                 VkDeviceSize boundVertexOffset = 0, boundIndexOffset = 0;
                 std::optional<std::array<float, 8>> boundFog;
+                std::optional<std::array<float, 2>> boundDepthBias;
                 if (!mPrepared.empty())
                 {
-                    vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, mPipelineLayout, 2, 1,
-                        &frame.mDataDescriptor, 0, nullptr);
                     const auto emptyDepth = mTextures.get(mWhiteTexture)->mDescriptor;
                     vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, mPipelineLayout, 3, 1,
                         &emptyDepth, 0, nullptr);
@@ -2923,7 +3121,7 @@ namespace MWRender::Vulkan
                     {
                         VkClearAttachment depth{};
                         depth.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-                        depth.clearValue.depthStencil = { 1, 0 };
+                        depth.clearValue.depthStencil = { view.mReversedDepth ? 0.f : 1.f, 0 };
                         const VkClearRect rect{ scissor, 0, 1 };
                         vkCmdClearAttachments(frame.mCommands, 1, &depth, 1, &rect);
                     }
@@ -2947,7 +3145,8 @@ namespace MWRender::Vulkan
                         && mPrepared[end].mTexture == draw.mTexture && mPrepared[end].mPipeline == draw.mPipeline
                         && mPrepared[end].mRasterKey == draw.mRasterKey && mPrepared[end].mMask == draw.mMask
                         && mPrepared[end].mIndexCount == draw.mIndexCount && mPrepared[end].mFog == draw.mFog
-                        && !mPrepared[end].mClearDepthBefore)
+                        && mPrepared[end].mDepthBias == draw.mDepthBias
+                        && mPrepared[end].mDataDescriptor == draw.mDataDescriptor && !mPrepared[end].mClearDepthBefore)
                         ++end;
                     if (boundPipeline != mPipelines[draw.mPipeline])
                     {
@@ -2972,6 +3171,17 @@ namespace MWRender::Vulkan
                             VK_COMPARE_OP_GREATER_OR_EQUAL, VK_COMPARE_OP_GREATER };
                         mSetDepthCompare(frame.mCommands, compare[boundRaster / CompareStride]);
                     }
+                    if (!boundDepthBias || *boundDepthBias != draw.mDepthBias)
+                    {
+                        vkCmdSetDepthBias(frame.mCommands, draw.mDepthBias[0], 0, draw.mDepthBias[1]);
+                        boundDepthBias = draw.mDepthBias;
+                    }
+                    if (boundData != draw.mDataDescriptor)
+                    {
+                        boundData = draw.mDataDescriptor;
+                        vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, mPipelineLayout, 2, 1,
+                            &boundData, 0, nullptr);
+                    }
                     if (!boundFog || *boundFog != draw.mFog)
                     {
                         vkCmdPushConstants(
@@ -2986,7 +3196,7 @@ namespace MWRender::Vulkan
                         vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, mPipelineLayout, 0, 2,
                             descriptors.data(), 0, nullptr);
                     }
-                    const auto& vertices = draw.mMesh->mVertices;
+                    const auto& vertices = draw.mMesh->mVertices.current()->mRange;
                     const auto vertexNumber = vertices.offset() / sizeof(Render::Vertex);
                     const bool vertexFits = vertexNumber <= std::numeric_limits<std::int32_t>::max();
                     const VkDeviceSize vertexBinding = vertexFits ? 0 : vertices.offset();
@@ -2997,7 +3207,7 @@ namespace MWRender::Vulkan
                         boundVertexOffset = vertexBinding;
                         vkCmdBindVertexBuffers(frame.mCommands, 0, 1, &boundVertices, &boundVertexOffset);
                     }
-                    const auto& indices = draw.mMesh->mIndices;
+                    const auto& indices = draw.mMesh->mIndices.current()->mRange;
                     const auto indexNumber
                         = indices.offset() / (draw.mMesh->mIndexType == VK_INDEX_TYPE_UINT16 ? 2 : 4);
                     const bool indexFits = indexNumber <= std::numeric_limits<std::uint32_t>::max();
@@ -3018,14 +3228,15 @@ namespace MWRender::Vulkan
                 if (view.mEffect)
                 {
                     const auto& fullscreen = *mMeshes.get(mFullscreenMesh);
-                    const VkDeviceSize offset = fullscreen.mVertices.offset();
+                    const VkDeviceSize offset = fullscreen.mVertices.current()->mRange.offset();
                     vkCmdBindPipeline(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS,
                         effectPipeline(*view.mEffect, view.mTarget.get()));
                     vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, view.mEffect->mLayout, 0,
                         1, &view.mEffectDescriptor, 0, nullptr);
-                    vkCmdBindVertexBuffers(frame.mCommands, 0, 1, &fullscreen.mVertices.page().mBuffer, &offset);
-                    vkCmdBindIndexBuffer(frame.mCommands, fullscreen.mIndices.page().mBuffer,
-                        fullscreen.mIndices.offset(), fullscreen.mIndexType);
+                    vkCmdBindVertexBuffers(
+                        frame.mCommands, 0, 1, &fullscreen.mVertices.current()->mRange.page().mBuffer, &offset);
+                    vkCmdBindIndexBuffer(frame.mCommands, fullscreen.mIndices.current()->mRange.page().mBuffer,
+                        fullscreen.mIndices.current()->mRange.offset(), fullscreen.mIndexType);
                     vkCmdDrawIndexed(frame.mCommands, 3, 1, 0, 0, 0);
                 }
                 vkCmdEndRenderPass(frame.mCommands);

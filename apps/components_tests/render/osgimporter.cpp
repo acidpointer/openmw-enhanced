@@ -1,3 +1,4 @@
+#include <components/renderassets/imagevariants.hpp>
 #include <components/renderassets/meshkey.hpp>
 #include <components/renderassets/osgimporter.hpp>
 #include <components/renderassets/osgstate.hpp>
@@ -12,6 +13,7 @@
 #include <cstring>
 
 #include <osg/AlphaFunc>
+#include <osg/BlendEquation>
 #include <osg/BlendFunc>
 #include <osg/ColorMask>
 #include <osg/Geometry>
@@ -26,6 +28,131 @@
 
 namespace
 {
+    TEST(RenderImageVariants, SamplerBindingsShareImagesAndFullMipChainsAlsoServeBaseLevelSampling)
+    {
+        RenderAssets::ImageVariants<int> variants;
+        osg::ref_ptr<osg::Image> source = new osg::Image;
+        auto base = std::make_shared<int>(1);
+        auto mipmapped = std::make_shared<int>(2);
+        variants.store(*source, false, base);
+        EXPECT_EQ(variants.find(*source, false), base);
+        EXPECT_EQ(variants.find(*source, true), nullptr);
+        variants.store(*source, true, mipmapped);
+        EXPECT_EQ(variants.find(*source, false), mipmapped);
+        EXPECT_EQ(variants.find(*source, true), mipmapped);
+        EXPECT_EQ(base.use_count(), 1); // The registry does not pin GPU storage.
+        EXPECT_EQ(mipmapped.use_count(), 1);
+    }
+
+    TEST(RenderImageVariants, AnimatedImageRevisionInvalidatesEverySamplerAndMipVariant)
+    {
+        RenderAssets::ImageVariants<int> variants;
+        osg::ref_ptr<osg::Image> source = new osg::Image;
+        auto previous = std::make_shared<int>(1);
+        variants.store(*source, false, previous);
+        variants.store(*source, true, previous);
+        auto submittedView = variants.find(*source, true);
+        source->dirty();
+        EXPECT_EQ(variants.find(*source, false), nullptr);
+        EXPECT_EQ(variants.find(*source, true), nullptr);
+        auto replacement = std::make_shared<int>(2);
+        variants.store(*source, false, replacement);
+        EXPECT_EQ(variants.find(*source, false), replacement);
+        EXPECT_EQ(variants.find(*source, true), nullptr);
+        EXPECT_EQ(*submittedView, 1); // Earlier frames retain their generation.
+    }
+
+    TEST(RenderImageVariants, ExpiredSourcesAndStorageAreSweptWithoutPinningEither)
+    {
+        RenderAssets::ImageVariants<int> variants;
+        osg::ref_ptr<osg::Image> source = new osg::Image;
+        const auto references = source->referenceCount();
+        auto storage = std::make_shared<int>(42);
+        variants.store(*source, true, storage);
+        EXPECT_EQ(source->referenceCount(), references);
+        storage.reset();
+        EXPECT_EQ(variants.find(*source, true), nullptr);
+        EXPECT_EQ(variants.sweep([] { return false; }), 1u);
+        storage = std::make_shared<int>(43);
+        variants.store(*source, true, storage);
+        auto view = variants.find(*source, true);
+        source = nullptr;
+        EXPECT_EQ(variants.sweep([] { return false; }), 1u);
+        EXPECT_EQ(*view, 43);
+        EXPECT_EQ(variants.sweep([] { return false; }), 0u);
+    }
+
+    TEST(RenderStateView, EagerBindingsMatchLazyResolutionAcrossOverridesAndTextureUnits)
+    {
+        using A = osg::StateAttribute;
+        for (unsigned rootFlags : { 0u, unsigned(A::OVERRIDE), unsigned(A::PROTECTED) })
+            for (unsigned middleFlags : { 0u, unsigned(A::OVERRIDE), unsigned(A::PROTECTED) })
+                for (unsigned leafFlags : { 0u, unsigned(A::OVERRIDE), unsigned(A::PROTECTED) })
+                {
+                    std::array<osg::ref_ptr<osg::StateSet>, 3> states{ new osg::StateSet, new osg::StateSet,
+                        new osg::StateSet };
+                    const std::array flags{ rootFlags, middleFlags, leafFlags };
+                    for (unsigned i = 0; i < states.size(); ++i)
+                    {
+                        states[i]->addUniform(new osg::Uniform("alpha", float(i)), flags[i]);
+                        states[i]->addUniform(new osg::Uniform("customEffectValue", int(i)), flags[i]);
+                        states[i]->addUniform(new osg::Uniform("maximumShadowMapDistance", float(i + 100)), flags[i]);
+                        states[i]->addUniform(new osg::Uniform("shadowSpaceMatrix0", osg::Matrixf{}), flags[i]);
+                        states[i]->setMode(GL_BLEND, flags[i] | (i == 1 ? A::OFF : A::ON));
+                        states[i]->setAttribute(new osg::ColorMask(i == 0, i == 1, i == 2, true), flags[i]);
+                        for (unsigned unit : { 0u, 7u, 9u })
+                            states[i]->setTextureAttribute(unit, new osg::Texture2D, flags[i]);
+                    }
+                    RenderAssets::OsgStateView a(nullptr, states[0]), b(&a, states[1]), lazy(&b, states[2]);
+                    RenderAssets::OsgStateView x(nullptr, states[0]), y(&x, states[1]), eager(&y, states[2]);
+                    eager.prepareNativeState();
+                    EXPECT_EQ(eager.getUniform(RenderAssets::NativeUniform::Alpha),
+                        lazy.getUniform(RenderAssets::NativeUniform::Alpha));
+                    EXPECT_EQ(eager.getUniform("customEffectValue"), lazy.getUniform("customEffectValue"));
+                    EXPECT_EQ(eager.getUniform(RenderAssets::NativeUniform::MaximumShadowMapDistance),
+                        lazy.getUniform("maximumShadowMapDistance"));
+                    EXPECT_EQ(eager.getUniform(RenderAssets::NativeUniform::ShadowSpaceMatrix0),
+                        lazy.getUniform("shadowSpaceMatrix0"));
+                    EXPECT_EQ(eager.getMode(GL_BLEND), lazy.getMode(GL_BLEND));
+                    EXPECT_EQ(eager.getMode(GL_DEPTH_TEST), lazy.getMode(GL_DEPTH_TEST));
+                    EXPECT_EQ(eager.getAttribute(A::COLORMASK), lazy.getAttribute(A::COLORMASK));
+                    EXPECT_EQ(eager.getAttribute(A::MATERIAL), nullptr);
+                    EXPECT_EQ(eager.textureUnits(), lazy.textureUnits());
+                    for (unsigned unit : { 0u, 2u, 7u, 9u })
+                        EXPECT_EQ(
+                            eager.getTextureAttribute(unit, A::TEXTURE), lazy.getTextureAttribute(unit, A::TEXTURE));
+                }
+    }
+
+    TEST(RenderStateView, EagerBindingsKeepValuesLiveAndRebindRemovesOldEntries)
+    {
+        osg::ref_ptr<osg::StateSet> source = new osg::StateSet;
+        osg::ref_ptr<osg::Uniform> alpha = new osg::Uniform("alpha", .5f);
+        osg::ref_ptr<osg::ColorMask> mask = new osg::ColorMask;
+        source->addUniform(alpha);
+        source->setAttribute(mask);
+        source->setTextureAttribute(7, new osg::Texture2D);
+        source->setMode(GL_BLEND, osg::StateAttribute::ON);
+        const auto parents = mask->getNumParents();
+        RenderAssets::OsgStateView view(nullptr, source);
+        view.prepareNativeState();
+        alpha->set(.25f);
+        mask->setMask(false, false, false, false);
+        float value = 0;
+        ASSERT_TRUE(view.getUniform("alpha")->get(value));
+        EXPECT_FLOAT_EQ(value, .25f);
+        EXPECT_FALSE(
+            static_cast<const osg::ColorMask*>(view.getAttribute(osg::StateAttribute::COLORMASK))->getRedMask());
+        EXPECT_EQ(mask->getNumParents(), parents);
+        view.bind(nullptr, nullptr);
+        view.prepareNativeState();
+        EXPECT_EQ(view.getUniform("alpha"), nullptr);
+        EXPECT_EQ(view.getAttribute(osg::StateAttribute::COLORMASK), nullptr);
+        EXPECT_EQ(view.getTextureAttribute(7, osg::StateAttribute::TEXTURE), nullptr);
+        EXPECT_EQ(view.getMode(GL_BLEND), osg::StateAttribute::INHERIT);
+        EXPECT_EQ(view.textureUnits(), 0u);
+    }
+
     TEST(RenderSamplerImport, IgnoresTheDefaultLegacyRWrapOnTwoDimensionalUiTextures)
     {
         // UI and loading-screen textures set S/T but leave the unused R axis
@@ -276,6 +403,20 @@ namespace
         EXPECT_FLOAT_EQ(stream.mVertices[1].mUV[0], .25f);
     }
 
+    TEST(RenderEffectState, ExplicitReplacementBlendingSupportsTemporalAoWithoutAcceptingAdditivePasses)
+    {
+        osg::ref_ptr<osg::StateSet> state = new osg::StateSet;
+        state->setAttributeAndModes(new osg::BlendFunc(GL_ONE, GL_ZERO), osg::StateAttribute::ON);
+        EXPECT_TRUE(RenderAssets::effectReplacesDestination({ nullptr, state }));
+        state->setAttribute(new osg::BlendEquation(osg::BlendEquation::FUNC_SUBTRACT));
+        EXPECT_FALSE(RenderAssets::effectReplacesDestination({ nullptr, state }));
+        state->setAttribute(new osg::BlendEquation(osg::BlendEquation::FUNC_ADD));
+        state->setAttribute(new osg::BlendFunc(GL_ONE, GL_ONE));
+        EXPECT_FALSE(RenderAssets::effectReplacesDestination({ nullptr, state }));
+        state->setMode(GL_BLEND, osg::StateAttribute::OFF);
+        EXPECT_TRUE(RenderAssets::effectReplacesDestination({ nullptr, state }));
+    }
+
     TEST(RenderProjection, OpaqueWaterDepthRetainsWorldDistanceAtLongViewRanges)
     {
         RenderAssets::OsgState state;
@@ -290,6 +431,30 @@ namespace
                 = (coefficients[1] - sample * coefficients[3]) / (sample * coefficients[2] - coefficients[0]);
             EXPECT_NEAR(-viewZ, distance, distance * .01);
         }
+    }
+
+    TEST(RenderProjection, NativeReverseDepthPreservesDistantAndFirstPersonPrecision)
+    {
+        RenderAssets::OsgState state;
+        const auto cull = osg::Matrixd::perspective(110, 1.6, .1, 1000000);
+        const auto projection = RenderAssets::clipProjection(state, cull, false, true);
+        const auto coefficients = RenderAssets::depthCoefficients(projection, true);
+        float previous = 2;
+        for (double distance : { .1, 1., 50., 10000., 40000., 900000. })
+        {
+            const auto clip = osg::Vec4d(0, 0, -distance, 1) * projection;
+            const float sample = static_cast<float>(clip.z() / clip.w());
+            const float z = (coefficients[1] - sample * coefficients[3]) / (sample * coefficients[2] - coefficients[0]);
+            EXPECT_LT(sample, previous);
+            EXPECT_NEAR(-z, distance, distance * 2e-6);
+            previous = sample;
+        }
+        osg::ref_ptr<osg::StateSet> authored = new osg::StateSet;
+        const auto reversed = SceneUtil::getReversedZProjectionMatrixAsPerspective(110, 1.6, .1, 1000000);
+        authored->addUniform(new osg::Uniform("projectionMatrix", osg::Matrixf(reversed)));
+        const auto retained = RenderAssets::clipProjection(*authored, cull, true, true);
+        for (unsigned i = 0; i < 16; ++i)
+            EXPECT_DOUBLE_EQ(retained.ptr()[i], osg::Matrixf(reversed).ptr()[i]);
     }
 
     TEST(RenderProjection, FirstPersonDepthCanBeReadInTheWorldProjection)
@@ -383,6 +548,54 @@ namespace
         return result;
     }
 
+    TEST(RenderMeshImport, ResidentBuffersPreserveFullAssetChannelsForEveryIndexWidth)
+    {
+        for (unsigned width : { 1u, 2u, 4u })
+        {
+            auto geometry = triangle();
+            const auto make = []<class Elements>() {
+                osg::ref_ptr<Elements> result = new Elements(GL_TRIANGLES);
+                result->push_back(2);
+                result->push_back(0);
+                result->push_back(1);
+                return result;
+            };
+            osg::ref_ptr<osg::PrimitiveSet> indices;
+            if (width == 1)
+                indices = make.operator()<osg::DrawElementsUByte>();
+            else if (width == 2)
+                indices = make.operator()<osg::DrawElementsUShort>();
+            else
+                indices = make.operator()<osg::DrawElementsUInt>();
+            geometry->setPrimitiveSet(0, indices);
+            const osg::Vec3f normal(0, 0, 4);
+            geometry->setNormalArray(new osg::Vec3Array(1, &normal), osg::Array::BIND_OVERALL);
+            const osg::Vec4ub color(20, 80, 160, 127);
+            geometry->setColorArray(new osg::Vec4ubArray(1, &color), osg::Array::BIND_OVERALL);
+            const std::array<osg::Vec2f, 4> uv{ { { .1f, .2f }, { .3f, .4f }, { .5f, .6f }, { .7f, .8f } } };
+            geometry->setTexCoordArray(0, new osg::Vec2Array(uv.begin(), uv.end()));
+            RenderAssets::OsgImporter importer;
+            const auto asset = importer.importMesh(*geometry);
+            const auto buffers = importer.importMeshBuffers(*geometry);
+            EXPECT_EQ(buffers.mIndices, asset->mIndices);
+            ASSERT_EQ(buffers.mVertices.size(), asset->mVertices.size());
+            for (unsigned i = 0; i < buffers.mVertices.size(); ++i)
+            {
+                EXPECT_EQ(buffers.mVertices[i].mPosition, asset->mVertices[i].mPosition);
+                EXPECT_EQ(buffers.mVertices[i].mUV, asset->mVertices[i].mUV);
+                EXPECT_EQ(buffers.mVertices[i].mMaskUV, asset->mVertices[i].mMaskUV);
+                EXPECT_EQ(buffers.mVertices[i].mNormal, (std::array<float, 3>{ 0, 0, 1 }));
+                EXPECT_EQ(buffers.mVertices[i].mColor, (std::array<std::uint8_t, 4>{ 20, 80, 160, 127 }));
+                EXPECT_FLOAT_EQ(buffers.mVertices[i].mAlpha, asset->mVertices[i].mAlpha);
+            }
+            EXPECT_EQ(buffers.mVertices[0].mPosition, (std::array<float, 3>{ 0, 1, 0 }));
+            EXPECT_EQ(buffers.mVertices[0].mUV, (std::array<float, 2>{ .5f, .6f }));
+            auto* positions = static_cast<osg::Vec3Array*>(geometry->getVertexArray());
+            (*positions)[2].x() = std::numeric_limits<float>::infinity();
+            EXPECT_THROW(importer.importMeshBuffers(*geometry), std::invalid_argument);
+        }
+    }
+
     TEST(RenderMeshKey, SharesShallowClonesAndSeparatesDirtyGeometry)
     {
         auto original = triangle();
@@ -395,6 +608,27 @@ namespace
         EXPECT_TRUE(key.alive());
         EXPECT_FALSE(key.current());
         EXPECT_NE(key.mWords, RenderAssets::meshKey(*original, 0).mWords);
+    }
+
+    TEST(RenderMeshImport, ResidentBuffersRetainGenericDoubleAndNormalizedIntegerChannels)
+    {
+        auto geometry = triangle();
+        const std::array<osg::Vec3d, 3> positions{ { { 0, 0, 0 }, { 2, 0, 0 }, { 0, 3, 0 } } };
+        geometry->setVertexArray(new osg::Vec3dArray(positions.begin(), positions.end()));
+        const osg::Vec3d normal(0, 4, 0);
+        geometry->setNormalArray(new osg::Vec3dArray(1, &normal), osg::Array::BIND_OVERALL);
+        const osg::Vec4us color(65535, 0, 0, 32768);
+        geometry->setColorArray(new osg::Vec4usArray(1, &color), osg::Array::BIND_OVERALL);
+        RenderAssets::OsgImporter importer;
+        const auto buffers = importer.importMeshBuffers(*geometry);
+        ASSERT_EQ(buffers.mVertices.size(), 3u);
+        EXPECT_EQ(buffers.mVertices[2].mPosition, (std::array<float, 3>{ 0, 3, 0 }));
+        for (const auto& vertex : buffers.mVertices)
+        {
+            EXPECT_EQ(vertex.mNormal, (std::array<float, 3>{ 0, 1, 0 }));
+            EXPECT_EQ(vertex.mColor, (std::array<std::uint8_t, 4>{ 255, 0, 0, 128 }));
+            EXPECT_FLOAT_EQ(vertex.mAlpha, 32768.f / 65535.f);
+        }
     }
     TEST(RenderMeshKey, DoesNotKeepSourceArraysAlive)
     {

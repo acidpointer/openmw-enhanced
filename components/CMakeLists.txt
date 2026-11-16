@@ -141,11 +141,12 @@ add_component_dir (shader
 add_component_dir (render
     backend resourcepool allocationranges module
     )
-list(APPEND COMPONENT_FILES render/bufferarena.hpp render/framecache.hpp render/meshindices.hpp)
+list(APPEND COMPONENT_FILES render/bufferarena.hpp render/bufferversions.hpp render/framecache.hpp render/meshindices.hpp)
 
 add_component_dir (renderassets
     model osgimporter osgstate particles effectshader
     )
+list(APPEND COMPONENT_FILES renderassets/imagevariants.hpp)
 list(APPEND COMPONENT_FILES renderassets/meshkey.hpp)
 
 add_component_dir (sceneutil

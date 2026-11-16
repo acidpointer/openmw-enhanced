@@ -623,9 +623,14 @@ void main() {
                             throw std::invalid_argument("Mipmapped OMWFX targets are not yet available in Vulkan");
                         RenderAssets::OsgStateView root(&canvasState, node.mRootStateSet);
                         RenderAssets::OsgStateView state(&root, pass.mStateSet);
-                        if (state.getMode(GL_BLEND) & osg::StateAttribute::ON)
-                            throw std::invalid_argument("OMWFX attachment blending is not yet available in Vulkan");
+                        if (!RenderAssets::effectReplacesDestination(state))
+                            throw std::invalid_argument(
+                                "OMWFX attachment blending requires an unsupported blend equation");
                         auto shader = program(state);
+                        if (!mBackend.deviceInfo().mFloatNormals
+                            && std::any_of(shader->mShader.mResources.begin(), shader->mShader.mResources.end(),
+                                [](const auto& resource) { return resource.mName == "omw_SamplerNormals"; }))
+                            throw std::invalid_argument("Device has no blendable floating-point normal attachment");
                         result.passes.emplace_back(std::move(shader), pass.mStateSet.get());
                     }
                     ++preparedCount;
@@ -685,7 +690,7 @@ void main(){
     float fp=texture(firstPersonDepth,uv).r;
     float world=texture(worldDepth,uv).r;
     float result=world;
-    if(fp<1.0){
+    if(fp>0.0){
         float denominator=fp*fpProjection.z-fpProjection.x;
         if(abs(denominator)>1e-8){
             float viewZ=(fpProjection.y-fp*fpProjection.w)/denominator;
@@ -699,18 +704,14 @@ void main(){
                     { "firstPersonDepth", "worldDepth" });
                 const auto first = std::find_if(passes[sceneIndex].mDraws.begin(), passes[sceneIndex].mDraws.end(),
                     [](const auto& draw) { return draw.mClearDepthBefore; });
-                const auto inverseView = osg::Matrixf::inverse(osg::Matrixf(first->mViewFromModel.data()));
-                Render::Matrix inverse{};
-                std::copy_n(inverseView.ptr(), 16, inverse.begin());
-                const auto fp = Render::multiply(first->mClipFromModel, inverse);
                 if (!mDepthState)
                 {
                     mDepthState = new osg::StateSet;
                     mDepthState->addUniform(new osg::Uniform("fpProjection", osg::Vec4f()));
                     mDepthState->addUniform(new osg::Uniform("worldProjection", osg::Vec4f()));
                 }
-                const auto fpCoefficients = RenderAssets::depthCoefficients(osg::Matrixd(fp.data()), true);
-                const auto worldCoefficients = RenderAssets::depthCoefficients(projection, false);
+                const auto fpCoefficients = first->mDepthProjection;
+                const auto worldCoefficients = RenderAssets::depthCoefficients(projection, true);
                 mDepthState->getUniform("fpProjection")
                     ->set(osg::Vec4f(fpCoefficients[0], fpCoefficients[1], fpCoefficients[2], fpCoefficients[3]));
                 mDepthState->getUniform("worldProjection")
@@ -734,6 +735,7 @@ void main(){
                 for (auto& draw : mDistortionDraws)
                     draw.mMaskTexture = depth;
                 effects.push_back({ mDistortionDraws, field.mColor, { 0, 0, 0, 0 }, true });
+                effects.back().mReversedDepth = true;
                 distortionTexture = field.mColor;
             }
             bool needsExposure = false;

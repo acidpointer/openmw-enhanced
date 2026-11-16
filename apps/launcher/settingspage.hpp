@@ -13,6 +13,8 @@ namespace Config
     class GameSettings;
 }
 
+class QGroupBox;
+
 namespace Launcher
 {
     class SettingsPage;
@@ -50,6 +52,17 @@ namespace Launcher
         void slotOpenFile(QTreeWidgetItem* item);
 
     private:
+        QGroupBox* mShadowMaps = nullptr;
+        QCheckBox* mShadowActors = nullptr;
+        QCheckBox* mShadowPlayer = nullptr;
+        QCheckBox* mShadowTerrain = nullptr;
+        QCheckBox* mShadowObjects = nullptr;
+        QCheckBox* mShadowIndoors = nullptr;
+        QCheckBox* mShadowSoft = nullptr;
+        QSpinBox* mShadowResolution = nullptr;
+        QSpinBox* mShadowCascades = nullptr;
+        QDoubleSpinBox* mShadowDistance = nullptr;
+
         void setupEnhancedTab();
         void loadEnhancedSettings();
         void saveEnhancedSettings() const;

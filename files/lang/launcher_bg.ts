@@ -717,6 +717,50 @@ Logs and settings changed through the launcher and in-game will be saved here.</
         <translation type="unfinished">Терен</translation>
     </message>
     <message>
+        <source>OpenMW shadow maps</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Use OpenMW&apos;s cascaded shadow maps. Caster selection, distance and quality settings apply to both renderers.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Actors</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Player</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Objects</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Indoor shadows</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Soft shadows</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Map resolution</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Shadow cascades</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Shadow distance</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Unlimited</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
         <source>Rasterize terrain heightmaps into the occlusion depth buffer.</source>
         <translation type="unfinished"></translation>
     </message>

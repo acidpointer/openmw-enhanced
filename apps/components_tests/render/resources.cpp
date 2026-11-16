@@ -1,5 +1,6 @@
 #include <components/render/allocationranges.hpp>
 #include <components/render/bufferarena.hpp>
+#include <components/render/bufferversions.hpp>
 #include <components/render/framecache.hpp>
 #include <components/render/meshindices.hpp>
 #include <components/render/pipelinecache.hpp>
@@ -18,6 +19,136 @@
 
 namespace
 {
+    // Check the actual cache policy during compilation as well as in the
+    // executable suite: revisiting a recent view must not force reuploads.
+    static_assert([] {
+        Render::Residency cache(20);
+        cache.setLimit(20, 250);
+        Render::Residency::Charge north(&cache), south(&cache), unused(&cache);
+        north.set(100);
+        south.set(100);
+        unused.set(10);
+        cache.beginFrame();
+        north.touch();
+        cache.beginFrame();
+        south.touch();
+        if (cache.recentBytes() != 200 || cache.evict(true, 100, 1))
+            return false;
+        cache.setLimit(20, 200);
+        if (!cache.evict(true, 100, 1)) // Recent views cannot exceed the device ceiling.
+            return false;
+        cache.setLimit(20, 250);
+        for (unsigned i = 0; i < 255; ++i)
+        {
+            cache.beginFrame();
+            south.touch();
+        }
+        return cache.recentBytes() == 100 && cache.evict(true, 400, 1);
+    }());
+
+    static_assert([] {
+        Render::Residency cache(20);
+        Render::Residency::Charge first(&cache), middle(&cache), last(&cache);
+        cache.beginFrame();
+        for (auto* charge : { &first, &middle, &last })
+        {
+            charge->set(10);
+            charge->touch();
+        }
+        middle.set(0);
+        last.set(20);
+        middle.set(15);
+        middle.touch();
+        if (cache.activeBytes() != 45 || cache.recentBytes() != 45)
+            return false;
+        cache.beginFrame();
+        first.touch();
+        last.set(0);
+        if (cache.recentBytes() != 25)
+            return false;
+        for (unsigned i = 0; i < 256; ++i)
+            cache.beginFrame();
+        if (cache.recentBytes() != 0 || cache.bytes() != 25)
+            return false;
+        first.touch();
+        return cache.recentBytes() == 10;
+    }());
+
+    static_assert([] {
+        Render::Residency cache(20);
+        cache.beginFrame();
+        {
+            Render::Residency::Charge temporary(&cache);
+            temporary.set(10);
+            temporary.touch();
+        }
+        if (cache.bytes() || cache.activeBytes() || cache.recentBytes())
+            return false;
+        for (unsigned i = 0; i < 256; ++i)
+            cache.beginFrame(); // Destroyed charges must leave no bucket links.
+        return cache.recentBytes() == 0;
+    }());
+
+    TEST(RenderBufferVersions, ReusesIdleRangesWithoutAllocatingAndNeverOverwritesFrameLeases)
+    {
+        Render::BufferVersions<int> versions;
+        int allocations = 0;
+        const auto create = [&] { return std::make_shared<int>(++allocations); };
+        const auto* first = versions.writable(create).get();
+        EXPECT_EQ(versions.writable(create).get(), first);
+        auto firstFrame = versions.current();
+        const auto* second = versions.writable(create).get();
+        EXPECT_NE(first, second);
+        EXPECT_EQ(*firstFrame, 1);
+        auto secondFrame = versions.current();
+        firstFrame.reset();
+        EXPECT_EQ(versions.writable(create).get(), first);
+        EXPECT_EQ(allocations, 2);
+        EXPECT_EQ(*secondFrame, 2);
+    }
+
+    TEST(RenderBufferVersions, FrozenPoseRemainsLeasedUntilEveryReadingFrameRetires)
+    {
+        Render::BufferVersions<int> versions;
+        int allocations = 0;
+        const auto create = [&] { return std::make_shared<int>(++allocations); };
+        auto firstFrame = versions.writable(create);
+        auto secondFrame = versions.current();
+        const auto* frozen = firstFrame.get();
+        firstFrame.reset();
+        EXPECT_NE(versions.writable(create).get(), frozen);
+        auto updatedFrame = versions.current();
+        secondFrame.reset();
+        EXPECT_EQ(versions.writable(create).get(), frozen);
+        EXPECT_EQ(versions.size(), 2u);
+        EXPECT_EQ(*updatedFrame, 2);
+    }
+
+    TEST(RenderBufferVersions, FrameLeaseOutlivesMeshAndFailedAllocationPreservesCurrent)
+    {
+        std::shared_ptr<int> frame;
+        {
+            Render::BufferVersions<int> versions;
+            frame = versions.writable([] { return std::make_shared<int>(42); });
+            EXPECT_THROW(versions.writable([] { return std::shared_ptr<int>{}; }), std::invalid_argument);
+            EXPECT_EQ(versions.current(), frame);
+            EXPECT_EQ(versions.size(), 1u);
+        }
+        EXPECT_EQ(*frame, 42);
+    }
+
+    TEST(RenderRaster, ReverseDepthFlipsOnlyOrderedComparisons)
+    {
+        using C = Render::AlphaCompare;
+        EXPECT_EQ(Render::reverseDepthComparison(C::Less), C::Greater);
+        EXPECT_EQ(Render::reverseDepthComparison(C::LessEqual), C::GreaterEqual);
+        EXPECT_EQ(Render::reverseDepthComparison(C::Greater), C::Less);
+        EXPECT_EQ(Render::reverseDepthComparison(C::GreaterEqual), C::LessEqual);
+        for (auto comparison : { C::Always, C::Never, C::Equal, C::NotEqual })
+            EXPECT_EQ(Render::reverseDepthComparison(comparison), comparison);
+        EXPECT_TRUE(Render::targetHasDepth(Render::TargetFormat::ShadowMap));
+    }
+
     TEST(RenderMeshIndices, WidthUsesFullVertexCapacityAndCopiesAreFourByteAligned)
     {
         EXPECT_TRUE(Render::narrowMeshIndices(65536));
@@ -233,6 +364,61 @@ namespace
         word(0, 32);
         word(4, 2);
         EXPECT_FALSE(Render::compatiblePipelineCache(bytes, 0x10de, 0x25b9, uuid));
+    }
+
+    TEST(RenderResidency, RecentWorkingSetIncludesTheUnionOfCameraViews)
+    {
+        Render::Residency cache(20);
+        cache.setLimit(20, 250);
+        Render::Residency::Charge north(&cache), south(&cache), old(&cache);
+        north.set(100);
+        south.set(100);
+        old.set(10);
+        cache.beginFrame();
+        north.touch();
+        cache.beginFrame();
+        south.touch();
+        south.touch();
+        EXPECT_EQ(cache.activeBytes(), 100u);
+        EXPECT_EQ(cache.recentBytes(), 200u);
+        EXPECT_FALSE(cache.evict(true, 100, 1)); // Both views fit, plus warm data.
+        for (unsigned i = 0; i < 255; ++i)
+        {
+            cache.beginFrame();
+            south.touch();
+        }
+        EXPECT_EQ(cache.recentBytes(), 100u);
+        EXPECT_TRUE(cache.evict(true, 400, 1));
+    }
+
+    TEST(RenderResidency, ResizingAndRemovingBucketNodesKeepsAccountingExact)
+    {
+        Render::Residency cache(20);
+        Render::Residency::Charge first(&cache), middle(&cache), last(&cache);
+        cache.beginFrame();
+        for (auto* charge : { &first, &middle, &last })
+        {
+            charge->set(10);
+            charge->touch();
+        }
+        middle.set(0); // Remove the middle of the bucket list.
+        EXPECT_EQ(cache.recentBytes(), 20u);
+        last.set(20);
+        EXPECT_EQ(cache.recentBytes(), 30u);
+        EXPECT_EQ(cache.activeBytes(), 30u);
+        middle.set(15);
+        middle.touch(); // Reinsert in the same frame after setting zero.
+        EXPECT_EQ(cache.recentBytes(), 45u);
+        cache.beginFrame();
+        first.touch(); // Move an old tail to another bucket.
+        last.set(0);
+        EXPECT_EQ(cache.recentBytes(), 25u);
+        for (unsigned i = 0; i < 256; ++i)
+            cache.beginFrame();
+        EXPECT_EQ(cache.recentBytes(), 0u);
+        EXPECT_EQ(cache.bytes(), 25u);
+        first.touch();
+        EXPECT_EQ(cache.recentBytes(), 10u);
     }
 
     TEST(RenderResidency, VisibleWorkingSetDoesNotConsumeTheWarmCacheAllowance)

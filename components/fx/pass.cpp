@@ -70,6 +70,9 @@ namespace Fx
 
 #define OMW_API_VERSION @apiVersion
 #define OMW_REVERSE_Z @reverseZ
+#ifndef OMW_NATIVE_DEPTH
+#define OMW_NATIVE_DEPTH 0
+#endif
 #define OMW_RADIAL_FOG @radialFog
 #define OMW_EXPONENTIAL_FOG @exponentialFog
 #define OMW_HDR @hdr
@@ -153,13 +156,18 @@ mat4 omw_InvProjectionMatrix()
 #endif
 }
 
-    float omw_GetDepth(vec2 uv)
+    float omw_ReadSceneDepth(vec2 uv)
     {
 #if OMW_MULTIVIEW
-        float depth = omw_Texture2DArray(omw_SamplerDepth, vec3(uv, gl_ViewID_OVR)).r;
+        return omw_Texture2DArray(omw_SamplerDepth, vec3(uv, gl_ViewID_OVR)).r;
 #else
-        float depth = omw_Texture2D(omw_SamplerDepth, uv).r;
+        return omw_Texture2D(omw_SamplerDepth, uv).r;
 #endif
+    }
+
+    float omw_GetDepth(vec2 uv)
+    {
+        float depth = omw_ReadSceneDepth(uv);
 #if OMW_REVERSE_Z
         return 1.0 - depth;
 #else
@@ -167,13 +175,18 @@ mat4 omw_InvProjectionMatrix()
 #endif
     }
 
-    float omw_GetWorldDepth(vec2 uv)
+    float omw_ReadWorldDepth(vec2 uv)
     {
 #if OMW_MULTIVIEW
-        float depth = omw_Texture2DArray(omw_SamplerWorldDepth, vec3(uv, gl_ViewID_OVR)).r;
+        return omw_Texture2DArray(omw_SamplerWorldDepth, vec3(uv, gl_ViewID_OVR)).r;
 #else
-        float depth = omw_Texture2D(omw_SamplerWorldDepth, uv).r;
+        return omw_Texture2D(omw_SamplerWorldDepth, uv).r;
 #endif
+    }
+
+    float omw_GetWorldDepth(vec2 uv)
+    {
+        float depth = omw_ReadWorldDepth(uv);
 #if OMW_REVERSE_Z
         return 1.0 - depth;
 #else
@@ -224,11 +237,17 @@ mat4 omw_InvProjectionMatrix()
 
     vec3 omw_GetWorldPosFromUV(vec2 uv)
     {
+#if OMW_NATIVE_DEPTH
+        // Do not normalize reverse depth and subtract it from one again. That
+        // round trip discards the precision needed by distant AO/temporal data.
+        float flippedDepth = omw_ReadSceneDepth(uv);
+#else
         float depth = omw_GetDepth(uv);
 #if (OMW_REVERSE_Z == 1)
         float flippedDepth = 1.0 - depth;
 #else
         float flippedDepth = depth * 2.0 - 1.0;
+#endif
 #endif
         vec4 clip_space = vec4(uv * 2.0 - 1.0, flippedDepth, 1.0);
         vec4 world_space = omw.invViewMatrix * (omw.invProjectionMatrix * clip_space);
@@ -251,7 +270,13 @@ mat4 omw_InvProjectionMatrix()
 
     vec3 omw_GetWorldPosFromWorldDepthUV(vec2 uv)
     {
+#if OMW_NATIVE_DEPTH
+        vec4 clip_space = vec4(uv * 2.0 - 1.0, omw_ReadWorldDepth(uv), 1.0);
+        vec4 world_space = omw.invViewMatrix * (omw.invProjectionMatrix * clip_space);
+        return world_space.xyz / world_space.w;
+#else
         return omw_GetWorldPosFromWorldDepthUV(uv, omw_GetWorldDepth(uv));
+#endif
     }
 
     float omw_LinearizeDepth(float depth)
@@ -266,14 +291,33 @@ mat4 omw_InvProjectionMatrix()
         return dist;
     }
 
+#if OMW_NATIVE_DEPTH
+    float omw_NativeLinearDepth(float raw)
+    {
+        if (raw <= 0.0)
+            return omw.far;
+        mat4 p = omw_ProjectionMatrix();
+        float denominator = raw * p[2][3] - p[2][2];
+        return abs(denominator) > 1e-30 ? abs((p[3][2] - raw * p[3][3]) / denominator) : omw.far;
+    }
+#endif
+
     float omw_GetLinearDepth(vec2 uv)
     {
+#if OMW_NATIVE_DEPTH
+        return omw_NativeLinearDepth(omw_ReadSceneDepth(uv));
+#else
         return omw_LinearizeDepth(omw_GetDepth(uv));
+#endif
     }
 
     float omw_GetWorldLinearDepth(vec2 uv)
     {
+#if OMW_NATIVE_DEPTH
+        return omw_NativeLinearDepth(omw_ReadWorldDepth(uv));
+#else
         return omw_LinearizeDepth(omw_GetWorldDepth(uv));
+#endif
     }
 
 float omw_EstimateFogCoverageFromUV(vec2 uv)

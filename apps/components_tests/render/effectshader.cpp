@@ -170,7 +170,8 @@ void main() { omw_FragColor = texture2D(omw_SamplerLastShader, omw_TexCoord); }
 )";
         const auto output = RenderAssets::translateEffectShader(source, true);
         EXPECT_TRUE(output.starts_with("#version 450 core\n"));
-        EXPECT_NE(output.find("#define OMW_REVERSE_Z 0\n"), std::string::npos);
+        EXPECT_NE(output.find("#define OMW_REVERSE_Z 1\n"), std::string::npos);
+        EXPECT_NE(output.find("#define OMW_NATIVE_DEPTH 1\n"), std::string::npos);
         EXPECT_NE(output.find("#define OMW_USE_BINDINGS 1\n"), std::string::npos);
         EXPECT_NE(output.find("layout(location=0) out vec4 _omw_FragColor;"), std::string::npos);
         EXPECT_EQ(output.find("out vec4 omw_FragColor;"), std::string::npos);

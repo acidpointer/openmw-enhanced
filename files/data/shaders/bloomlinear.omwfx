@@ -131,11 +131,11 @@ fragment nomipmap(target=RT_NoMipmap) {
     {
         // downsample into a smaller buffer with mipmapping disabled (no need for it + might interfere with the blurring process)
         // do the gamma compression step while we're at it
-        vec3 sample = omw_GetLastShader(omw_TexCoord).rgb;
+        vec3 sampleColor = omw_GetLastShader(omw_TexCoord).rgb;
         bool is_sky = (omw_GetLinearDepth(omw_TexCoord) > omw.far*0.999);
         float factor = is_sky ? uSkyFactor : 1.0;
-        vec3 ret_sample = powv(sample, uGamma);
-        factor *= (!is_sky && (dot(sample, vec3(1.0/3.0)) < uThreshold)) ? 0.0 : 1.0;
+        vec3 ret_sample = powv(sampleColor, uGamma);
+        factor *= (!is_sky && (dot(sampleColor, vec3(1.0/3.0)) < uThreshold)) ? 0.0 : 1.0;
         ret_sample *= factor;
         omw_FragColor = vec4(ret_sample, 1.0);
     }
@@ -156,8 +156,8 @@ fragment horizontal(target=RT_Horizontal, rt1=RT_NoMipmap) {
             float strength = gauss(float(x)/radius*2.0);
             normalize += strength;
             vec2 coord = omw_TexCoord + vec2(float(x), 0.0) / omw.resolution.xy;
-            vec3 sample = omw_Texture2D(RT_NoMipmap, coord).rgb;
-            sum += strength * sample;
+            vec3 sampleColor = omw_Texture2D(RT_NoMipmap, coord).rgb;
+            sum += strength * sampleColor;
         }
         sum /= normalize;
 
@@ -180,8 +180,8 @@ fragment vertical(target=RT_Vertical, rt1=RT_Horizontal) {
             float strength = gauss(float(y)/radius*2.0);
             normalize += strength;
             vec2 coord = omw_TexCoord + vec2(0.0, float(y)) / omw.resolution.xy;
-            vec3 sample = omw_Texture2D(RT_Horizontal, coord).rgb;
-            sum += strength * sample;
+            vec3 sampleColor = omw_Texture2D(RT_Horizontal, coord).rgb;
+            sum += strength * sampleColor;
         }
         sum /= normalize;
         

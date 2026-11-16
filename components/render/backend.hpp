@@ -75,13 +75,14 @@ namespace Render
         // Fullscreen effects do not need depth storage or depth clears.
         ColorRGBA8,
         ColorRGBA16F,
+        ShadowMap,
         Count
     };
 
     constexpr bool targetHasDepth(TargetFormat format)
     {
         return format == TargetFormat::RGBA8 || format == TargetFormat::RGBA16F || format == TargetFormat::SceneRGBA8
-            || format == TargetFormat::SceneRGBA16F;
+            || format == TargetFormat::SceneRGBA16F || format == TargetFormat::ShadowMap;
     }
 
     enum class EffectBindingKind
@@ -223,6 +224,20 @@ namespace Render
         std::vector<PointLight> mPoints;
     };
 
+    struct ShadowSet
+    {
+        static constexpr unsigned MaxMaps = 8;
+        std::array<TextureHandle, MaxMaps> mTextures{};
+        std::array<std::array<float, 16>, MaxMaps> mViewToShadow{};
+        std::array<std::array<float, 16>, MaxMaps> mValidRegions{};
+        unsigned mCount = 0;
+        unsigned mRegionMask = 0;
+        float mMaximumDistance = 0;
+        float mFadeStart = 0;
+        float mNormalOffset = 0;
+        bool mSoft = false;
+    };
+
     struct Draw
     {
         MeshHandle mMesh;
@@ -230,7 +245,8 @@ namespace Render
         std::uint32_t mIndexCount = 0;
         // An empty texture selects the renderer's resident white texture.
         TextureHandle mTexture;
-        // Column-major, zero-to-one clip depth. View orientation is handled by
+        // Column-major, zero-to-one clip depth, following Pass::mReversedDepth.
+        // View orientation is handled by
         // the backend viewport; the world remains right handed and Y-up in clip.
         std::array<float, 16> mClipFromModel = IdentityTransform;
         std::array<float, 4> mTint{ 1, 1, 1, 1 };
@@ -255,6 +271,8 @@ namespace Render
         std::array<float, 4> mWaterProjection{};
         bool mSky = false;
         int mSkyPass = -1;
+        // Water interprets opacity at an optical depth of 128 world units;
+        // it fades continuously to clear at the shoreline and opaque at depth.
         float mOpacity = 1;
         bool mReflection = false;
         std::array<float, 4> mClipPlane{};
@@ -279,6 +297,14 @@ namespace Render
         std::uint32_t mVertexColorMode = 4;
         bool mLighting = false;
         bool mClassicFalloff = true;
+        bool mShadowCasting = false;
+        bool mShadowAlphaTest = false;
+        float mDepthBiasConstant = 0;
+        float mDepthBiasSlope = 0;
+        std::shared_ptr<const ShadowSet> mShadows;
+        // Preserve projection coefficients before model/view multiplication;
+        // post-processing must not recover them from rounded world matrices.
+        std::array<float, 4> mDepthProjection{};
     };
 
     struct Pass
@@ -297,6 +323,9 @@ namespace Render
         // without blending, discard, sample masking, or clipped geometry.
         // Contents outside the viewport remain untouched.
         bool mOverwrite = false;
+        // Draw clip matrices and sampled depth follow this pass convention.
+        // Comparison functions retain their logical forward-depth meaning.
+        bool mReversedDepth = false;
     };
 
     struct DeviceInfo
@@ -308,6 +337,7 @@ namespace Render
         std::uint32_t mDeviceId = 0;
         std::uint64_t mLocalMemoryBytes = 0;
         std::uint64_t mLocalMemoryBudgetBytes = 0;
+        bool mFloatNormals = false;
     };
 
     enum class PresentMode
@@ -361,6 +391,12 @@ namespace Render
         }
         virtual bool supportsTextureFormat(TextureFormat format, bool srgb) const = 0;
         virtual TextureHandle createTexture(const TextureData& data, const SamplerState& sampler = {}) = 0;
+        // Share immutable 2D image storage with another sampler. Releasing the
+        // original handle does not invalidate a view or cancel its upload.
+        virtual TextureHandle createTextureSamplerView(TextureHandle, const SamplerState&)
+        {
+            throw std::runtime_error("This renderer does not support shared texture samplers");
+        }
         virtual TextureHandle createVolume(
             std::uint32_t, std::uint32_t, std::uint32_t, std::span<const std::byte>, const SamplerState&)
         {
@@ -408,7 +444,7 @@ namespace Render
     // Private, same-build module ABI. Creation and destruction stay paired in
     // the module; errors are copied into caller-owned memory, never thrown
     // through the exported entry point. No graphics API types cross it.
-    inline constexpr std::uint32_t BackendAbi = 12;
+    inline constexpr std::uint32_t BackendAbi = 14;
     using CreateBackend = Backend* (*)(std::uint32_t abi, const BackendOptions*, char* error, std::size_t errorSize);
     using DestroyBackend = void (*)(Backend*);
 }

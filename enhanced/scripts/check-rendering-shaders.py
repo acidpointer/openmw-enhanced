@@ -15,6 +15,7 @@ import tempfile
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--godrays', type=Path)
 parser.add_argument('--depth-of-field', type=Path)
+parser.add_argument('--effect', type=Path, action='append', default=[], help='Also syntax-check a user OMWFX file (GLSL 330 API).')
 parser.add_argument('--cxx', default='c++')
 args = parser.parse_args()
 if bool(args.godrays) != bool(args.depth_of_field):
@@ -102,19 +103,21 @@ def blocks(s):
         result.append((m.group(1), m.group(2), s[start:i - 1]))
         pos = i
     return result
-paths = [root / 'files/data/shaders/internal_distortion.omwfx'] + compat_paths
+paths = [root / 'files/data/shaders' / name for name in
+         ('internal_distortion.omwfx', 'bloomlinear.omwfx', 'adjustments.omwfx', 'debug.omwfx')] + compat_paths + args.effect
 count = 0
 for path in paths:
     s = path.read_text()
     bs = blocks(s)
     shared = '\n'.join((b for k, n, b in bs if k == 'shared'))
-    for ver in (120, 330):
-        for multi in (0,) if ver == 120 else (0, 1):
+    for ver in (330,) if path in args.effect else (120, 330):
+        for multi in (0,) if ver == 120 or path in args.effect else (0, 1):
             for rz in (0, 1):
-                for normals in (0,):
+                for normals in (int(bool(re.search(r'pass_normals\s*=\s*true', s))),):
                     for mode in ('static', 'uniform'):
                         defs = {'@version': str(ver), '@profile': 'compatibility' if ver >= 330 else '', '@extensions': '#extension GL_OVR_multiview2 : require' if multi else '', '@uboStruct': struct, '@apiVersion': '1', '@reverseZ': str(rz), '@radialFog': '1', '@exponentialFog': '1', '@hdr': '0', '@normals': str(normals), '@useBindings': str(int(ver >= 330)), '@multiview': str(multi), '@in': 'in' if ver >= 330 else 'varying', '@out': 'out' if ver >= 330 else 'varying', '@position': 'gl_Position', '@texture1D': 'texture' if ver >= 330 else 'texture1D', '@texture2DArray': 'texture', '@texture2D': 'texture' if ver >= 330 else 'texture2D', '@texture3D': 'texture' if ver >= 330 else 'texture3D', '@vertex': '_omw_Vertex' if ver >= 330 else 'gl_Vertex', '@fragColor': '_omw_FragColor' if ver >= 330 else 'gl_FragColor', '@fragBinding': 'out vec4 _omw_FragColor;' if ver >= 330 else '', '@builtinSampler': 'sampler2DArray' if multi else 'sampler2D', '@pointLightCount': '256', '@ubo': str(int(ver >= 330))}
                         h = header
+                        defs['@hdr'] = str(int(bool(re.search(r'\bhdr\s*=\s*true', s))))
                         for key in sorted(defs, key=len, reverse=True):
                             h = h.replace(key, defs[key])
                         assert '@' not in h
@@ -142,6 +145,21 @@ for path in paths:
                             if r.returncode:
                                 raise SystemExit(r.stdout + r.stderr)
                             count += 1
+                            if ver == 330 and multi == 0 and rz == 1:
+                                aliases = '#version 450 core\n#define OMW_NATIVE_DEPTH 1\n' + \
+                                    '#define texture2D texture\n#define texture3D texture\n#define texture2DLod textureLod\n'
+                                aliases += '#define varying ' + ('in\n' if k == 'fragment' else 'out\n#define attribute in\n')
+                                native = re.sub(r'#version[^\n]*', lambda _: aliases,
+                                                file.read_text(), count=1)
+                                if k == 'fragment':
+                                    native = re.sub(r'\bgl_FragColor\b', '_omw_FragColor', native)
+                                native_file = file.with_name('native-api-' + file.name)
+                                native_file.write_text(native)
+                                r = subprocess.run(['glslangValidator', '-S', 'frag' if k == 'fragment' else 'vert',
+                                                    str(native_file)], capture_output=True, text=True)
+                                if r.returncode:
+                                    raise SystemExit(r.stdout + r.stderr)
+                                count += 1
 print(count, 'current FX shader variants passed static GLSL validation, including constants/uniforms and saved N=50.')
 base = root / 'files/shaders'
 
@@ -185,7 +203,7 @@ for stage in ('vert', 'frag'):
     source = re.sub(r'\bset\s*=\s*\d+\s*,\s*', '', source)
     source = source.replace('layout(push_constant)', 'layout(std140)')
     source = source.replace('gl_InstanceIndex', 'gl_InstanceID')
-    for material in range(6):
+    for material in range(9):
         for normals in (False, True):
             text = source.replace('const uint materialShader = 0u;', f'const uint materialShader = {material}u;')
             text = text.replace('const bool writeNormals = true;', f'const bool writeNormals = {str(normals).lower()};')
@@ -196,4 +214,20 @@ for stage in ('vert', 'frag'):
                 raise SystemExit(r.stdout + r.stderr)
             count += 1
 print(count, 'native Vulkan shader bodies pass static GLSL validation, including both normals policies.')
+for material in range(9):
+    for normals in (0, 1):
+        # No -V/-G: check the translated stage interface without generating code.
+        pair = [str(work / f'vulkan-m{material}-n{normals}.{stage}') for stage in ('vert', 'frag')]
+        r = subprocess.run(['glslangValidator', '-l', *pair], capture_output=True, text=True)
+        if r.returncode:
+            raise SystemExit(r.stdout + r.stderr)
+for normals in (0, 1):
+    shader = work / f'vulkan-m6-n{normals}.vert'
+    fallback = work / f'vulkan-shadow-clamp-fallback-n{normals}.vert'
+    fallback.write_text(shader.read_text().replace('const bool hardwareDepthClamp = true;',
+                                                'const bool hardwareDepthClamp = false;'))
+    r = subprocess.run(['glslangValidator', '-S', 'vert', str(fallback)], capture_output=True, text=True)
+    if r.returncode:
+        raise SystemExit(r.stdout + r.stderr)
+print('18 native stage interfaces and both shadow depth-clamp fallbacks pass static checks.')
 print('Static-check artifacts:', work)

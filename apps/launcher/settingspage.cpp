@@ -1,5 +1,6 @@
 #include "settingspage.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <string>
@@ -271,6 +272,38 @@ void Launcher::SettingsPage::setupEnhancedTab()
     scrollArea->setWidget(enhancedContent);
     outerLayout->addWidget(scrollArea);
 
+    mShadowMaps = new QGroupBox(tr("OpenMW shadow maps"), enhancedContent);
+    mShadowMaps->setCheckable(true);
+    auto* shadowLayout = new QGridLayout(mShadowMaps);
+    const auto tooltip = tr(
+        "Use OpenMW's cascaded shadow maps. Caster selection, distance and quality settings apply to both renderers.");
+    mShadowMaps->setToolTip(tooltip);
+    mShadowActors = addCheckBox(*shadowLayout, mShadowMaps, tr("Actors"), tooltip, 0, 0);
+    mShadowPlayer = addCheckBox(*shadowLayout, mShadowMaps, tr("Player"), tooltip, 0, 1);
+    mShadowObjects = addCheckBox(*shadowLayout, mShadowMaps, tr("Objects"), tooltip, 1, 0);
+    mShadowTerrain = addCheckBox(*shadowLayout, mShadowMaps, tr("Terrain"), tooltip, 1, 1);
+    mShadowIndoors = addCheckBox(*shadowLayout, mShadowMaps, tr("Indoor shadows"), tooltip, 2, 0);
+    mShadowSoft = addCheckBox(*shadowLayout, mShadowMaps, tr("Soft shadows"), tooltip, 2, 1);
+    mShadowResolution = addSpinBoxRow(*shadowLayout, mShadowMaps, tr("Map resolution"), tooltip, 3, 1, 16384);
+    mShadowCascades = addSpinBoxRow(*shadowLayout, mShadowMaps, tr("Shadow cascades"), tooltip, 4, 1, 8);
+    auto* distanceLabel = new QLabel(tr("Shadow distance"), mShadowMaps);
+    mShadowDistance = new QDoubleSpinBox(mShadowMaps);
+    mShadowDistance->setRange(0, 10000000);
+    mShadowDistance->setDecimals(0);
+    mShadowDistance->setSingleStep(1024);
+    mShadowDistance->setSpecialValueText(tr("Unlimited"));
+    shadowLayout->addWidget(distanceLabel, 5, 0);
+    shadowLayout->addWidget(mShadowDistance, 5, 1);
+    connect(mShadowMaps, &QGroupBox::toggled, this, [this](bool enabled) {
+        if (enabled && !mShadowActors->isChecked() && !mShadowObjects->isChecked() && !mShadowTerrain->isChecked()
+            && !mShadowPlayer->isChecked())
+        {
+            mShadowActors->setChecked(true);
+            mShadowObjects->setChecked(true);
+        }
+    });
+    pageLayout->addWidget(mShadowMaps);
+
     auto* occlusionGroup = new QGroupBox(tr("Occlusion"), enhancedContent);
     auto* occlusionLayout = new QGridLayout(occlusionGroup);
     mEnhancedOcclusionCulling = addCheckBox(*occlusionLayout, occlusionGroup, tr("Enable"),
@@ -358,6 +391,20 @@ void Launcher::SettingsPage::setupEnhancedTab()
 
 void Launcher::SettingsPage::loadEnhancedSettings()
 {
+    const auto& shadows = Settings::shadows();
+    mShadowMaps->setChecked(shadows.mEnableShadows);
+    loadSettingBool(shadows.mActorShadows, *mShadowActors);
+    loadSettingBool(shadows.mPlayerShadows, *mShadowPlayer);
+    loadSettingBool(shadows.mObjectShadows, *mShadowObjects);
+    loadSettingBool(shadows.mTerrainShadows, *mShadowTerrain);
+    loadSettingBool(shadows.mEnableIndoorShadows, *mShadowIndoors);
+    loadSettingBool(shadows.mSoftShadows, *mShadowSoft);
+    mShadowResolution->setMaximum(std::max(16384, shadows.mShadowMapResolution.get()));
+    mShadowResolution->setValue(shadows.mShadowMapResolution);
+    mShadowCascades->setValue(shadows.mNumberOfShadowMaps);
+    mShadowDistance->setMaximum(std::max(10000000.0, double(shadows.mMaximumShadowMapDistance.get())));
+    mShadowDistance->setValue(shadows.mMaximumShadowMapDistance);
+
     SceneUtil::Enhanced::loadSettings(mCfgMgr);
 
     mEnhancedOcclusionCulling->setCheckState(
@@ -408,6 +455,18 @@ void Launcher::SettingsPage::loadEnhancedSettings()
 
 void Launcher::SettingsPage::saveEnhancedSettings() const
 {
+    auto& shadows = Settings::shadows();
+    shadows.mEnableShadows.set(mShadowMaps->isChecked());
+    saveSettingBool(*mShadowActors, shadows.mActorShadows);
+    saveSettingBool(*mShadowPlayer, shadows.mPlayerShadows);
+    saveSettingBool(*mShadowObjects, shadows.mObjectShadows);
+    saveSettingBool(*mShadowTerrain, shadows.mTerrainShadows);
+    saveSettingBool(*mShadowIndoors, shadows.mEnableIndoorShadows);
+    saveSettingBool(*mShadowSoft, shadows.mSoftShadows);
+    shadows.mShadowMapResolution.set(mShadowResolution->value());
+    shadows.mNumberOfShadowMaps.set(mShadowCascades->value());
+    shadows.mMaximumShadowMapDistance.set(static_cast<float>(mShadowDistance->value()));
+
     const auto settingsPath = mCfgMgr.getUserConfigPath() / "openmw-enhanced.cfg";
     QDir().mkpath(QFileInfo(Files::pathToQString(settingsPath)).absolutePath());
 

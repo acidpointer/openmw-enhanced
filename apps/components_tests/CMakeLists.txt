@@ -118,6 +118,7 @@ file(GLOB UNITTEST_SRC_FILES
     sceneutil/paginganalysis.cpp
     sceneutil/occlusiontraversal.cpp
     sceneutil/screencoverage.cpp
+    sceneutil/riggeometry.cpp
 
     sdlutil/startupsignals.cpp
 

@@ -28,7 +28,7 @@ namespace SceneUtil
     void ShadowManager::setupShadowSettings(
         const Settings::ShadowsCategory& settings, Shader::ShaderManager& shaderManager)
     {
-        mEnableShadows = settings.mEnableShadows && !mNativeRendering;
+        mEnableShadows = settings.mEnableShadows;
 
         if (mEnableShadows)
             mShadowTechnique->enableShadows();
@@ -85,7 +85,9 @@ namespace SceneUtil
 
         mShadowSettings->setMultipleShadowMapHint(osgShadow::ShadowSettings::CASCADED);
 
-        if (mEnableShadows && settings.mEnableDebugHud)
+        // OSG's debug HUD substitutes color textures for depth shadow maps;
+        // the native receiver must keep sampling real depth attachments.
+        if (mEnableShadows && settings.mEnableDebugHud && !mNativeRendering)
             mShadowTechnique->enableDebugHUD();
         else
             mShadowTechnique->disableDebugHUD();
@@ -168,6 +170,8 @@ namespace SceneUtil
 
     Shader::ShaderManager::DefineMap ShadowManager::getShadowDefines(const Settings::ShadowsCategory& settings) const
     {
+        // The native bridge consumes the technique's cameras and uniforms;
+        // it does not execute the generated OpenGL receiving shaders.
         if (!settings.mEnableShadows || mNativeRendering)
             return getShadowsDisabledDefines();
 

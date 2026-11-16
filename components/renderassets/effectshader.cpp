@@ -77,13 +77,14 @@ namespace RenderAssets
 
     std::string translateEffectShader(std::string_view source, bool fragment, std::span<const std::string> samplers)
     {
-        const std::map<std::string, std::string> macros{ { "OMW_REVERSE_Z", "0" }, { "OMW_USE_BINDINGS", "1" },
-            { "OMW_MULTIVIEW", "0" }, { "omw_In", "in" }, { "omw_Out", "out" }, { "omw_Vertex", "_omw_Vertex" },
-            { "omw_FragColor", "_omw_FragColor" }, { "omw_Texture1D", "texture" }, { "omw_Texture2D", "texture" },
-            { "omw_Texture2DArray", "texture" }, { "omw_Texture3D", "texture" } };
+        const std::map<std::string, std::string> macros{ { "OMW_REVERSE_Z", "1" }, { "OMW_NATIVE_DEPTH", "1" },
+            { "OMW_USE_BINDINGS", "1" }, { "OMW_MULTIVIEW", "0" }, { "omw_In", "in" }, { "omw_Out", "out" },
+            { "omw_Vertex", "_omw_Vertex" }, { "omw_FragColor", "_omw_FragColor" }, { "omw_Texture1D", "texture" },
+            { "omw_Texture2D", "texture" }, { "omw_Texture2DArray", "texture" }, { "omw_Texture3D", "texture" } };
         std::istringstream input{ std::string(source) };
         std::string result = "#version 450 core\n";
         // Preserve legacy GLSL spellings used by existing effect bodies.
+        result += "#define OMW_NATIVE_DEPTH 1\n";
         result += "#define texture2D texture\n#define texture3D texture\n#define texture2DLod textureLod\n";
         result += fragment ? "#define varying in\n" : "#define varying out\n#define attribute in\n";
         bool version = false;

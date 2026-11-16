@@ -53,6 +53,48 @@ buffers without reuploading unchanged indices. Live inherited bindings are
 borrowed from the cull graph, and material parameters are decoded once per
 state graph per prepared frame. UV animation stays in instance data.
 
+Scene preparation folds bounded native uniforms, attributes, modes and texture
+unit counts once per state node, retaining live OSG values and override/protected
+semantics. Resident static mesh imports skip the asset-only normal sidecar and
+bounds pass. A per-mesh channel reader accesses known contiguous float/byte
+arrays directly, caches shared overall/per-set colors and normalized normals,
+and reuses diffuse coordinates for an identical mask channel. Common index
+widths and draw ranges avoid per-index virtual calls; uncommon arrays and
+primitives keep the general reader. These changes target synchronous first-use
+conversion and recurring state work without changing visibility or draw order.
+CPU imports and Vulkan resource creation still run on the rendering thread;
+reduced Balmora frame-time spikes have not yet been measured.
+
+Texture sampler variants now share one immutable GPU image generation instead
+of allocating, converting and uploading the same OSG image for every wrapping
+or filtering combination. A full mip chain also serves base-level-only sampler
+views. Source revisions invalidate the image registry, while already recorded
+views retain the old allocation through their GPU frame. Pending uploads remain
+valid when a source handle is released while sampler views survive. The private
+backend ABI is 14; engine and renderer module must be rebuilt together.
+
+Mesh and image residency budgets include the union of assets seen over the last
+256 prepared frames, with the existing device ceiling and warm-cache allowance.
+Intrusive bucket links update once per touched resource without per-frame node
+allocations; only the expiring bucket is visited at frame start. This avoids
+budgeting for just one camera direction and repeatedly evicting the neighboring
+views of a modded city. Sampler views share the image's residency charge, and
+weak image-registry entries, obsolete image generations and old sampler bindings
+are swept incrementally.
+Cache accounting has compiler-evaluated regression cases. GPU behavior and
+the resulting frame-time changes still require playtesting.
+
+Actor skinning now retains bone-matrix scratch storage, considers only bones
+that influence the part, and reuses a pose only when its actual bone matrices,
+skin transform, and source arrays are unchanged.
+Animated part bounds reject offscreen parts before skinning. Resident geometry
+updates select reusable buffer versions leased until the last reading GPU frame
+fence completes; partial updates preserve untouched tails with device copies.
+Uploads no longer require a global wait on previous vertex/index reads. Version
+storage and frame resource vectors retain capacity after warmup. These changes
+have source-level regression coverage; crowd FPS and GPU behavior still require
+playtesting, and CPU skinning remains part of the renderer.
+
 MyGUI emits its existing clipped and ordered CPU batches to the native renderer.
 The viewer's rendering entry point is preserved, so loading screens, videos and
 modal loops use the same Vulkan path. Font/video row order is preserved and
@@ -99,7 +141,9 @@ retry so its binary semaphore is never reused while signalled. Culling/import
 is skipped while the next GPU frame is busy. Loaded mesh/image assets remain
 cached within device-scaled residency budgets; dead sources and cold assets
 under memory pressure retire incrementally. Temporary UI/state caches retain
-their short interval. Empty allocation blocks are trimmed after completed frames. Legacy GL shadow and clustered passes remain disabled. Native color-target
+their short interval. Empty allocation blocks are trimmed after completed frames.
+GL receiving shaders and clustered passes remain disabled in the native bridge;
+OpenMW's shadow cameras now submit native caster passes. Native color-target
 reflection cameras participate in frame preparation and submit Vulkan passes.
 The Vulkan front-face choice follows its signed polygon-area rule for each
 viewport orientation. The subsequent playtest exposed a separate depth-ordering
@@ -589,7 +633,8 @@ and does not observe framebuffer coordinates, front-facing state or signed Y
 derivatives. Such effects render directly into the window. Other effects retain
 their offscreen resolve so changing viewport orientation cannot change their
 behavior. Final scratch allocation and initialization are skipped on the direct
-path. ABI 12 covers the effect-stage metadata and water projection contract.
+path. ABI 13 includes native shadow receivers, retained projection coefficients,
+and per-pass depth direction in addition to the effect-stage metadata.
 
 Ordinary target writes now synchronize with fragment consumers rather than also
 stalling vertices. Reflected vertex texture reads use a conservative dependency at
@@ -599,10 +644,12 @@ dependencies are separated so unrelated color stores do not stall early depth
 tests. An outgoing producer-subpass dependency also replaces the separate color
 and normals barrier commands after every offscreen pass. This follows the Khronos
 [pipeline-barrier guidance](https://docs.vulkan.org/samples/latest/samples/performance/pipeline_barriers/README.html).
-The encoded-normal attachment prefers RGB10A2 instead of RGBA16F, halving its
-storage/bandwidth with ten-bit normal components; feature checks retain RGBA16F
-when sampling, filtering or blending is unsupported. Effect resolutions, sample
-counts, ordering and enabled settings are preserved.
+The normal attachment uses RGBA16F, with a checked RGBA32F fallback. The former
+RGB10A2 optimization could clamp additive terrain intermediates and has been
+removed. Devices lacking a blendable/filterable floating normal format skip
+effects requiring that input with a diagnostic instead of corrupting their
+normals. Effect resolutions, sample counts, ordering and saved settings are
+preserved.
 The custom screen-space shadow effect and its launcher controls have been
 removed. Its shader asset is no longer installed, and old saved-chain entries
 are migrated out while preserving the user's other effects.
@@ -610,10 +657,13 @@ are migrated out while preserving the user's other effects.
 Native water previously blended only its Fresnel reflection, leaving transmission
 unchanged at every depth. It now snapshots depth on the GPU once before the first
 water draw in a view and reconstructs optical thickness along the viewing ray.
-Continuous Beer-Lambert absorption uses a 1250-unit attenuation distance instead
-of leaving the first 2500 units completely unattenuated. Ambient-lit body color
-increases with depth; shallow shores remain clear and reflection distortion fades
-near the shore. Straight-alpha
+Continuous Beer-Lambert absorption is calibrated to `Water_World_Alpha` at a
+128-unit optical depth (roughly an actor's height). Its default `.75` produces
+25% transmission at that depth and 6.25% at twice that depth, before reflection.
+The former 1250-unit attenuation distance left the same column about 90% clear.
+The opacity-to-extinction logarithm runs in the vertex stage, keeping the
+fragment cost unchanged. Ambient-lit body color increases with depth; shallow
+shores remain clear and reflection distortion fades near the shore. Straight-alpha
 composition combines absorption and reflection with the existing scene color,
 avoiding a color snapshot or another scene traversal. Water resumes with LOAD for
 both depth and color; weapon-depth preservation retains its separate clear-depth
@@ -638,6 +688,38 @@ are preserved. Unlit vertex paths omit unused view/normal work when normal
 output is disabled. Static frontend and shader syntax checks cover these
 changes; source regression fixtures cover index boundaries, padding and arena
 stride alignment. FOV-specific frame-time improvements require user playtesting.
+
+Scene and reflection passes now retain reverse-Z through matrix composition,
+depth clears, ordered comparisons, sky/water limits, distortion and OMWFX input
+reconstruction. Authored reverse matrices bypass the forward-depth conversion
+entirely. Shadow caster passes keep their original forward-depth convention.
+First-person depth merging uses retained projection coefficients rather than
+recovering a projection from rounded model/view products. This addresses a
+depth-precision problem that can amplify distant SSAO reconstruction artifacts;
+the source change does not establish visual parity for every AO implementation.
+Native UV-based linear-depth and position helpers read raw reverse depth
+directly, avoiding a lossy `1 - depth` round trip in the compatibility API.
+The public normalized-depth helpers keep their established return convention.
+The bundled linear bloom shader no longer names variables `sample`, a reserved
+word in native GLSL. Explicit `(add, one, zero)` effect passes are accepted as
+replacement, including temporal AO passes; other attachment blend equations,
+compute passes and mipmapped targets still require implementation.
+
+The launcher Enhanced tab exposes the original `[Shadows]` settings: enable,
+actor/player/object/terrain casters, indoor shadows, soft filtering, resolution,
+cascade count and distance. They persist in normal `settings.cfg`, independently
+of the removed screen-space effect. OpenGL keeps its existing implementation.
+Vulkan now consumes OpenMW's existing cascade cameras, source caster masks,
+view-to-shadow/valid-region matrices, fade distances, normal offset and raster
+bias. It samples native depth attachments with PCF, including an optional spiral
+filter. First-four-cascade coordinates are computed per vertex, and receivers
+wholly beyond shadow distance use an unshadowed shader variant. Frame descriptor
+and CPU shadow-state caches reuse storage. The OSG shadow debug HUD remains an
+OpenGL-only feature because it substitutes color images for depth maps. Native
+shadowing has not yet received a GPU playtest; exact soft-filter parity and
+debug overlays remain unfinished. Static checks include the installed clouds,
+XE SSAO and Zesterer SSAO sources, shader-stage interfaces, and source regression
+fixtures for replacement blending and reverse-depth precision.
 
 ## Backend architecture
 

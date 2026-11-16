@@ -4,7 +4,10 @@
 #include <osg/Geometry>
 #include <osg/Matrixf>
 
+#include <array>
+#include <cstddef>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 namespace SceneUtil
@@ -99,6 +102,7 @@ namespace SceneUtil
         {
             std::vector<BoneInfo> mBones;
             std::vector<std::pair<BoneWeights, VertexList>> mInfluences;
+            std::vector<std::size_t> mUsedBones;
             osg::Matrixf mTransform;
             std::string mRootBone;
         };
@@ -106,6 +110,12 @@ namespace SceneUtil
         std::vector<Bone*> mNodes;
 
         unsigned int mLastFrameNumber{ 0 };
+        std::optional<unsigned int> mLastCullFrame;
+        bool mPoseInitialized{ false };
+        std::vector<osg::Matrixf> mBoneMatrices;
+        osg::Matrixf mPoseTransform;
+        std::array<osg::ref_ptr<const osg::Array>, 3> mPoseSources;
+        std::array<unsigned int, 3> mPoseSourceRevisions{};
         bool mBoundsFirstFrame{ true };
 
         bool initFromParentSkeleton(osg::NodeVisitor* nv);

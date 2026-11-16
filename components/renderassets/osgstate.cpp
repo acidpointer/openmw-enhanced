@@ -2,6 +2,8 @@
 
 #include <components/sceneutil/texturetype.hpp>
 
+#include <osg/BlendEquation>
+#include <osg/BlendFunc>
 #include <osg/StateSet>
 #include <osg/TexMat>
 #include <osg/Texture2D>
@@ -23,10 +25,13 @@ namespace RenderAssets
             "PointLightCount", "actorFade", "alpha", "alphaRef", "atmosphereFade", "blendMap", "diffuseColor",
             "diffuseMap", "distortionStrength", "fog.color", "fog.end", "fog.start", "maskMap", "material.ambient",
             "material.diffuse", "material.emission", "material.emissiveMult", "material.shininess",
-            "material.specStrength", "material.specular", "material.vertexColorMode", "moonBlend", "nodePosition",
-            "normalMap", "opacity", "pass", "projectionMatrix", "reflectionMap", "sun.ambient", "sun.diffuse",
-            "sun.position", "sun.specular", "texMat0", "texMat1", "texMat2", "texMat3", "texMat4", "texMat5", "texMat6",
-            "texMat7", "waterSurface", "worldMatrix" };
+            "material.specStrength", "material.specular", "material.vertexColorMode", "maximumShadowMapDistance",
+            "moonBlend", "nodePosition", "normalMap", "opacity", "pass", "projectionMatrix", "reflectionMap",
+            "shadowSpaceMatrix0", "sun.ambient", "sun.diffuse", "sun.position", "sun.specular", "texMat0", "texMat1",
+            "texMat2", "texMat3", "texMat4", "texMat5", "texMat6", "texMat7", "waterSurface", "worldMatrix" };
+
+        constexpr std::array<osg::StateAttribute::GLMode, 5> nativeModes{ GL_BLEND, GL_DEPTH_TEST, GL_ALPHA_TEST,
+            GL_CULL_FACE, GL_CLIP_PLANE0 };
 
         template <class Binding, class Flags>
         const Binding* selectBinding(const Binding* inherited, const Binding* local, const Flags& flags)
@@ -161,6 +166,55 @@ namespace RenderAssets
         mUniformSeen = all;
     }
 
+    void OsgStateView::prepareNativeState() const
+    {
+        if (mNativeStatePrepared)
+            return;
+        if (mParent)
+        {
+            mParent->prepareNativeState();
+            mAttributeCache = mParent->mAttributeCache;
+            mModeCache = mParent->mModeCache;
+            mTextureUnits = mParent->mTextureUnits;
+        }
+        else
+        {
+            mAttributeCache.fill(nullptr);
+            mModeCache.fill(nullptr);
+            mTextureUnits = 0;
+        }
+        prepareNativeUniforms();
+        if (mLocal)
+        {
+            const auto attributes = [&](int unit, const osg::StateSet::AttributeList& list) {
+                for (const auto& [key, binding] : list)
+                {
+                    const int slot = attributeSlot(unit, key.first, key.second);
+                    if (slot >= 0)
+                        mAttributeCache[slot] = selectBinding(
+                            mAttributeCache[slot], &binding, [](const auto& value) { return value.second; });
+                }
+            };
+            attributes(-1, mLocal->getAttributeList());
+            const auto& textures = mLocal->getTextureAttributeList();
+            mTextureUnits = std::max(mTextureUnits, static_cast<unsigned>(textures.size()));
+            for (unsigned unit = 0; unit < std::min<std::size_t>(textures.size(), 8); ++unit)
+                attributes(unit, textures[unit]);
+            for (const auto& [mode, binding] : mLocal->getModeList())
+            {
+                const auto found = std::find(nativeModes.begin(), nativeModes.end(), mode);
+                if (found != nativeModes.end())
+                {
+                    auto& cached = mModeCache[found - nativeModes.begin()];
+                    cached = selectBinding(cached, &binding, [](auto value) { return value; });
+                }
+            }
+        }
+        mAttributeSeen = std::numeric_limits<std::uint32_t>::max();
+        mModeSeen = (1u << nativeModes.size()) - 1;
+        mNativeStatePrepared = true;
+    }
+
     const osg::StateSet::RefUniformPair* OsgStateView::uniformBinding(unsigned slot) const
     {
         const auto bit = std::uint64_t{ 1 } << slot;
@@ -226,11 +280,9 @@ namespace RenderAssets
 
     const osg::StateAttribute::GLModeValue* OsgStateView::modeBinding(osg::StateAttribute::GLMode mode) const
     {
-        constexpr std::array<osg::StateAttribute::GLMode, 5> modes{ GL_BLEND, GL_DEPTH_TEST, GL_ALPHA_TEST,
-            GL_CULL_FACE, GL_CLIP_PLANE0 };
-        const auto foundMode = std::find(modes.begin(), modes.end(), mode);
-        const auto slot = foundMode - modes.begin();
-        const unsigned bit = foundMode == modes.end() ? 0u : 1u << slot;
+        const auto foundMode = std::find(nativeModes.begin(), nativeModes.end(), mode);
+        const auto slot = foundMode - nativeModes.begin();
+        const unsigned bit = foundMode == nativeModes.end() ? 0u : 1u << slot;
         if (mModeSeen & bit)
             return mModeCache[slot];
         const osg::StateAttribute::GLModeValue* local = nullptr;
@@ -259,6 +311,8 @@ namespace RenderAssets
     }
     unsigned OsgStateView::textureUnits() const
     {
+        if (mNativeStatePrepared)
+            return mTextureUnits;
         return std::max(mParent ? mParent->textureUnits() : 0u,
             mLocal ? static_cast<unsigned>(mLocal->getTextureAttributeList().size()) : 0u);
     }
@@ -268,6 +322,19 @@ namespace RenderAssets
         if (mLocal)
             result.merge(*mLocal);
         return result;
+    }
+
+    bool effectReplacesDestination(const OsgStateView& state)
+    {
+        if (!(state.getMode(GL_BLEND) & osg::StateAttribute::ON))
+            return true;
+        const auto* blend = dynamic_cast<const osg::BlendFunc*>(state.getAttribute(osg::StateAttribute::BLENDFUNC));
+        const auto* equation
+            = dynamic_cast<const osg::BlendEquation*>(state.getAttribute(osg::StateAttribute::BLENDEQUATION));
+        return blend && blend->getSourceRGB() == GL_ONE && blend->getDestinationRGB() == GL_ZERO
+            && blend->getSourceAlpha() == GL_ONE && blend->getDestinationAlpha() == GL_ZERO
+            && (!equation
+                || (equation->getEquationRGB() == GL_FUNC_ADD && equation->getEquationAlpha() == GL_FUNC_ADD));
     }
 
     std::array<float, 4> depthCoefficients(const osg::Matrixd& p, bool zeroToOne)
@@ -404,11 +471,16 @@ namespace RenderAssets
     }
 
     template <class State>
-    osg::Matrixd clipProjectionImpl(const State& state, const osg::Matrixd& cullProjection, bool reversedShaderDepth)
+    osg::Matrixd clipProjectionImpl(
+        const State& state, const osg::Matrixd& cullProjection, bool reversedShaderDepth, bool reversedNativeDepth)
     {
         osg::Matrixf shaderProjection;
         const auto* uniform = nativeUniform(state, NativeUniform::ProjectionMatrix);
         const bool authored = uniform && uniform->get(shaderProjection);
+        // Authored reverse-Z matrices already use zero-to-one depth. Do not
+        // subtract them from one and back: that loses their small coefficients.
+        if (authored && reversedShaderDepth && reversedNativeDepth)
+            return osg::Matrixd(shaderProjection);
         osg::Matrixd depth;
         if (authored && reversedShaderDepth)
         {
@@ -417,7 +489,7 @@ namespace RenderAssets
         }
         else
         {
-            depth(2, 2) = .5;
+            depth(2, 2) = reversedNativeDepth ? -.5 : .5;
             depth(3, 2) = .5;
         }
         return (authored ? osg::Matrixd(shaderProjection) : cullProjection) * depth;
@@ -434,9 +506,10 @@ namespace RenderAssets
     {
         return textureTransformImpl(state, unit);
     }
-    osg::Matrixd clipProjection(const OsgStateView& state, const osg::Matrixd& projection, bool reversed)
+    osg::Matrixd clipProjection(
+        const OsgStateView& state, const osg::Matrixd& projection, bool reversed, bool reversedNative)
     {
-        return clipProjectionImpl(state, projection, reversed);
+        return clipProjectionImpl(state, projection, reversed, reversedNative);
     }
     std::optional<unsigned> textureUnit(const OsgState& state, std::string_view name)
     {
@@ -450,13 +523,15 @@ namespace RenderAssets
     {
         return textureTransformImpl(state, unit);
     }
-    osg::Matrixd clipProjection(const osg::StateSet& state, const osg::Matrixd& projection, bool reversed)
+    osg::Matrixd clipProjection(
+        const osg::StateSet& state, const osg::Matrixd& projection, bool reversed, bool reversedNative)
     {
-        return clipProjectionImpl(state, projection, reversed);
+        return clipProjectionImpl(state, projection, reversed, reversedNative);
     }
-    osg::Matrixd clipProjection(const OsgState& state, const osg::Matrixd& projection, bool reversed)
+    osg::Matrixd clipProjection(
+        const OsgState& state, const osg::Matrixd& projection, bool reversed, bool reversedNative)
     {
-        return clipProjectionImpl(state, projection, reversed);
+        return clipProjectionImpl(state, projection, reversed, reversedNative);
     }
 
 }

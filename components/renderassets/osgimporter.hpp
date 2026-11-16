@@ -21,10 +21,14 @@ namespace osg
 
 namespace RenderAssets
 {
-    struct MeshStream
+    struct MeshBuffers
     {
         std::vector<Render::Vertex> mVertices;
         std::vector<std::uint32_t> mIndices;
+    };
+
+    struct MeshStream : MeshBuffers
+    {
         // Packed primitive-set/source-vertex pairs preserve split channels.
         std::vector<std::uint64_t> mVertexSources;
         std::size_t mSourceVertexCount = 0;
@@ -59,6 +63,9 @@ namespace RenderAssets
         // GL programs are deliberately not part of this bridge.
         std::shared_ptr<const Render::MeshAsset> importMesh(
             const osg::Geometry& geometry, unsigned uvUnit = 0, const osg::Matrixf& uvTransform = {});
+        // Resident draws already have OSG bounds and packed normals. Import
+        // only GPU buffers, without constructing asset-only sidecars or bounds.
+        MeshBuffers importMeshBuffers(const osg::Geometry& geometry, unsigned uvUnit = 0);
         // Animated streams retain the source mapping and triangle topology.
         // Reimport after changing indices, primitive modes or channel bindings.
         MeshStream importMeshStream(const osg::Geometry& geometry, unsigned uvUnit = 0);

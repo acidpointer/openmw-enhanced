@@ -6,6 +6,7 @@
 #include "statsoverlay.hpp"
 
 #include <components/debug/debuglog.hpp>
+#include <components/fallback/fallback.hpp>
 #include <components/myguiplatform/myguirendermanager.hpp>
 #include <components/nifosg/particle.hpp>
 #include <components/render/cachesweep.hpp>
@@ -17,6 +18,7 @@
 #include <components/render/reserve.hpp>
 #include <components/render/residency.hpp>
 #include <components/render/texture.hpp>
+#include <components/renderassets/imagevariants.hpp>
 #include <components/renderassets/meshkey.hpp>
 #include <components/renderassets/osgimporter.hpp>
 #include <components/renderassets/osgstate.hpp>
@@ -206,6 +208,8 @@ namespace MWRender
         {
             Render::Backend& mBackend;
             Render::Residency::Charge mResidency;
+            // Alias bindings retain the one charged, immutable image upload.
+            std::shared_ptr<GpuTexture> mStorage;
             Render::TextureHandle mHandle;
             osg::observer_ptr<const osg::Image> mImage;
             unsigned mRevision = 0;
@@ -303,6 +307,7 @@ namespace MWRender
             mStates.reserve(8192);
             mMeshes.reserve(4096);
             mTextureBindings.reserve(2048);
+            mImageVariants.reserve(2048);
             mLightSets.reserve(1024);
             mGuiMeshes.reserve(128);
             const auto& device = backend().deviceInfo();
@@ -373,12 +378,17 @@ namespace MWRender
             backend().releaseTexture(mTransparent);
         }
 
+        bool mShadowCasting = false;
+        std::vector<std::pair<const osg::Uniform*, std::shared_ptr<Render::ShadowSet>>> mShadowSets;
+        std::size_t mShadowSetsUsed = 0;
+
         Render::Backend& backend() { return mModule->backend(); }
 
         struct TargetRecord
         {
             osg::observer_ptr<const osg::Texture2D> mSource;
             std::unique_ptr<GpuTexture> mTexture;
+            std::unique_ptr<GpuTexture> mShadowDepth;
             unsigned mWidth = 0;
             unsigned mHeight = 0;
             Render::TargetFormat mFormat = Render::TargetFormat::RGBA8;
@@ -401,7 +411,12 @@ namespace MWRender
                 = source.getTextureHeight() > 0 ? static_cast<unsigned>(source.getTextureHeight()) : fallbackHeight;
             if (!width || !height)
                 return mTransparent;
-            const auto format = source.getInternalFormat() == GL_RGBA16F || source.getInternalFormat() == GL_RGB16F
+            const auto format = source.getInternalFormat() == GL_DEPTH_COMPONENT
+                    || source.getInternalFormat() == GL_DEPTH_COMPONENT16
+                    || source.getInternalFormat() == GL_DEPTH_COMPONENT24
+                    || source.getInternalFormat() == GL_DEPTH_COMPONENT32F
+                ? Render::TargetFormat::ShadowMap
+                : source.getInternalFormat() == GL_RGBA16F || source.getInternalFormat() == GL_RGB16F
                 ? Render::TargetFormat::RGBA16F
                 : Render::TargetFormat::RGBA8;
             auto& record = mTargets[&source];
@@ -410,9 +425,15 @@ namespace MWRender
             {
                 PrepareTimer timer{ mPrepare.mTargets };
                 auto replacement = std::make_unique<GpuTexture>(backend());
-                replacement->mHandle = backend().createRenderTarget(
-                    width, height, RenderAssets::OsgImporter::importSampler(source), format);
+                auto sampling = RenderAssets::OsgImporter::importSampler(source);
+                if (format == Render::TargetFormat::ShadowMap)
+                {
+                    sampling.mMinFilter = sampling.mMagFilter = Render::TextureFilter::Nearest;
+                    sampling.mWrapS = sampling.mWrapT = Render::TextureWrap::Clamp;
+                }
+                replacement->mHandle = backend().createRenderTarget(width, height, sampling, format);
                 record.mSource = &source;
+                record.mShadowDepth.reset();
                 record.mTexture = std::move(replacement);
                 record.mWidth = width;
                 record.mHeight = height;
@@ -455,57 +476,71 @@ namespace MWRender
             const auto sampling = RenderAssets::OsgImporter::importSampler(*source);
             const auto key = std::tuple{ reinterpret_cast<std::uintptr_t>(sourceImage), sampling };
             auto& slot = mTextures[key];
-            if (!slot || slot->mImage.get() != sourceImage)
+            if (!slot || slot->mImage.get() != sourceImage || !slot->mHandle
+                || slot->mRevision != sourceImage->getModifiedCount())
             {
-                slot = std::make_unique<GpuTexture>(backend(), &mTextureResidency);
-                slot->mImage = sourceImage;
+                PrepareTimer timer{ mPrepare.mTextures };
+                if (auto existingStorage = mImageVariants.find(*sourceImage, sampling.mUseMipmaps))
+                {
+                    auto view = std::make_shared<GpuTexture>(backend());
+                    view->mImage = sourceImage;
+                    view->mRevision = sourceImage->getModifiedCount();
+                    view->mStorage = std::move(existingStorage);
+                    view->mHandle = backend().createTextureSamplerView(view->mStorage->mHandle, sampling);
+                    slot = std::move(view);
+                }
+                else
+                {
+                    auto data = RenderAssets::OsgImporter::borrowTexture(*sourceImage, mLevels, sampling.mUseMipmaps);
+                    std::shared_ptr<const Render::ImageAsset> converted;
+                    if (!data || !backend().supportsTextureFormat(data->mFormat, data->mSrgb))
+                    {
+                        converted = mImporter.importImage(*sourceImage, true);
+                        if (!backend().supportsTextureFormat(converted->mFormat, converted->mSrgb))
+                            converted = converted->mDecode ? converted->mDecode() : converted->mUncompressed;
+                        if (!converted)
+                            throw std::runtime_error("Live texture has no supported device format");
+                        mLevels.clear();
+                        for (const auto& level : converted->mLevels)
+                        {
+                            mLevels.push_back({ level.mWidth, level.mHeight, level.mBytes });
+                            if (!sampling.mUseMipmaps)
+                                break;
+                        }
+                        data = Render::TextureData{ converted->mFormat, converted->mSrgb,
+                            converted->mGenerateMipmaps && sampling.mUseMipmaps, mLevels };
+                    }
+                    // Keep uploaded image generations immutable. Animated images
+                    // replace their storage; already recorded views retain the old
+                    // generation until their GPU frames finish.
+                    auto storage = std::make_shared<GpuTexture>(backend(), &mTextureResidency);
+                    storage->mImage = sourceImage;
+                    storage->mRevision = sourceImage->getModifiedCount();
+                    storage->mHandle = backend().createTexture(*data, sampling);
+                    std::uint64_t bytes = 0;
+                    for (const auto& level : mLevels)
+                        bytes += level.mBytes.size();
+                    if (data->mGenerateMipmaps && mLevels.size() == 1)
+                    {
+                        auto width = mLevels.front().mWidth, height = mLevels.front().mHeight;
+                        while (width > 1 || height > 1)
+                        {
+                            width = std::max(1u, width / 2);
+                            height = std::max(1u, height / 2);
+                            bytes += Render::textureLevelSize(data->mFormat, width, height);
+                        }
+                    }
+                    storage->mResidency.set(bytes);
+                    mImageVariants.store(*sourceImage, sampling.mUseMipmaps, storage);
+                    slot = std::move(storage);
+                    ++mImageChanges;
+                }
             }
             auto& cached = *slot;
             cached.mSeen = mSerial;
-            if (!cached.mHandle || cached.mRevision != sourceImage->getModifiedCount())
-            {
-                PrepareTimer timer{ mPrepare.mTextures };
-                auto data = RenderAssets::OsgImporter::borrowTexture(*sourceImage, mLevels, sampling.mUseMipmaps);
-                std::shared_ptr<const Render::ImageAsset> converted;
-                if (!data || !backend().supportsTextureFormat(data->mFormat, data->mSrgb))
-                {
-                    converted = mImporter.importImage(*sourceImage, true);
-                    if (!backend().supportsTextureFormat(converted->mFormat, converted->mSrgb))
-                        converted = converted->mDecode ? converted->mDecode() : converted->mUncompressed;
-                    if (!converted)
-                        throw std::runtime_error("Live texture has no supported device format");
-                    mLevels.clear();
-                    for (const auto& level : converted->mLevels)
-                    {
-                        mLevels.push_back({ level.mWidth, level.mHeight, level.mBytes });
-                        if (!sampling.mUseMipmaps)
-                            break;
-                    }
-                    data = Render::TextureData{ converted->mFormat, converted->mSrgb,
-                        converted->mGenerateMipmaps && sampling.mUseMipmaps, mLevels };
-                }
-                const auto replacement = backend().createTexture(*data, sampling);
-                if (cached.mHandle)
-                    backend().releaseTexture(cached.mHandle);
-                std::uint64_t bytes = 0;
-                for (const auto& level : mLevels)
-                    bytes += level.mBytes.size();
-                if (data->mGenerateMipmaps && mLevels.size() == 1)
-                {
-                    auto width = mLevels.front().mWidth, height = mLevels.front().mHeight;
-                    while (width > 1 || height > 1)
-                    {
-                        width = std::max(1u, width / 2);
-                        height = std::max(1u, height / 2);
-                        bytes += Render::textureLevelSize(data->mFormat, width, height);
-                    }
-                }
-                cached.mResidency.set(bytes);
-                cached.mHandle = replacement;
-                cached.mRevision = sourceImage->getModifiedCount();
-                ++mImageChanges;
-            }
-            cached.mResidency.touch();
+            auto& storage = cached.mStorage ? *cached.mStorage : cached;
+            storage.mSeen = mSerial;
+            storage.mResidency.touch();
             return cached.mHandle;
         }
 
@@ -576,9 +611,9 @@ namespace MWRender
                         }
                         else
                         {
-                            const auto data = mImporter.importMesh(geometry, uvUnit);
+                            const auto data = mImporter.importMeshBuffers(geometry, uvUnit);
                             ++mPrepare.mMeshBuilds;
-                            slot->upload(data->mVertices, data->mIndices);
+                            slot->upload(data.mVertices, data.mIndices);
                             ++mMeshChanges;
                             slot->mStorage->mCanonical = true;
                             shared = { std::move(key), slot->mStorage };
@@ -694,6 +729,75 @@ namespace MWRender
             }
             entry.mSeen = mSerial;
             return entry.mLights;
+        }
+
+        std::shared_ptr<const Render::ShadowSet> shadows(const RenderAssets::OsgStateView& state)
+        {
+            if (!Settings::shadows().mEnableShadows)
+                return {};
+            const auto* source = state.getUniform(NativeUniform::ShadowSpaceMatrix0);
+            if (!source)
+                return {};
+            float maximum = Settings::shadows().mMaximumShadowMapDistance;
+            if (const auto* uniform = state.getUniform(NativeUniform::MaximumShadowMapDistance))
+                uniform->get(maximum);
+            if (maximum > 0 && maximum <= .0001f)
+                return {}; // OpenMW's protected, explicitly unshadowed state.
+            for (std::size_t i = 0; i < mShadowSetsUsed; ++i)
+                if (mShadowSets[i].first == source)
+                    return mShadowSets[i].second->mCount ? mShadowSets[i].second : nullptr;
+            if (mShadowSetsUsed == mShadowSets.size())
+                mShadowSets.emplace_back(nullptr, std::make_shared<Render::ShadowSet>());
+            auto& [key, owner] = mShadowSets[mShadowSetsUsed++];
+            key = source;
+            auto& result = *owner;
+            result = {};
+            result.mMaximumDistance = maximum;
+            result.mFadeStart = maximum * Settings::shadows().mShadowFadeStart;
+            if (const auto* uniform = state.getUniform("shadowFadeStart"))
+                uniform->get(result.mFadeStart);
+            result.mNormalOffset = Settings::shadows().mNormalOffsetDistance;
+            result.mSoft = Settings::shadows().mSoftShadows;
+            static constexpr std::array<std::array<std::string_view, 3>, 8> bindings{ {
+                { "shadowSpaceMatrix0", "shadowTexture0", "validRegionMatrix0" },
+                { "shadowSpaceMatrix1", "shadowTexture1", "validRegionMatrix1" },
+                { "shadowSpaceMatrix2", "shadowTexture2", "validRegionMatrix2" },
+                { "shadowSpaceMatrix3", "shadowTexture3", "validRegionMatrix3" },
+                { "shadowSpaceMatrix4", "shadowTexture4", "validRegionMatrix4" },
+                { "shadowSpaceMatrix5", "shadowTexture5", "validRegionMatrix5" },
+                { "shadowSpaceMatrix6", "shadowTexture6", "validRegionMatrix6" },
+                { "shadowSpaceMatrix7", "shadowTexture7", "validRegionMatrix7" },
+            } };
+            for (unsigned i = 0; i < Render::ShadowSet::MaxMaps; ++i)
+            {
+                const auto* transform = state.getUniform(bindings[i][0]);
+                const auto unit = RenderAssets::textureUnit(state, bindings[i][1]);
+                if (!transform || !unit)
+                    break;
+                const auto* image = dynamic_cast<const osg::Texture2D*>(
+                    state.getTextureAttribute(*unit, osg::StateAttribute::TEXTURE));
+                if (!image || image->getImage())
+                    break; // Dummy maps disable shadows, they are not depth targets.
+                osg::Matrixf matrix;
+                if (!transform->get(matrix))
+                    break;
+                const auto shadowTarget = target(*image);
+                auto& record = mTargets.at(image);
+                if (!record.mShadowDepth)
+                {
+                    record.mShadowDepth = std::make_unique<GpuTexture>(backend());
+                    record.mShadowDepth->mHandle = backend().depthTexture(shadowTarget);
+                }
+                result.mTextures[i] = record.mShadowDepth->mHandle;
+                std::copy_n(matrix.ptr(), 16, result.mViewToShadow[i].begin());
+                if (const auto* region = state.getUniform(bindings[i][2]); region && region->get(matrix))
+                {
+                    std::copy_n(matrix.ptr(), 16, result.mValidRegions[i].begin());
+                    result.mRegionMask |= 1u << i;
+                }
+                ++result.mCount;
+            }
+            return result.mCount ? owner : nullptr;
         }
 
         template <class StateType>
@@ -831,6 +935,7 @@ namespace MWRender
             std::shared_ptr<const Render::LightSet> mLights;
             unsigned mUVUnit = 0;
             bool mLightsPrepared = false;
+            bool mShadowsPrepared = false;
             std::uint64_t mDrawFrame = 0;
             std::uint64_t mFrame = 0;
         };
@@ -841,6 +946,7 @@ namespace MWRender
             auto& draw = cached.mDraw;
             applyState(draw, resolved);
             cached.mLightsPrepared = false;
+            cached.mShadowsPrepared = false;
             cached.mLights.reset();
             cached.mUVUnit = 0;
             bool water = false;
@@ -848,6 +954,8 @@ namespace MWRender
                 surface->get(water);
             draw.mWater = water;
             if (water)
+            {
+                draw.mOpacity = std::clamp(Fallback::Map::getFloat("Water_World_Alpha"), 0.f, 1.f);
                 if (const auto unit = RenderAssets::textureUnit(resolved, "reflectionMap"))
                 {
                     draw.mMaskTexture = texture(dynamic_cast<const osg::Texture2D*>(
@@ -855,6 +963,7 @@ namespace MWRender
                         false);
                     draw.mReflection = static_cast<bool>(draw.mMaskTexture);
                 }
+            }
             const auto diffuseUnit = RenderAssets::textureUnit(resolved, water ? "normalMap" : "diffuseMap");
             if (diffuseUnit)
             {
@@ -911,7 +1020,7 @@ namespace MWRender
             }
         };
 
-        using TransformKey = std::tuple<const osg::Matrixd*, const osg::Matrixd*, const osg::Uniform*>;
+        using TransformKey = std::tuple<const osg::Matrixd*, const osg::Matrixd*, const osg::Uniform*, bool>;
         struct TransformHash
         {
             std::size_t operator()(const TransformKey& key) const
@@ -924,6 +1033,7 @@ namespace MWRender
                 add(std::get<0>(key));
                 add(std::get<1>(key));
                 add(std::get<2>(key));
+                value ^= static_cast<std::size_t>(std::get<3>(key)) * 0x9e3779b9u;
                 return value;
             }
         };
@@ -935,13 +1045,21 @@ namespace MWRender
         };
         const Transform& transform(const osgUtil::RenderLeaf& leaf, const RenderAssets::OsgStateView& state)
         {
-            auto [entry, inserted] = mTransforms.getOrCreate(
-                { leaf._modelview.get(), leaf._projection.get(), state.getUniform(NativeUniform::ProjectionMatrix) });
+            auto [entry, inserted] = mTransforms.getOrCreate({ leaf._modelview.get(), leaf._projection.get(),
+                state.getUniform(NativeUniform::ProjectionMatrix), mShadowCasting });
             if (inserted)
             {
                 ++mPrepare.mTransforms;
-                entry.mProjection
-                    = RenderAssets::clipProjection(state, *leaf._projection, SceneUtil::AutoDepth::isReversed());
+                if (mShadowCasting)
+                {
+                    osg::Matrixd depth;
+                    depth(2, 2) = .5;
+                    depth(3, 2) = .5;
+                    entry.mProjection = *leaf._projection * depth;
+                }
+                else
+                    entry.mProjection = RenderAssets::clipProjection(
+                        state, *leaf._projection, SceneUtil::AutoDepth::isReversed(), true);
                 entry.mClip = matrix(*leaf._modelview * entry.mProjection);
                 entry.mView = matrix(*leaf._modelview);
                 entry.mNormal = Render::IdentityMatrix;
@@ -966,7 +1084,7 @@ namespace MWRender
             {
                 const auto& parent = state(graph->_parent).mState;
                 entry.mState.bind(&parent, graph->getStateSet());
-                entry.mState.prepareNativeUniforms();
+                entry.mState.prepareNativeState();
                 ++mPrepare.mStateBindings;
                 entry.mFrame = mSerial;
             }
@@ -1080,7 +1198,8 @@ namespace MWRender
             const auto& resolved = cached.mState;
             if (const auto* mask
                 = dynamic_cast<const osg::ColorMask*>(resolved.getAttribute(osg::StateAttribute::COLORMASK));
-                mask && !mask->getRedMask() && !mask->getGreenMask() && !mask->getBlueMask() && !mask->getAlphaMask())
+                !mShadowCasting && mask && !mask->getRedMask() && !mask->getGreenMask() && !mask->getBlueMask()
+                && !mask->getAlphaMask())
                 return; // GL occlusion-query proxies have no visible output.
             try
             {
@@ -1114,17 +1233,13 @@ namespace MWRender
                     draw.mWaterProjection = RenderAssets::depthCoefficients(projection, true);
                 if (mProjectionOutput && !mProjectionOutput->has_value() && !sky)
                 {
-                    // Retain the authored projection before combining it with
-                    // large model/view transforms. OMWFX reconstructs forward
-                    // depth using the GL [-1,1] projection convention.
-                    osg::Matrixd toGL;
-                    toGL(2, 2) = 2;
-                    toGL(3, 2) = -1;
-                    *mProjectionOutput = projection * toGL;
+                    // The native effect API uses reverse, zero-to-one depth.
+                    *mProjectionOutput = projection;
                 }
                 draw.mClipFromModel = particleSystem ? matrix(projection) : transforms.mClip;
                 draw.mViewFromModel = particleSystem ? Render::IdentityMatrix : transforms.mView;
                 draw.mNormalFromModel = transforms.mNormal;
+                draw.mDepthProjection = RenderAssets::depthCoefficients(projection, true);
                 if (transforms.mInvertible)
                 {
                     if (geometry && geometry->getNormalArray() && !sky && !water)
@@ -1148,6 +1263,28 @@ namespace MWRender
                     draw.mUseVertexColor = true;
                 }
                 draw.mSky = sky;
+                draw.mShadows.reset();
+                if (!mShadowCasting && !sky && !water && !particleSystem && draw.mLighting)
+                {
+                    if (!cached.mShadowsPrepared)
+                    {
+                        cached.mDraw.mShadows = shadows(resolved);
+                        cached.mShadowsPrepared = true;
+                    }
+                    draw.mShadows = cached.mDraw.mShadows;
+                    if (draw.mShadows && draw.mShadows->mMaximumDistance > 0)
+                    {
+                        // Receiver geometry wholly beyond the fade range uses
+                        // the unshadowed variant, without shadow varyings/work.
+                        const auto& bound = geometry->getBound();
+                        const auto& view = *leaf._modelview;
+                        const auto center = osg::Vec3d(bound.center()) * view;
+                        const double radius = bound.radius()
+                            * std::sqrt(view(0, 2) * view(0, 2) + view(1, 2) * view(1, 2) + view(2, 2) * view(2, 2));
+                        if (bound.valid() && -center.z() - radius >= draw.mShadows->mMaximumDistance)
+                            draw.mShadows.reset();
+                    }
+                }
                 if (sky)
                 {
                     draw.mDepthWrite = false;
@@ -1177,7 +1314,24 @@ namespace MWRender
                                               resolved.getTextureAttribute(*unit, osg::StateAttribute::TEXTURE)),
                                     false);
                 }
-                draws.push_back(draw);
+                if (mShadowCasting)
+                {
+                    draw.mShadowCasting = true;
+                    draw.mDepthBiasConstant = Settings::shadows().mPolygonOffsetUnits;
+                    draw.mDepthBiasSlope = Settings::shadows().mPolygonOffsetFactor;
+                    draw.mLighting = false;
+                    draw.mShadows.reset();
+                    draw.mSky = draw.mWater = draw.mDistortion = false;
+                    draw.mDepthTest = draw.mDepthWrite = true;
+                    draw.mDepthCompare = Render::AlphaCompare::LessEqual;
+                    draw.mBlend = Render::BlendMode::Opaque;
+                    draw.mFogEnd = 0;
+                    bool alphaTest = false;
+                    if (const auto* uniform = resolved.getUniform("alphaTestShadows"))
+                        uniform->get(alphaTest);
+                    draw.mShadowAlphaTest = alphaTest;
+                }
+                draws.push_back(std::move(draw));
             }
             catch (const std::invalid_argument& error)
             {
@@ -1225,7 +1379,7 @@ namespace MWRender
                     leaf(*entry, draws, sky);
             for (; next != bin.getRenderBinList().end(); ++next)
                 this->bin(*next->second, draws, sky);
-            if (bin.getBinNum() == RenderBin_FirstPerson && draws.size() != first)
+            if (!mShadowCasting && bin.getBinNum() == RenderBin_FirstPerson && draws.size() != first)
                 draws[first].mClearDepthBefore = true;
             mProjectionOutput = projection;
         }
@@ -1239,6 +1393,7 @@ namespace MWRender
             std::array<float, 4> mColor{};
             std::array<std::uint32_t, 4> mViewport{};
             bool mClear = true;
+            bool mReversedDepth = true;
         };
 
         void captureEffects(osgUtil::RenderBin& bin)
@@ -1270,6 +1425,7 @@ namespace MWRender
                 captureStage(*child);
             auto* camera = stage.getCamera();
             osg::Texture2D* colorTarget = nullptr;
+            bool shadow = false;
             if (camera && !window)
             {
                 const auto& attachments = camera->getBufferAttachmentMap();
@@ -1278,6 +1434,14 @@ namespace MWRender
                     color = attachments.find(osg::Camera::COLOR_BUFFER0);
                 if (color != attachments.end())
                     colorTarget = dynamic_cast<osg::Texture2D*>(color->second._texture.get());
+                if (!colorTarget)
+                    if (const auto depth = attachments.find(osg::Camera::DEPTH_BUFFER); depth != attachments.end())
+                    {
+                        colorTarget = dynamic_cast<osg::Texture2D*>(depth->second._texture.get());
+                        shadow = colorTarget && colorTarget->getShadowComparison();
+                        if (!shadow)
+                            colorTarget = nullptr;
+                    }
             }
             if (!window && !colorTarget)
                 captureEffects(stage);
@@ -1291,7 +1455,10 @@ namespace MWRender
                 view.mViewport = {};
                 const auto color = stage.getClearColor();
                 view.mColor = { color.r(), color.g(), color.b(), color.a() };
-                view.mClear = (stage.getClearMask() & GL_COLOR_BUFFER_BIT) != 0;
+                view.mReversedDepth = !shadow;
+                view.mClear = shadow || (stage.getClearMask() & GL_COLOR_BUFFER_BIT) != 0;
+                if (shadow)
+                    view.mColor = { 1, 1, 1, 1 };
                 const auto* viewport = stage.getViewport();
                 if (viewport)
                     view.mViewport = { static_cast<unsigned>(std::max(0., viewport->x())),
@@ -1317,9 +1484,11 @@ namespace MWRender
                     }
                 view.mDistortion.clear();
                 view.mProjection.reset();
-                mProjectionOutput = &view.mProjection;
-                mDistortionOutput = &view.mDistortion;
+                mProjectionOutput = shadow ? nullptr : &view.mProjection;
+                mDistortionOutput = shadow ? nullptr : &view.mDistortion;
+                mShadowCasting = shadow;
                 bin(stage, view.mDraws);
+                mShadowCasting = false;
                 mDistortionOutput = nullptr;
                 mProjectionOutput = nullptr;
                 // A source camera must not read its active color attachment.
@@ -1405,6 +1574,7 @@ namespace MWRender
                 return;
             ++mSerial;
             mTransforms.beginFrame();
+            mShadowSetsUsed = 0;
             mMeshResidency.beginFrame();
             mTextureResidency.beginFrame();
             mSubmittedComposites.clear();
@@ -1455,6 +1625,7 @@ namespace MWRender
                 {
                     const auto& view = mViews[i];
                     mPasses.push_back({ view.mDraws, view.mTarget, view.mColor, view.mClear, view.mViewport });
+                    mPasses.back().mReversedDepth = view.mReversedDepth;
                 }
             }
             if (mEffectCanvas.valid())
@@ -1464,7 +1635,11 @@ namespace MWRender
                     mEffects = std::make_unique<Vulkan::Effects>(
                         backend(), [this](const osg::Texture2D* source) { return texture(source, false); });
                 std::span<const Render::Draw> distortion;
-                osg::Matrixd projection = camera->getProjectionMatrix();
+                // Sky-only views have no opaque leaf from which to capture a
+                // projection. Their fallback must use the same native depth
+                // convention as ordinary scene and effect passes.
+                osg::Matrixd projection = RenderAssets::clipProjection(
+                    RenderAssets::OsgState{}, camera->getProjectionMatrix(), false, true);
                 for (std::size_t i = 0; i < mViewCount; ++i)
                     if (!mViews[i].mTarget)
                     {
@@ -1519,8 +1694,12 @@ namespace MWRender
             const auto deadline = FrameTiming::Clock::now() + std::chrono::milliseconds(1);
             const auto stop = [&] { return FrameTiming::Clock::now() >= deadline; };
             const auto expired = [&](const auto& item) { return item.second->mSeen + 16 < mSerial; };
-            switch (mRetireCategory++ % 10)
+            switch (mRetireCategory++ % 11)
             {
+                case 10:
+                    mRetireName = "image variants";
+                    mRetired = mImageVariants.sweep(stop);
+                    break;
                 case 0:
                     mRetireName = "meshes";
                     mRetired = mMeshSweep.sweep(
@@ -1545,7 +1724,13 @@ namespace MWRender
                     mRetired = mTextureSweep.sweep(
                         mTextures,
                         [&](const auto& item) {
-                            return mTextureResidency.evict(item.second->mImage.valid(), mSerial, item.second->mSeen);
+                            const auto& texture = *item.second;
+                            osg::ref_ptr<const osg::Image> source;
+                            if (!texture.mImage.lock(source) || texture.mRevision != source->getModifiedCount())
+                                return true; // Stale animated-image generations cannot be reused.
+                            return mTextureResidency.evict(true, mSerial, texture.mSeen)
+                                || (texture.mStorage
+                                    && texture.mSeen + (mTextures.size() > 16384 ? 32 : 600) < mSerial);
                         },
                         stop);
                     break;
@@ -1643,7 +1828,8 @@ namespace MWRender
             mParticleMeshes;
         std::map<const osgParticle::ParticleSystem*, unsigned> mParticleOccurrences;
         const osgUtil::RenderStage* mCurrentStage = nullptr;
-        std::map<std::tuple<std::uintptr_t, Render::SamplerState>, std::unique_ptr<GpuTexture>> mTextures;
+        std::map<std::tuple<std::uintptr_t, Render::SamplerState>, std::shared_ptr<GpuTexture>> mTextures;
+        RenderAssets::ImageVariants<GpuTexture> mImageVariants;
         struct TextureBinding
         {
             osg::observer_ptr<const osg::Texture2D> mSource;

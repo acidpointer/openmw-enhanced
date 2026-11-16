@@ -10,6 +10,8 @@
 #include "skeleton.hpp"
 #include "util.hpp"
 
+#include <algorithm>
+
 namespace SceneUtil
 {
 
@@ -33,6 +35,9 @@ namespace SceneUtil
             mGeometry[i] = nullptr;
 
         mSourceGeometry = sourceGeometry;
+        mPoseInitialized = false;
+        mLastCullFrame.reset();
+        mPoseSources = {};
 
         for (unsigned int i = 0; i < 2; ++i)
         {
@@ -146,7 +151,7 @@ namespace SceneUtil
         }
 
         unsigned int traversalNumber = nv->getTraversalNumber();
-        if (mLastFrameNumber == traversalNumber || (mLastFrameNumber != 0 && !mSkeleton->getActive()))
+        if (mPoseInitialized && (mLastCullFrame == traversalNumber || !mSkeleton->getActive()))
         {
             osg::Geometry& geom = *getGeometry(mLastFrameNumber);
             nv->pushOntoNodePath(&geom);
@@ -154,9 +159,7 @@ namespace SceneUtil
             nv->popFromNodePath();
             return;
         }
-        mLastFrameNumber = traversalNumber;
-        osg::Geometry& geom = *getGeometry(mLastFrameNumber);
-
+        mLastCullFrame = traversalNumber;
         mSkeleton->updateBoneMatrices(traversalNumber);
 
         // skinning
@@ -164,26 +167,48 @@ namespace SceneUtil
         const osg::Vec3Array* normalSrc = static_cast<osg::Vec3Array*>(mSourceGeometry->getNormalArray());
         const osg::Vec4Array* tangentSrc = mSourceTangents;
 
+        // Compare the actual skinning inputs, not animation time. Unchanged
+        // body parts retain their arrays and GPU buffers without quantization
+        // or reducing animation frequency. Scratch matrices persist per rig.
+        bool changed = !mPoseInitialized || mBoneMatrices.size() != mNodes.size();
+        mBoneMatrices.resize(mNodes.size());
+        for (const std::size_t i : mData->mUsedBones)
+        {
+            if (!mNodes[i])
+                continue;
+            const osg::Matrixf matrix = mData->mBones[i].mInvBindMatrix * mNodes[i]->mMatrixInSkeletonSpace;
+            changed |= matrix != mBoneMatrices[i];
+            mBoneMatrices[i] = matrix;
+        }
+        const osg::Matrixf transform
+            = mSkinToSkelMatrix ? osg::Matrixf((*mSkinToSkelMatrix) * mData->mTransform) : mData->mTransform;
+        changed |= transform != mPoseTransform;
+        mPoseTransform = transform;
+        const std::array<const osg::Array*, 3> sources{ positionSrc, normalSrc, tangentSrc };
+        for (std::size_t i = 0; i < sources.size(); ++i)
+        {
+            const auto revision = sources[i] ? sources[i]->getModifiedCount() : 0;
+            changed |= sources[i] != mPoseSources[i] || revision != mPoseSourceRevisions[i];
+            mPoseSources[i] = sources[i];
+            mPoseSourceRevisions[i] = revision;
+        }
+        if (!changed)
+        {
+            osg::Geometry& previous = *getGeometry(mLastFrameNumber);
+            nv->pushOntoNodePath(&previous);
+            nv->apply(previous);
+            nv->popFromNodePath();
+            return;
+        }
+        // Alternate on pose changes, not traversal parity: after skipped
+        // updates the previous pose may still be in use by the draw thread.
+        if (mPoseInitialized)
+            ++mLastFrameNumber;
+        mPoseInitialized = true;
+        osg::Geometry& geom = *getGeometry(mLastFrameNumber);
         osg::Vec3Array* positionDst = static_cast<osg::Vec3Array*>(geom.getVertexArray());
         osg::Vec3Array* normalDst = static_cast<osg::Vec3Array*>(geom.getNormalArray());
         osg::Vec4Array* tangentDst = static_cast<osg::Vec4Array*>(geom.getTexCoordArray(7));
-
-        std::vector<osg::Matrixf> boneMatrices(mNodes.size());
-        std::vector<Bone*>::const_iterator bone = mNodes.begin();
-        std::vector<BoneInfo>::const_iterator boneInfo = mData->mBones.begin();
-        for (osg::Matrixf& boneMat : boneMatrices)
-        {
-            if (*bone != nullptr)
-                boneMat = boneInfo->mInvBindMatrix * (*bone)->mMatrixInSkeletonSpace;
-            ++bone;
-            ++boneInfo;
-        }
-
-        osg::Matrixf transform;
-        if (mSkinToSkelMatrix)
-            transform = (*mSkinToSkelMatrix) * mData->mTransform;
-        else
-            transform = mData->mTransform;
 
         for (const auto& [influences, vertices] : mData->mInfluences)
         {
@@ -193,7 +218,7 @@ namespace SceneUtil
             {
                 if (mNodes[index] == nullptr)
                     continue;
-                const float* boneMatPtr = boneMatrices[index].ptr();
+                const float* boneMatPtr = mBoneMatrices[index].ptr();
                 float* resultMatPtr = resultMat.ptr();
                 for (int i = 0; i < 16; ++i, ++resultMatPtr, ++boneMatPtr)
                     if (i % 4 != 3)
@@ -328,6 +353,10 @@ namespace SceneUtil
             mData = std::make_shared<InfluenceData>();
 
         mData->mBones = std::move(bones);
+        mSkeleton = nullptr;
+        mBoundsFirstFrame = true;
+        mPoseInitialized = false;
+        mLastCullFrame.reset();
     }
 
     void RigGeometry::setInfluences(const std::vector<BoneWeights>& influences)
@@ -342,6 +371,17 @@ namespace SceneUtil
 
         mData->mInfluences.reserve(influencesToVertices.size());
         mData->mInfluences.assign(influencesToVertices.begin(), influencesToVertices.end());
+        // NIF skin palettes can include bones unused by this body part. Their
+        // animation must neither invalidate its pose nor cost matrix products.
+        auto& used = mData->mUsedBones;
+        used.clear();
+        for (const auto& entry : mData->mInfluences)
+            for (const auto& influence : entry.first)
+                used.push_back(influence.first);
+        std::sort(used.begin(), used.end());
+        used.erase(std::unique(used.begin(), used.end()), used.end());
+        mPoseInitialized = false;
+        mLastCullFrame.reset();
     }
 
     void RigGeometry::setTransform(osg::Matrixf&& transform)
@@ -349,6 +389,8 @@ namespace SceneUtil
         if (!mData)
             mData = std::make_shared<InfluenceData>();
         mData->mTransform = transform;
+        mPoseInitialized = false;
+        mLastCullFrame.reset();
     }
 
     void RigGeometry::setRootBone(std::string_view name)
@@ -356,6 +398,8 @@ namespace SceneUtil
         if (!mData)
             mData = std::make_shared<InfluenceData>();
         mData->mRootBone = name;
+        mPoseInitialized = false;
+        mLastCullFrame.reset();
     }
 
     void RigGeometry::accept(osg::NodeVisitor& nv)
@@ -371,6 +415,13 @@ namespace SceneUtil
             // but we want to use its state to render the child geometry.
             osg::StateSet* stateset = getStateSet();
             osgUtil::CullVisitor* cv = static_cast<osgUtil::CullVisitor*>(&nv);
+            // The internal geometries disable culling because this wrapper
+            // owns their animated bounds. Reject hidden parts before skinning.
+            if (isCullingActive() && cv->isCulled(_boundingBox))
+            {
+                nv.popFromNodePath();
+                return;
+            }
             if (stateset)
                 cv->pushStateSet(stateset);
 

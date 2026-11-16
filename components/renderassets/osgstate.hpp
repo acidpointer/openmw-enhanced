@@ -41,6 +41,7 @@ namespace RenderAssets
         MaterialSpecStrength,
         MaterialSpecular,
         MaterialVertexColorMode,
+        MaximumShadowMapDistance,
         MoonBlend,
         NodePosition,
         NormalMap,
@@ -48,6 +49,7 @@ namespace RenderAssets
         Pass,
         ProjectionMatrix,
         ReflectionMap,
+        ShadowSpaceMatrix0,
         SunAmbient,
         SunDiffuse,
         SunPosition,
@@ -112,6 +114,7 @@ namespace RenderAssets
             mUniformSeen = 0;
             mAttributeSeen = 0;
             mModeSeen = 0;
+            mNativeStatePrepared = false;
         }
         const OsgStateView* parent() const { return mParent; }
         const osg::StateSet* local() const { return mLocal; }
@@ -120,6 +123,9 @@ namespace RenderAssets
         // Visit each local binding once instead of resolving every slot up
         // the hierarchy separately. Only the fixed pointer table is copied.
         void prepareNativeUniforms() const;
+        // Fold bounded uniform/attribute/mode bindings in one pass per node.
+        // Live values are still read from their OSG objects each frame.
+        void prepareNativeState() const;
         const osg::StateAttribute* getAttribute(osg::StateAttribute::Type type, unsigned member = 0) const;
         const osg::StateAttribute* getTextureAttribute(unsigned unit, osg::StateAttribute::Type type) const;
         osg::StateAttribute::GLModeValue getMode(osg::StateAttribute::GLMode mode) const;
@@ -142,6 +148,8 @@ namespace RenderAssets
         mutable std::uint64_t mUniformSeen = 0;
         mutable std::uint32_t mAttributeSeen = 0;
         mutable unsigned mModeSeen = 0;
+        mutable unsigned mTextureUnits = 0;
+        mutable bool mNativeStatePrepared = false;
     };
 
     const osg::Uniform* nativeUniform(const osg::StateSet& state, NativeUniform name);
@@ -156,19 +164,23 @@ namespace RenderAssets
 
     std::optional<unsigned> textureUnit(const OsgStateView& state, std::string_view name);
     std::array<float, 6> textureTransform(const OsgStateView& state, unsigned unit);
-    osg::Matrixd clipProjection(const OsgStateView& state, const osg::Matrixd& projection, bool reversedShaderDepth);
+    osg::Matrixd clipProjection(const OsgStateView& state, const osg::Matrixd& projection, bool reversedShaderDepth,
+        bool reversedNativeDepth = false);
     std::array<float, 4> depthCoefficients(const osg::Matrixd& projection, bool zeroToOne);
+    // Explicit (add, one, zero) blending is replacement, just like blending off.
+    bool effectReplacesDestination(const OsgStateView& state);
 
     std::optional<unsigned> textureUnit(const osg::StateSet& state, std::string_view name);
     std::array<float, 6> textureTransform(const osg::StateSet& state, unsigned unit);
     // OSG's leaf projection is for CPU culling. OpenMW shaders may instead
     // receive a reversed, zero-to-one projection through the effective state.
-    // Return a forward zero-to-one projection for the native depth buffer.
-    osg::Matrixd clipProjection(
-        const osg::StateSet& state, const osg::Matrixd& cullProjection, bool reversedShaderDepth);
+    // Return zero-to-one depth; preserve reverse-Z when reversedNativeDepth is set.
+    osg::Matrixd clipProjection(const osg::StateSet& state, const osg::Matrixd& cullProjection,
+        bool reversedShaderDepth, bool reversedNativeDepth = false);
     std::optional<unsigned> textureUnit(const OsgState& state, std::string_view name);
     std::array<float, 6> textureTransform(const OsgState& state, unsigned unit);
-    osg::Matrixd clipProjection(const OsgState& state, const osg::Matrixd& cullProjection, bool reversedShaderDepth);
+    osg::Matrixd clipProjection(const OsgState& state, const osg::Matrixd& cullProjection, bool reversedShaderDepth,
+        bool reversedNativeDepth = false);
 }
 
 #endif

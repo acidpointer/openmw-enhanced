@@ -3,7 +3,10 @@
 // Surface, water, sky, distortion, overlay, solid surface. Fixed when creating a pipeline,
 // allowing the driver to eliminate unrelated work and varyings.
 layout(constant_id = 0) const uint materialShader = 0u;
+const bool receivesShadows = materialShader == 7u || materialShader == 8u;
+const uint surfaceShader = materialShader == 7u ? 0u : materialShader == 8u ? 5u : materialShader;
 layout(constant_id = 1) const bool writeNormals = true;
+layout(constant_id = 2) const bool hardwareDepthClamp = true;
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec2 inUV;
@@ -51,20 +54,30 @@ layout(std430, set = 2, binding = 1) readonly buffer LightBuffer
     PointLight lights[];
 };
 
+layout(std140, set = 2, binding = 2) uniform ShadowState
+{
+    mat4 matrices[8];
+    mat4 regions[8];
+    vec4 parameters;
+    uvec4 flags;
+} shadows;
+
 layout(location = 0) out vec2 uv;
 layout(location = 1) out vec4 color;
-layout(location = 2) out flat vec2 alphaPolicy;
+layout(location = 2) out flat vec3 alphaPolicy;
 layout(location = 3) out vec2 maskUV;
 layout(location = 4) out flat float materialKind;
 layout(location = 5) out vec3 specularColor;
-layout(location = 6) out flat vec4 skyDiffuse;
-layout(location = 7) out flat vec4 skyMoon;
-layout(location = 8) out flat vec4 skyAtmosphere;
+layout(location = 6) out vec4 skyDiffuse;
+layout(location = 7) out vec4 skyMoon;
+layout(location = 8) out vec4 skyAtmosphere;
 layout(location = 9) out flat float opacity;
 layout(location = 10) out vec4 screenPosition;
 layout(location = 11) out vec3 viewPosition;
 layout(location = 12) out vec3 viewNormal;
 layout(location = 13) out float clipDistance;
+layout(location = 14) out vec3 sunDiffuseColor;
+layout(location = 15) out vec3 sunSpecularColor;
 
 vec3 safeNormal(vec3 value)
 {
@@ -81,15 +94,18 @@ void main()
 {
     InstanceData data = instances[gl_InstanceIndex];
     gl_Position = data.clipFromModel * vec4(inPosition, 1.0);
-    if (materialShader == 2u)
-        gl_Position.z = gl_Position.w;
-    else if (materialShader == 1u)
-        gl_Position.z = min(gl_Position.z, gl_Position.w);
+    bool reversedDepth = (data.lighting.z & 8u) != 0u;
+    if (surfaceShader == 6u && !hardwareDepthClamp)
+        gl_Position.z = clamp(gl_Position.z, 0.0, max(gl_Position.w, 0.0));
+    if (surfaceShader == 2u)
+        gl_Position.z = reversedDepth ? 0.0 : gl_Position.w;
+    else if (surfaceShader == 1u)
+        gl_Position.z = reversedDepth ? max(gl_Position.z, 0.0) : min(gl_Position.z, gl_Position.w);
     uv = vec2(dot(data.uvRow0.xyz, vec3(inUV, 1.0)), dot(data.uvRow1.xyz, vec3(inUV, 1.0)));
     maskUV = vec2(dot(data.maskRow0.xyz, vec3(inMaskUV, 1.0)), dot(data.maskRow1.xyz, vec3(inMaskUV, 1.0)));
-    alphaPolicy = data.parameters.xy;
+    alphaPolicy = vec3(data.parameters.xy, float(data.lighting.z));
     materialKind = data.parameters.w;
-    if (materialShader == 1u)
+    if (surfaceShader == 1u)
         uv = (inPosition.xy + data.emission.xy) * (3.0 / (8192.0 * 5.0));
 
     vec4 vertexColor = vec4(inColor.rgb, inAlpha < 0.0 ? inColor.a : inAlpha);
@@ -102,16 +118,23 @@ void main()
     skyMoon = data.emission;
     skyAtmosphere = data.ambient;
     opacity = data.parameters.z;
-    color = materialShader == 2u ? vertexColor * data.tint : diffuse * data.tint;
-    if (materialShader == 1u)
+    color = surfaceShader == 2u ? vertexColor * data.tint : diffuse * data.tint;
+    if (surfaceShader == 1u)
     {
         // Water computes its own optical opacity, independent of mesh alpha.
         color = data.tint;
         skyDiffuse = data.sunAmbient;
+        // Water_World_Alpha describes opacity through an actor-height column
+        // of water. Convert it to log2 extinction here, rather than adding a
+        // logarithm to every water fragment. The flat varying stays constant.
+        const float referenceDepth = 128.0;
+        opacity = -log2(max(1.0 - clamp(data.parameters.z, 0.0, 1.0), 1e-6)) / referenceDepth;
     }
     specularColor = vec3(0.0);
+    sunDiffuseColor = vec3(0.0);
+    sunSpecularColor = vec3(0.0);
     screenPosition = gl_Position;
-    if (materialShader == 4u)
+    if (surfaceShader == 4u)
     {
         viewPosition = vec3(0.0);
         viewNormal = vec3(0.0, 0.0, 1.0);
@@ -119,16 +142,24 @@ void main()
         return;
     }
     bool clipping = (data.lighting.z & 4u) != 0u;
-    bool litSurface = (materialShader == 0u || materialShader == 5u) && (data.lighting.z & 1u) != 0u;
+    bool litSurface = (surfaceShader == 0u || surfaceShader == 5u) && (data.lighting.z & 1u) != 0u;
     // Window and reflection passes do not write normal attachments. Unlit
     // surfaces in those passes need neither a view transform nor normalized
     // normals; fog already uses reciprocal clip W in the fragment shader.
-    viewPosition = litSurface || clipping || materialShader == 1u
+    viewPosition = litSurface || clipping || surfaceShader == 1u
         ? (data.viewFromModel * vec4(inPosition, 1.0)).xyz : vec3(0.0);
-    viewNormal = litSurface || materialShader == 1u || (writeNormals && materialShader != 2u)
+    viewNormal = litSurface || surfaceShader == 1u || (writeNormals && surfaceShader != 2u)
         ? safeNormal(mat3(data.normalFromModel) * inNormal) : vec3(0.0, 0.0, 1.0);
+    if (receivesShadows)
+    {
+        vec4 receiver = vec4(viewPosition + viewNormal * shadows.parameters.z, 1.0);
+        skyDiffuse = shadows.matrices[0] * receiver;
+        skyMoon = shadows.flags.x > 1u ? shadows.matrices[1] * receiver : vec4(0.0);
+        skyAtmosphere = shadows.flags.x > 2u ? shadows.matrices[2] * receiver : vec4(0.0);
+        screenPosition = shadows.flags.x > 3u ? shadows.matrices[3] * receiver : vec4(0.0);
+    }
     clipDistance = clipping ? dot(vec4(viewPosition, 1.0), data.clipPlane) : 1.0;
-    if (materialShader == 1u || materialShader == 2u || (data.lighting.z & 1u) == 0u)
+    if (surfaceShader == 1u || surfaceShader == 2u || (data.lighting.z & 1u) == 0u)
         return;
 
     vec3 position = viewPosition;
@@ -138,9 +169,13 @@ void main()
     vec3 direction = safeNormal(data.sunPosition.xyz);
     vec3 lit = ambient * data.sunAmbient.rgb + emission;
     lit += diffuse.rgb * data.sunDiffuse.rgb * max(dot(normal, direction), 0.0);
+    if (receivesShadows)
+        sunDiffuseColor = diffuse.rgb * data.sunDiffuse.rgb * max(dot(normal, direction), 0.0) * data.tint.rgb;
     vec3 highlights = vec3(0.0);
     if (hasSpecular && any(notEqual(data.sunSpecular.rgb, vec3(0.0))))
         highlights = specular * data.sunSpecular.rgb * specularTerm(normal, direction, eye, data.specular.w);
+    if (receivesShadows)
+        sunSpecularColor = highlights * data.tint.rgb;
     bool classic = (data.lighting.z & 2u) != 0u;
     for (uint i = 0u; i < data.lighting.y; ++i)
     {
