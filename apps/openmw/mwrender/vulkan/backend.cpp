@@ -4,6 +4,7 @@
 #include "memory.hpp"
 
 #include <components/render/bufferarena.hpp>
+#include <components/render/meshindices.hpp>
 #include <components/render/pipelinecache.hpp>
 #include <components/render/raster.hpp>
 #include <components/render/reserve.hpp>
@@ -21,6 +22,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -120,6 +122,7 @@ namespace MWRender::Vulkan
             Render::BufferArena<Buffer>::Slice mVertices;
             Render::BufferArena<Buffer>::Slice mIndices;
             std::uint32_t mIndexCount = 0;
+            VkIndexType mIndexType = VK_INDEX_TYPE_UINT32;
             std::size_t mVertexBytes = 0;
             std::size_t mIndexBytes = 0;
             std::optional<std::size_t> mVertexUpload;
@@ -1143,24 +1146,31 @@ namespace MWRender::Vulkan
                 throw std::invalid_argument("Vulkan mesh index exceeds its vertex count");
             auto mesh = std::make_shared<Mesh>();
             mesh->mIndexCount = static_cast<std::uint32_t>(indices.size());
+            const bool narrow = Render::narrowMeshIndices(vertices.size());
+            mesh->mIndexType = narrow ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
             mesh->mVertexBytes = vertices.size_bytes();
-            mesh->mIndexBytes = indices.size_bytes();
+            mesh->mIndexBytes = Render::meshIndexBytes(indices.size(), narrow);
             const auto createPage = [&](VkDeviceSize capacity) -> std::shared_ptr<Buffer> {
                 return createBuffer(capacity,
                     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT
                         | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                     MemoryKind::Geometry);
             };
-            mesh->mVertices = mGeometryPages.allocate(vertices.size_bytes(), 16, createPage);
-            mesh->mIndices = mGeometryPages.allocate(indices.size_bytes(), 4, createPage);
+            // Whole-vertex offsets let draws share one page binding and select
+            // their mesh through baseVertex instead of rebinding every slice.
+            mesh->mVertices = mGeometryPages.allocate(
+                vertices.size_bytes(), std::lcm(std::size_t{ 16 }, sizeof(Render::Vertex)), createPage);
+            mesh->mIndices = mGeometryPages.allocate(mesh->mIndexBytes, 4, createPage);
             auto vertexStaging = stage(std::as_bytes(vertices));
-            auto indexStaging = stage(std::as_bytes(indices));
+            auto indexStaging = allocateStaging(mesh->mIndexBytes);
+            Render::writeMeshIndices(
+                { indexStaging.mPage->mMemory.mapped() + indexStaging.mOffset, mesh->mIndexBytes }, indices, narrow);
             Render::reserveFor(mPendingUploads, mPendingUploads.size() + 2);
             const auto handle = mMeshes.insert(mesh);
             mesh->mVertexUpload = mPendingUploads.size();
             mPendingUploads.push_back({ std::move(vertexStaging), mesh, {}, vertices.size_bytes(), false, {}, false });
             mesh->mIndexUpload = mPendingUploads.size();
-            mPendingUploads.push_back({ std::move(indexStaging), mesh, {}, indices.size_bytes(), true, {}, false });
+            mPendingUploads.push_back({ std::move(indexStaging), mesh, {}, mesh->mIndexBytes, true, {}, false });
             return handle;
         }
 
@@ -1170,7 +1180,7 @@ namespace MWRender::Vulkan
             const auto& mesh = mMeshes.get(handle);
             if (vertices.empty() || vertices.size_bytes() > mesh->mVertexBytes
                 || (!indices.empty() && vertices.size_bytes() != mesh->mVertexBytes)
-                || (!indices.empty() && indices.size_bytes() != mesh->mIndexBytes)
+                || (!indices.empty() && indices.size() != mesh->mIndexCount)
                 || std::any_of(indices.begin(), indices.end(), [&](auto index) { return index >= vertices.size(); }))
                 throw std::invalid_argument("Resident mesh updates require valid dimensions and indices");
             Render::reserveFor(mPendingUploads, mPendingUploads.size() + 2);
@@ -1179,30 +1189,39 @@ namespace MWRender::Vulkan
             {
                 if (index && indices.empty())
                     continue;
-                const auto bytes = index ? std::as_bytes(indices) : std::as_bytes(vertices);
+                const auto size = index ? mesh->mIndexBytes : vertices.size_bytes();
+                const auto write = [&](Staging& staging) {
+                    auto* destination = staging.mPage->mMemory.mapped() + staging.mOffset;
+                    if (index)
+                        Render::writeMeshIndices(
+                            { destination, size }, indices, mesh->mIndexType == VK_INDEX_TYPE_UINT16);
+                    else
+                        std::memcpy(destination, vertices.data(), size);
+                };
                 auto& pending = index ? mesh->mIndexUpload : mesh->mVertexUpload;
                 if (pending)
                 {
                     auto& upload = mPendingUploads[*pending];
-                    if (bytes.size() <= upload.mSize)
+                    if (size <= upload.mSize)
                     {
                         // This slice has not been recorded/submitted. Reuse
                         // its host bytes, preserving a longer pending tail
                         // when a newer update replaces only the live prefix.
-                        std::memcpy(upload.mStaging.mPage->mMemory.mapped() + upload.mStaging.mOffset, bytes.data(),
-                            bytes.size());
+                        write(upload.mStaging);
                     }
                     else
                     {
-                        upload.mStaging = stage(bytes);
-                        upload.mSize = bytes.size();
+                        upload.mStaging = allocateStaging(size);
+                        write(upload.mStaging);
+                        upload.mSize = size;
                     }
                 }
                 else
                 {
-                    auto staging = stage(bytes);
+                    auto staging = allocateStaging(size);
+                    write(staging);
                     pending = mPendingUploads.size();
-                    mPendingUploads.push_back({ std::move(staging), mesh, {}, bytes.size(), index, {}, false });
+                    mPendingUploads.push_back({ std::move(staging), mesh, {}, size, index, {}, false });
                 }
             }
         }
@@ -2854,7 +2873,9 @@ namespace MWRender::Vulkan
                 VkDescriptorSet boundMask = VK_NULL_HANDLE;
                 VkBuffer boundVertices = VK_NULL_HANDLE;
                 VkBuffer boundIndices = VK_NULL_HANDLE;
+                VkIndexType boundIndexType = VK_INDEX_TYPE_UINT32;
                 VkDeviceSize boundVertexOffset = 0, boundIndexOffset = 0;
+                std::optional<std::array<float, 8>> boundFog;
                 if (!mPrepared.empty())
                 {
                     vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, mPipelineLayout, 2, 1,
@@ -2951,8 +2972,12 @@ namespace MWRender::Vulkan
                             VK_COMPARE_OP_GREATER_OR_EQUAL, VK_COMPARE_OP_GREATER };
                         mSetDepthCompare(frame.mCommands, compare[boundRaster / CompareStride]);
                     }
-                    vkCmdPushConstants(
-                        frame.mCommands, mPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, draw.mFog.data());
+                    if (!boundFog || *boundFog != draw.mFog)
+                    {
+                        vkCmdPushConstants(
+                            frame.mCommands, mPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, draw.mFog.data());
+                        boundFog = draw.mFog;
+                    }
                     if (boundTexture != draw.mTexture->mDescriptor || boundMask != draw.mMask->mDescriptor)
                     {
                         boundTexture = draw.mTexture->mDescriptor;
@@ -2962,21 +2987,32 @@ namespace MWRender::Vulkan
                             descriptors.data(), 0, nullptr);
                     }
                     const auto& vertices = draw.mMesh->mVertices;
-                    if (boundVertices != vertices.page().mBuffer || boundVertexOffset != vertices.offset())
+                    const auto vertexNumber = vertices.offset() / sizeof(Render::Vertex);
+                    const bool vertexFits = vertexNumber <= std::numeric_limits<std::int32_t>::max();
+                    const VkDeviceSize vertexBinding = vertexFits ? 0 : vertices.offset();
+                    const auto baseVertex = vertexFits ? static_cast<std::int32_t>(vertexNumber) : 0;
+                    if (boundVertices != vertices.page().mBuffer || boundVertexOffset != vertexBinding)
                     {
                         boundVertices = vertices.page().mBuffer;
-                        boundVertexOffset = vertices.offset();
+                        boundVertexOffset = vertexBinding;
                         vkCmdBindVertexBuffers(frame.mCommands, 0, 1, &boundVertices, &boundVertexOffset);
                     }
                     const auto& indices = draw.mMesh->mIndices;
-                    if (boundIndices != indices.page().mBuffer || boundIndexOffset != indices.offset())
+                    const auto indexNumber
+                        = indices.offset() / (draw.mMesh->mIndexType == VK_INDEX_TYPE_UINT16 ? 2 : 4);
+                    const bool indexFits = indexNumber <= std::numeric_limits<std::uint32_t>::max();
+                    const VkDeviceSize indexBinding = indexFits ? 0 : indices.offset();
+                    const auto firstIndex = indexFits ? static_cast<std::uint32_t>(indexNumber) : 0;
+                    if (boundIndices != indices.page().mBuffer || boundIndexOffset != indexBinding
+                        || boundIndexType != draw.mMesh->mIndexType)
                     {
                         boundIndices = indices.page().mBuffer;
-                        boundIndexOffset = indices.offset();
-                        vkCmdBindIndexBuffer(frame.mCommands, boundIndices, boundIndexOffset, VK_INDEX_TYPE_UINT32);
+                        boundIndexOffset = indexBinding;
+                        boundIndexType = draw.mMesh->mIndexType;
+                        vkCmdBindIndexBuffer(frame.mCommands, boundIndices, boundIndexOffset, boundIndexType);
                     }
-                    vkCmdDrawIndexed(frame.mCommands, draw.mIndexCount, static_cast<std::uint32_t>(end - first), 0, 0,
-                        static_cast<std::uint32_t>(first));
+                    vkCmdDrawIndexed(frame.mCommands, draw.mIndexCount, static_cast<std::uint32_t>(end - first),
+                        firstIndex, baseVertex, static_cast<std::uint32_t>(first));
                     first = end;
                 }
                 if (view.mEffect)
@@ -2989,7 +3025,7 @@ namespace MWRender::Vulkan
                         1, &view.mEffectDescriptor, 0, nullptr);
                     vkCmdBindVertexBuffers(frame.mCommands, 0, 1, &fullscreen.mVertices.page().mBuffer, &offset);
                     vkCmdBindIndexBuffer(frame.mCommands, fullscreen.mIndices.page().mBuffer,
-                        fullscreen.mIndices.offset(), VK_INDEX_TYPE_UINT32);
+                        fullscreen.mIndices.offset(), fullscreen.mIndexType);
                     vkCmdDrawIndexed(frame.mCommands, 3, 1, 0, 0, 0);
                 }
                 vkCmdEndRenderPass(frame.mCommands);

@@ -610,7 +610,7 @@ are migrated out while preserving the user's other effects.
 Native water previously blended only its Fresnel reflection, leaving transmission
 unchanged at every depth. It now snapshots depth on the GPU once before the first
 water draw in a view and reconstructs optical thickness along the viewing ray.
-Continuous Beer-Lambert absorption uses a 2500-unit attenuation distance instead
+Continuous Beer-Lambert absorption uses a 1250-unit attenuation distance instead
 of leaving the first 2500 units completely unattenuated. Ambient-lit body color
 increases with depth; shallow shores remain clear and reflection distortion fades
 near the shore. Straight-alpha
@@ -623,6 +623,21 @@ fixture sources cover presentation-sensitive SPIR-V and long-distance depth
 reconstruction. Shader builds, fixture execution and GPU performance/visual
 verification remain user-operated; these source changes do not establish a
 particular FPS or prove that all post-processing overhead has been removed.
+
+Wider-FOV work now resolves texture bindings, UV transforms, face conventions,
+and decoded light-set selection once per state graph per frame, alongside the
+existing material cache. Mesh transforms and per-view clipping stay per leaf;
+animated uniforms and textures are still refreshed each frame. No frustum or
+draw-distance reduction is applied. Meshes with at most 65536 vertices use
+16-bit GPU indices, packed directly into mapped staging ranges with four-byte
+copy padding. Larger meshes keep 32-bit indices; updates preserve the chosen
+width. Vertex slices align to the full vertex stride so page bindings can be
+reused through base-vertex/first-index offsets, and unchanged fog constants are
+not pushed again. Submission order, coplanar passes and transparency ordering
+are preserved. Unlit vertex paths omit unused view/normal work when normal
+output is disabled. Static frontend and shader syntax checks cover these
+changes; source regression fixtures cover index boundaries, padding and arena
+stride alignment. FOV-specific frame-time improvements require user playtesting.
 
 ## Backend architecture
 

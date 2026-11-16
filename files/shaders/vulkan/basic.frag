@@ -75,9 +75,11 @@ void main()
             thickness = max(bottomDistance - abs(viewPosition.z), 0.0) / max(abs(eyeDirection.z), 1e-6);
         }
         // Beer-Lambert absorption starts at the shore, rather than leaving the
-        // first 2500 world units completely transparent. 2500 is the e-folding
-        // visibility distance; log2(e) expresses the exponential as exp2.
-        float transmission = bottom < 1.0 ? exp2(-thickness * (1.44269504089 / 2500.0)) : 0.0;
+        // first 2500 world units completely transparent. The e-folding
+        // visibility distance is 1250 world units: deep water obscures the
+        // bottom while the zero-thickness shoreline stays clear.
+        const float absorptionDistance = 1250.0;
+        float transmission = bottom < 1.0 ? exp2(-thickness * (1.44269504089 / absorptionDistance)) : 0.0;
         if (dot(viewNormal, -viewPosition) < 0.0)
             transmission = 1.0; // Underwater fog is applied by the scene path.
         vec3 reflected = fog.color.rgb;

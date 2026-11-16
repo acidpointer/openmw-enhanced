@@ -11,6 +11,7 @@
 #include <components/render/cachesweep.hpp>
 #include <components/render/framecache.hpp>
 #include <components/render/math.hpp>
+#include <components/render/meshindices.hpp>
 #include <components/render/module.hpp>
 #include <components/render/presentation.hpp>
 #include <components/render/reserve.hpp>
@@ -193,7 +194,8 @@ namespace MWRender
                 mStorage->mHandle = mHandle;
                 mStorage->mVertices = vertices.size();
                 mStorage->mIndices = indices.size();
-                mStorage->mResidency.set(vertices.size_bytes() + indices.size_bytes());
+                mStorage->mResidency.set(vertices.size_bytes()
+                    + Render::meshIndexBytes(indices.size(), Render::narrowMeshIndices(vertices.size())));
                 mStorage->mResidency.touch();
                 mVertices = vertices.size();
                 mIndices = indices.size();
@@ -826,9 +828,78 @@ namespace MWRender
         {
             RenderAssets::OsgStateView mState;
             Render::Draw mDraw;
+            std::shared_ptr<const Render::LightSet> mLights;
+            unsigned mUVUnit = 0;
+            bool mLightsPrepared = false;
             std::uint64_t mDrawFrame = 0;
             std::uint64_t mFrame = 0;
         };
+
+        void prepareDraw(State& cached)
+        {
+            const auto& resolved = cached.mState;
+            auto& draw = cached.mDraw;
+            applyState(draw, resolved);
+            cached.mLightsPrepared = false;
+            cached.mLights.reset();
+            cached.mUVUnit = 0;
+            bool water = false;
+            if (const auto* surface = RenderAssets::nativeUniform(resolved, NativeUniform::WaterSurface))
+                surface->get(water);
+            draw.mWater = water;
+            if (water)
+                if (const auto unit = RenderAssets::textureUnit(resolved, "reflectionMap"))
+                {
+                    draw.mMaskTexture = texture(dynamic_cast<const osg::Texture2D*>(
+                                                    resolved.getTextureAttribute(*unit, osg::StateAttribute::TEXTURE)),
+                        false);
+                    draw.mReflection = static_cast<bool>(draw.mMaskTexture);
+                }
+            const auto diffuseUnit = RenderAssets::textureUnit(resolved, water ? "normalMap" : "diffuseMap");
+            if (diffuseUnit)
+            {
+                auto* image = dynamic_cast<const osg::Texture2D*>(
+                    resolved.getTextureAttribute(*diffuseUnit, osg::StateAttribute::TEXTURE));
+                draw.mTexture = texture(image, false);
+                cached.mUVUnit = *diffuseUnit;
+                draw.mUVTransform = RenderAssets::textureTransform(resolved, cached.mUVUnit);
+                if (water)
+                {
+                    const auto time = mViewer.getFrameStamp()->getSimulationTime();
+                    osg::Vec3f position;
+                    if (const auto* node = RenderAssets::nativeUniform(resolved, NativeUniform::NodePosition))
+                        node->get(position);
+                    // Water uses world-space wave coordinates, not the
+                    // simple-water texture coordinates on the huge grid.
+                    draw.mEmission = { position.x(), position.y(), static_cast<float>(std::fmod(time, 200.0)), 1 };
+                    draw.mBlend = Render::BlendMode::Alpha;
+                    draw.mDepthWrite = false;
+                    // The legacy shader outputs alpha=1 after its own
+                    // reflection/refraction mix. Our Fresnel blend weight
+                    // is not an authored alpha-test value.
+                    draw.mAlphaCompare = Render::AlphaCompare::Always;
+                }
+            }
+            if (const auto blendUnit
+                = water ? std::optional<unsigned>{} : RenderAssets::textureUnit(resolved, "blendMap"))
+            {
+                auto* mask = dynamic_cast<const osg::Texture2D*>(
+                    resolved.getTextureAttribute(*blendUnit, osg::StateAttribute::TEXTURE));
+                draw.mMaskTexture = texture(mask, false);
+                draw.mMaskUVTransform = RenderAssets::textureTransform(resolved, *blendUnit);
+            }
+            draw.mDoubleSided = !(resolved.getMode(GL_CULL_FACE) & osg::StateAttribute::ON);
+            // The cull result already contains the complete transform.
+            // Match its effective GL face convention; do not compensate
+            // for the determinant again on this live-scene bridge.
+            if (const auto* face
+                = dynamic_cast<const osg::FrontFace*>(resolved.getAttribute(osg::StateAttribute::FRONTFACE)))
+                draw.mFlipWinding = face->getMode() == osg::FrontFace::CLOCKWISE;
+            if (const auto* cull
+                = dynamic_cast<const osg::CullFace*>(resolved.getAttribute(osg::StateAttribute::CULLFACE));
+                cull && cull->getMode() == osg::CullFace::FRONT)
+                draw.mFlipWinding = !draw.mFlipWinding;
+        }
 
         struct MeshLookupHash
         {
@@ -1018,60 +1089,16 @@ namespace MWRender
                 if (cached.mDrawFrame != mSerial)
                 {
                     cached.mDraw = {};
-                    applyState(cached.mDraw, resolved);
+                    prepareDraw(cached);
                     cached.mDrawFrame = mSerial;
                 }
                 Render::Draw draw = cached.mDraw;
-                unsigned uvUnit = 0;
-                bool water = false;
-                if (const auto* surface = RenderAssets::nativeUniform(resolved, NativeUniform::WaterSurface))
-                    surface->get(water);
-                draw.mWater = water;
-                if (water)
-                    if (const auto unit = RenderAssets::textureUnit(resolved, "reflectionMap"))
-                    {
-                        draw.mMaskTexture = texture(dynamic_cast<const osg::Texture2D*>(resolved.getTextureAttribute(
-                                                        *unit, osg::StateAttribute::TEXTURE)),
-                            false);
-                        draw.mReflection = static_cast<bool>(draw.mMaskTexture);
-                    }
+                const unsigned uvUnit = cached.mUVUnit;
+                const bool water = draw.mWater;
                 if (mClipPlane && (resolved.getMode(GL_CLIP_PLANE0) & osg::StateAttribute::ON))
                 {
                     draw.mClipPlane = *mClipPlane;
                     draw.mClip = true;
-                }
-                const auto diffuseUnit = RenderAssets::textureUnit(resolved, water ? "normalMap" : "diffuseMap");
-                if (diffuseUnit)
-                {
-                    auto* image = dynamic_cast<const osg::Texture2D*>(
-                        resolved.getTextureAttribute(*diffuseUnit, osg::StateAttribute::TEXTURE));
-                    draw.mTexture = texture(image, false);
-                    uvUnit = *diffuseUnit;
-                    draw.mUVTransform = RenderAssets::textureTransform(resolved, uvUnit);
-                    if (water)
-                    {
-                        const auto time = mViewer.getFrameStamp()->getSimulationTime();
-                        osg::Vec3f position;
-                        if (const auto* node = RenderAssets::nativeUniform(resolved, NativeUniform::NodePosition))
-                            node->get(position);
-                        // Water uses world-space wave coordinates, not the
-                        // simple-water texture coordinates on the huge grid.
-                        draw.mEmission = { position.x(), position.y(), static_cast<float>(std::fmod(time, 200.0)), 1 };
-                        draw.mBlend = Render::BlendMode::Alpha;
-                        draw.mDepthWrite = false;
-                        // The legacy shader outputs alpha=1 after its own
-                        // reflection/refraction mix. Our Fresnel blend weight
-                        // is not an authored alpha-test value.
-                        draw.mAlphaCompare = Render::AlphaCompare::Always;
-                    }
-                }
-                if (const auto blendUnit
-                    = water ? std::optional<unsigned>{} : RenderAssets::textureUnit(resolved, "blendMap"))
-                {
-                    auto* mask = dynamic_cast<const osg::Texture2D*>(
-                        resolved.getTextureAttribute(*blendUnit, osg::StateAttribute::TEXTURE));
-                    draw.mMaskTexture = texture(mask, false);
-                    draw.mMaskUVTransform = RenderAssets::textureTransform(resolved, *blendUnit);
                 }
                 if (particleSystem)
                     particles(*particleSystem, leaf, draw);
@@ -1079,17 +1106,6 @@ namespace MWRender
                     draw.mMesh = mesh(*geometry, uvUnit);
                 if (!draw.mMesh)
                     return;
-                draw.mDoubleSided = !(resolved.getMode(GL_CULL_FACE) & osg::StateAttribute::ON);
-                // The cull result already contains the complete transform.
-                // Match its effective GL face convention; do not compensate
-                // for the determinant again on this live-scene bridge.
-                if (const auto* face
-                    = dynamic_cast<const osg::FrontFace*>(resolved.getAttribute(osg::StateAttribute::FRONTFACE)))
-                    draw.mFlipWinding = face->getMode() == osg::FrontFace::CLOCKWISE;
-                if (const auto* cull
-                    = dynamic_cast<const osg::CullFace*>(resolved.getAttribute(osg::StateAttribute::CULLFACE));
-                    cull && cull->getMode() == osg::CullFace::FRONT)
-                    draw.mFlipWinding = !draw.mFlipWinding;
                 // OSG uses row vectors. Transposing its product is exactly the
                 // column-major matrix consumed by the native vertex pipeline.
                 const auto& transforms = transform(leaf, resolved);
@@ -1113,7 +1129,12 @@ namespace MWRender
                 {
                     if (geometry && geometry->getNormalArray() && !sky && !water)
                     {
-                        draw.mLights = lights(resolved);
+                        if (!cached.mLightsPrepared)
+                        {
+                            cached.mLights = lights(resolved);
+                            cached.mLightsPrepared = true;
+                        }
+                        draw.mLights = cached.mLights;
                         draw.mLighting
                             = RenderAssets::nativeUniform(resolved, NativeUniform::SunDiffuse) || draw.mLights;
                     }

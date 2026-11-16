@@ -3,6 +3,7 @@
 // Surface, water, sky, distortion, overlay, solid surface. Fixed when creating a pipeline,
 // allowing the driver to eliminate unrelated work and varyings.
 layout(constant_id = 0) const uint materialShader = 0u;
+layout(constant_id = 1) const bool writeNormals = true;
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec2 inUV;
@@ -117,9 +118,16 @@ void main()
         clipDistance = 1.0;
         return;
     }
-    viewPosition = (data.viewFromModel * vec4(inPosition, 1.0)).xyz;
-    viewNormal = safeNormal(mat3(data.normalFromModel) * inNormal);
-    clipDistance = (data.lighting.z & 4u) != 0u ? dot(vec4(viewPosition, 1.0), data.clipPlane) : 1.0;
+    bool clipping = (data.lighting.z & 4u) != 0u;
+    bool litSurface = (materialShader == 0u || materialShader == 5u) && (data.lighting.z & 1u) != 0u;
+    // Window and reflection passes do not write normal attachments. Unlit
+    // surfaces in those passes need neither a view transform nor normalized
+    // normals; fog already uses reciprocal clip W in the fragment shader.
+    viewPosition = litSurface || clipping || materialShader == 1u
+        ? (data.viewFromModel * vec4(inPosition, 1.0)).xyz : vec3(0.0);
+    viewNormal = litSurface || materialShader == 1u || (writeNormals && materialShader != 2u)
+        ? safeNormal(mat3(data.normalFromModel) * inNormal) : vec3(0.0, 0.0, 1.0);
+    clipDistance = clipping ? dot(vec4(viewPosition, 1.0), data.clipPlane) : 1.0;
     if (materialShader == 1u || materialShader == 2u || (data.lighting.z & 1u) == 0u)
         return;
 

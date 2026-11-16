@@ -176,4 +176,24 @@ for name in ['objects.frag', 'terrain.frag', 'groundcover.frag', 'water.frag', '
                         raise SystemExit(r.stdout + r.stderr)
                     count += 1
 print(count, 'scene fragment variants pass static validation, including normals output and gated terrain batches.')
+count = 0
+for stage in ('vert', 'frag'):
+    source = (base / 'vulkan' / ('basic.' + stage)).read_text()
+    # Syntax checks only: adapt Vulkan-only interface qualifiers to desktop
+    # GLSL without emitting SPIR-V or running a renderer. Keep shader bodies.
+    source = re.sub(r'layout\(constant_id\s*=\s*\d+\)\s*', '', source)
+    source = re.sub(r'\bset\s*=\s*\d+\s*,\s*', '', source)
+    source = source.replace('layout(push_constant)', 'layout(std140)')
+    source = source.replace('gl_InstanceIndex', 'gl_InstanceID')
+    for material in range(6):
+        for normals in (False, True):
+            text = source.replace('const uint materialShader = 0u;', f'const uint materialShader = {material}u;')
+            text = text.replace('const bool writeNormals = true;', f'const bool writeNormals = {str(normals).lower()};')
+            file = work / f'vulkan-m{material}-n{int(normals)}.{stage}'
+            file.write_text(text)
+            r = subprocess.run(['glslangValidator', '-S', stage, str(file)], capture_output=True, text=True)
+            if r.returncode:
+                raise SystemExit(r.stdout + r.stderr)
+            count += 1
+print(count, 'native Vulkan shader bodies pass static GLSL validation, including both normals policies.')
 print('Static-check artifacts:', work)

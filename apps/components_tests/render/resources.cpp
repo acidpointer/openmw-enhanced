@@ -1,6 +1,7 @@
 #include <components/render/allocationranges.hpp>
 #include <components/render/bufferarena.hpp>
 #include <components/render/framecache.hpp>
+#include <components/render/meshindices.hpp>
 #include <components/render/pipelinecache.hpp>
 #include <components/render/raster.hpp>
 #include <components/render/residency.hpp>
@@ -8,12 +9,54 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <cstring>
 #include <limits>
 #include <set>
+#include <span>
 #include <type_traits>
 
 namespace
 {
+    TEST(RenderMeshIndices, WidthUsesFullVertexCapacityAndCopiesAreFourByteAligned)
+    {
+        EXPECT_TRUE(Render::narrowMeshIndices(65536));
+        EXPECT_FALSE(Render::narrowMeshIndices(65537));
+        EXPECT_EQ(Render::meshIndexBytes(3, true), 8u);
+        EXPECT_EQ(Render::meshIndexBytes(6, true), 12u);
+        EXPECT_EQ(Render::meshIndexBytes(3, false), 12u);
+        EXPECT_THROW(Render::meshIndexBytes(std::numeric_limits<std::size_t>::max(), true), std::length_error);
+    }
+
+    TEST(RenderMeshIndices, WritesUnalignedStagingAndInitializesOddIndexPadding)
+    {
+        const std::array<std::uint32_t, 3> indices{ 0, 65535, 42 };
+        std::array<std::byte, 10> storage;
+        storage.fill(std::byte{ 0xcd });
+        const auto staging = std::span(storage).subspan(1, 8);
+        Render::writeMeshIndices(staging, indices, true);
+        for (std::size_t i = 0; i < indices.size(); ++i)
+        {
+            std::uint16_t value;
+            std::memcpy(&value, staging.data() + i * sizeof(value), sizeof(value));
+            EXPECT_EQ(value, indices[i]);
+        }
+        EXPECT_EQ(storage[0], std::byte{ 0xcd });
+        EXPECT_EQ(storage[9], std::byte{ 0xcd });
+        EXPECT_EQ(staging[6], std::byte{});
+        EXPECT_EQ(staging[7], std::byte{});
+    }
+
+    TEST(RenderMeshIndices, WideIndicesStayLosslessAndInvalidNarrowWritesAreRejected)
+    {
+        const std::array<std::uint32_t, 3> indices{ 0, 65536, 70000 };
+        std::array<std::byte, 12> staging{};
+        Render::writeMeshIndices(staging, indices, false);
+        EXPECT_EQ(std::memcmp(staging.data(), indices.data(), indices.size() * sizeof(indices[0])), 0);
+        EXPECT_THROW(Render::writeMeshIndices(staging, indices, true), std::invalid_argument);
+        EXPECT_THROW(Render::writeMeshIndices(std::span(staging).first(4), indices, false), std::invalid_argument);
+    }
+
     struct FrameHash
     {
         std::size_t operator()(int) const { return 0; }
@@ -63,6 +106,24 @@ namespace
         EXPECT_EQ(indices.offset(), 16u);
         EXPECT_EQ(nextMesh.offset(), 32u);
         EXPECT_EQ(indices.size(), 12u);
+    }
+
+    TEST(RenderBufferArena, VertexStrideAlignmentSurvivesIndexPaddingAndRangeReuse)
+    {
+        Render::BufferArena<int> arena(384);
+        const auto create = [](std::uint64_t) { return std::make_shared<int>(0); };
+        auto firstVertices = arena.allocate(3 * 48, 48, create);
+        auto firstIndices = arena.allocate(Render::meshIndexBytes(3, true), 4, create);
+        auto nextVertices = arena.allocate(3 * 48, 48, create);
+        EXPECT_EQ(&firstVertices.page(), &nextVertices.page());
+        EXPECT_EQ(nextVertices.offset(), 192u);
+        EXPECT_EQ(nextVertices.offset() % 48, 0u);
+        firstVertices = {};
+        auto replacement = arena.allocate(2 * 48, 48, create);
+        EXPECT_EQ(&replacement.page(), &nextVertices.page());
+        EXPECT_EQ(replacement.offset(), 0u);
+        EXPECT_EQ(replacement.offset() % 48, 0u);
+        EXPECT_NE(replacement.offset(), firstIndices.offset());
     }
 
     TEST(RenderBufferArena, SubmittedOwnerKeepsItsRangeUntilCompletion)
