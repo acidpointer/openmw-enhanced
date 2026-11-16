@@ -7,6 +7,52 @@
 
 namespace
 {
+    // Evaluate the upload policy used by the real Vulkan path: odd-sized
+    // levels cannot overlap and every absolute offset must align to a texel.
+    constexpr bool packedMipOffsets()
+    {
+        using F = Render::TextureFormat;
+        std::size_t offset = 0;
+        for (const auto width : { 5u, 2u, 1u })
+        {
+            offset = Render::textureUploadOffset(offset, F::RGB8);
+            if (offset % 3 || offset % 4)
+                return false;
+            offset += Render::textureLevelSize(F::RGB8, width, width);
+        }
+        if (offset != 99 || Render::textureUploadOffset(15, F::R8) != 16)
+            return false;
+        for (const auto format : { F::BC1RGB, F::BC1RGBA, F::BC2, F::BC3, F::BC4, F::BC5 })
+            if (Render::textureUploadOffset(17, format) % Render::textureCopyAlignment(format))
+                return false;
+        return true;
+    }
+    static_assert(packedMipOffsets());
+    static_assert(Render::textureLevelSize(Render::TextureFormat::LuminanceAlpha8, 5, 3) == 30);
+    static_assert(!Render::compressedTexture(Render::TextureFormat::BGRA8));
+    static_assert(Render::textureSwizzle(Render::TextureFormat::LuminanceAlpha8)
+        == std::array{ Render::TextureComponent::R, Render::TextureComponent::R, Render::TextureComponent::R,
+            Render::TextureComponent::G });
+    static_assert(Render::textureSwizzle(Render::TextureFormat::Alpha8)
+        == std::array{ Render::TextureComponent::One, Render::TextureComponent::One, Render::TextureComponent::One,
+            Render::TextureComponent::R });
+
+    TEST(RenderTexture, RejectsUploadOffsetOverflow)
+    {
+        EXPECT_THROW(Render::textureUploadOffset(std::numeric_limits<std::size_t>::max(), Render::TextureFormat::RGB8),
+            std::length_error);
+    }
+
+    TEST(RenderTexture, NativeChannelsAcceptMipGenerationAndExactByteCounts)
+    {
+        const std::array<std::byte, 30> bytes{};
+        const Render::TextureLevel level{ 5, 3, bytes };
+        const Render::TextureData data{ Render::TextureFormat::LuminanceAlpha8, false, true, { &level, 1 } };
+        EXPECT_NO_THROW(Render::validateTexture(data));
+        const Render::TextureLevel shortLevel{ 5, 3, std::span(bytes).first(29) };
+        EXPECT_THROW(Render::validateTexture({ data.mFormat, false, true, { &shortLevel, 1 } }), std::invalid_argument);
+    }
+
     TEST(RenderTexture, CompressedMipSizesRoundUpToWholeBlocks)
     {
         EXPECT_EQ(Render::textureLevelSize(Render::TextureFormat::BC1RGB, 1, 1), 8u);

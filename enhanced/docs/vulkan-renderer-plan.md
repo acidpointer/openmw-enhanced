@@ -77,7 +77,13 @@ referenced through preparation, worker errors return to the existing owner-threa
 diagnostic path, and no Vulkan operations run on workers. Draw ranges map skipped
 requests onto the first surviving first-person draw, preserving depth clears,
 clipping, projection selection, distortion output and scene ordering. The existing
-texture-conversion and GPU-resource paths remain on the rendering thread.
+GPU-resource path remains on the rendering thread. Remaining builtin immutable
+byte-image conversions use the same bounded pool after the mesh batch. Per-frame
+image plans deduplicate shared sources across materials, sampler variants and
+views; converted pixels are released once all required mip variants are uploaded.
+Parallel image results have a 64 MiB limit; oversized or overflow work uses the
+existing on-demand owner path, avoiding transient mod-pack expansion. Streams,
+dynamic and custom image subclasses keep the owner-thread path.
 Compiler-evaluated cases cover skipped/nested depth-clear ranges; worker reuse,
 exception draining and custom-input fallback have regression fixture sources.
 Builds, concurrency tests and visual/FPS verification remain user-operated.
@@ -88,7 +94,28 @@ or filtering combination. A full mip chain also serves base-level-only sampler
 views. Source revisions invalidate the image registry, while already recorded
 views retain the old allocation through their GPU frame. Pending uploads remain
 valid when a source handle is released while sampler views survive. The private
-backend ABI is 14; engine and renderer module must be rebuilt together.
+backend ABI is 15; engine and renderer module must be rebuilt together.
+
+Tightly packed byte textures retain their original RGBA, BGRA, RGB, BGR, red,
+red/green, luminance, luminance/alpha or alpha storage through preparation. Vulkan
+image-view swizzles reproduce legacy channel semantics without expanding pixels
+on the CPU. Device format, filtering, image-size and mip-generation capabilities
+are cached at initialization; unsupported combinations retain RGBA conversion.
+Luminance/alpha sRGB data always converts so that alpha remains linear. Each mip
+upload is aligned independently (including odd single-channel and three-byte RGB
+levels), while authored mip offsets and live-image row orientation stay intact.
+Sampler sharing checks the actual storage format before choosing a compatible
+image generation. GPU staging still performs the required transfer copy; borrowed
+CPU spans eliminate the separate conversion/repacking allocation.
+
+The latest available log contained a 300.33 ms preparation frame during loading:
+243.31 ms was texture work and 45.09 ms was mesh work. It did not capture warm
+20–30 ms drops under the previous logging threshold. Slow-frame logging now
+captures renderer frames above 20 ms or preparation above 16 ms, still at most
+once every five seconds, with separate texture CPU and creation/staging timings.
+Importer cache cleanup now examines at most 16 entries per saturated insertion
+instead of scanning the entire 4096-entry table under its shared mutex.
+No runtime improvement is claimed from static verification alone.
 
 Mesh and image residency budgets include the union of assets seen over the last
 256 prepared frames, with the existing device ceiling and warm-cache allowance.

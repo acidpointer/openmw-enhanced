@@ -1,5 +1,6 @@
 #include "osgimporter.hpp"
 
+#include <components/render/cachesweep.hpp>
 #include <components/render/reserve.hpp>
 
 #include <components/nifosg/autotransform.hpp>
@@ -499,6 +500,34 @@ namespace RenderAssets
             }
         }
 
+        std::optional<Render::TextureFormat> pixelLayout(GLenum format)
+        {
+            using F = Render::TextureFormat;
+            switch (format)
+            {
+                case GL_RGBA:
+                    return F::RGBA8;
+                case GL_BGRA:
+                    return F::BGRA8;
+                case GL_RGB:
+                    return F::RGB8;
+                case GL_BGR:
+                    return F::BGR8;
+                case GL_RED:
+                    return F::R8;
+                case GL_RG:
+                    return F::RG8;
+                case GL_LUMINANCE:
+                    return F::Luminance8;
+                case GL_LUMINANCE_ALPHA:
+                    return F::LuminanceAlpha8;
+                case GL_ALPHA:
+                    return F::Alpha8;
+                default:
+                    return {};
+            }
+        }
+
         bool srgb(GLint format)
         {
             switch (format)
@@ -537,6 +566,8 @@ namespace RenderAssets
                     case GL_RGBA:
                     case GL_BGR:
                     case GL_BGRA:
+                    case GL_RED:
+                    case GL_RG:
                     case GL_LUMINANCE:
                     case GL_LUMINANCE_ALPHA:
                     case GL_ALPHA:
@@ -622,6 +653,15 @@ namespace RenderAssets
                                             g = row[x * 4 + 1];
                                             b = row[x * 4];
                                             a = row[x * 4 + 3];
+                                            break;
+                                        case GL_RED:
+                                            r = row[x];
+                                            g = b = 0;
+                                            break;
+                                        case GL_RG:
+                                            r = row[x * 2];
+                                            g = row[x * 2 + 1];
+                                            b = 0;
                                             break;
                                         case GL_LUMINANCE:
                                             r = g = b = row[x];
@@ -762,15 +802,24 @@ namespace RenderAssets
             if (auto winner = existing())
                 return winner;
             if (images.size() >= 4096)
-                std::erase_if(images,
-                    [](const auto& entry) { return !entry.second.mSource.valid() || entry.second.mValue.expired(); });
+            {
+                // A full, live mod cache must not serialize every worker behind
+                // a whole-table scan. Advance a bounded cursor under the lock.
+                unsigned visited = 0;
+                mImageSweeps[preserveRows ? 1 : 0].sweep(
+                    images,
+                    [](const auto& entry) { return !entry.second.mSource.valid() || entry.second.mValue.expired(); },
+                    [&] { return visited++ >= 16; });
+            }
             if (images.size() < 4096 || images.contains(&source))
                 images[&source] = { &source, source.getModifiedCount(), value };
             return value;
         }
         std::uint32_t mMask;
         std::mutex mMutex;
-        std::array<std::unordered_map<const osg::Image*, ImageEntry>, 2> mImages;
+        using Images = std::unordered_map<const osg::Image*, ImageEntry>;
+        std::array<Images, 2> mImages;
+        std::array<Render::CacheSweep<Images>, 2> mImageSweeps;
     };
 
     OsgImporter::OsgImporter(std::uint32_t mask)
@@ -783,6 +832,15 @@ namespace RenderAssets
         return mImpl->importImage(source, preserveRows);
     }
 
+    bool OsgImporter::canImportImageInParallel(const osg::Image& source)
+    {
+        // Only the builtin immutable byte image: stream/custom const accessors
+        // may update private caches or pixels. The owner retains those paths.
+        return typeid(source) == typeid(osg::Image) && source.getDataVariance() != osg::Object::DYNAMIC
+            && source.getDataType() == GL_UNSIGNED_BYTE && !source.isCompressed()
+            && pixelLayout(source.getPixelFormat()).has_value();
+    }
+
     std::optional<Render::TextureData> OsgImporter::borrowTexture(
         const osg::Image& source, std::vector<Render::TextureLevel>& levels, bool mipmaps)
     {
@@ -790,21 +848,23 @@ namespace RenderAssets
         if (source.s() <= 0 || source.t() <= 0 || source.r() != 1 || !source.data())
             throw std::invalid_argument("Live texture must contain a nonempty 2D image");
         const auto compressed = compression(source.getPixelFormat());
-        if (!compressed
-            && (source.isCompressed() || source.getPixelFormat() != GL_RGBA || source.getDataType() != GL_UNSIGNED_BYTE
-                || !source.isDataContiguous()))
+        const auto layout = compressed ? compressed : pixelLayout(source.getPixelFormat());
+        if (!layout
+            || (!compressed
+                && (source.isCompressed() || source.getDataType() != GL_UNSIGNED_BYTE || !source.isDataContiguous())))
             return {};
         auto width = static_cast<std::uint32_t>(source.s());
         auto height = static_cast<std::uint32_t>(source.t());
-        const auto format = compressed.value_or(Render::TextureFormat::RGBA8);
+        const auto format = *layout;
         const auto count = mipmaps ? source.getNumMipmapLevels() : 1u;
         const auto available = source.getTotalSizeInBytesIncludingMipmaps();
         for (unsigned level = 0; level < count; ++level)
         {
             // Vulkan's tightly packed copies cannot consume padded source rows.
             if (!compressed
-                && osg::Image::computeRowWidthInBytes(width, GL_RGBA, GL_UNSIGNED_BYTE, source.getPacking())
-                    != std::uint64_t(width) * 4)
+                && osg::Image::computeRowWidthInBytes(
+                       width, source.getPixelFormat(), GL_UNSIGNED_BYTE, source.getPacking())
+                    != Render::textureLevelSize(format, width, 1))
             {
                 levels.clear();
                 return {};
@@ -1203,5 +1263,6 @@ namespace RenderAssets
         std::lock_guard lock(mImpl->mMutex);
         for (auto& images : mImpl->mImages)
             images.clear();
+        mImpl->mImageSweeps = {};
     }
 }

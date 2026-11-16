@@ -18,7 +18,7 @@ namespace Render
     class FrameCache
     {
     public:
-        void beginFrame()
+        constexpr void beginFrame()
         {
             mSize = 0;
             if (++mEpoch == 0)
@@ -28,7 +28,7 @@ namespace Render
                 mEpoch = 1;
             }
         }
-        std::pair<Value&, bool> getOrCreate(const Key& key)
+        constexpr std::pair<Value&, bool> getOrCreate(const Key& key)
         {
             if (mEntries.empty())
                 grow();
@@ -53,8 +53,21 @@ namespace Render
                 return { entry.mValue, true };
             }
         }
-        std::size_t size() const { return mSize; }
-        std::size_t capacity() const { return mEntries.size() / 2; }
+        constexpr const Value* find(const Key& key) const
+        {
+            if (mEntries.empty())
+                return nullptr;
+            auto slot = mHash(key) & (mEntries.size() - 1);
+            while (mEntries[slot].mEpoch == mEpoch)
+            {
+                if (mEntries[slot].mKey == key)
+                    return &mEntries[slot].mValue;
+                slot = (slot + 1) & (mEntries.size() - 1);
+            }
+            return nullptr;
+        }
+        constexpr std::size_t size() const { return mSize; }
+        constexpr std::size_t capacity() const { return mEntries.size() / 2; }
 
     private:
         struct Entry
@@ -63,7 +76,7 @@ namespace Render
             Key mKey{};
             Value mValue{};
         };
-        void grow()
+        constexpr void grow()
         {
             if (mEntries.size() > mEntries.max_size() / 2)
                 throw std::length_error("Frame cache exceeds host capacity");

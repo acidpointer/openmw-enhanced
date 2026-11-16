@@ -53,10 +53,11 @@ namespace RenderAssets
         // Live OSG textures upload rows verbatim regardless of origin metadata;
         // fonts, video and generated UI images depend on that convention.
         std::shared_ptr<const Render::ImageAsset> importImage(const osg::Image& image, bool preserveRows = false);
-        // Borrow already uploadable, tightly packed RGBA8/BC mip data. The
+        // Borrow already uploadable, tightly packed byte/BC mip data. The
         // image and caller-owned level metadata must outlive the synchronous
         // backend upload call. Rows are preserved for live OSG images.
         // Other layouts return no view and use the normal conversion path.
+        static bool canImportImageInParallel(const osg::Image& image);
         static std::optional<Render::TextureData> borrowTexture(
             const osg::Image& image, std::vector<Render::TextureLevel>& levels, bool mipmaps = true);
         // Import only changed geometry from a CPU cull result. GPU names and

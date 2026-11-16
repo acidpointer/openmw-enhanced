@@ -36,12 +36,30 @@ namespace MWRender::Vulkan
     {
         constexpr std::size_t FramesInFlight = 2;
 
-        VkFormat textureFormat(Render::TextureFormat format, bool srgb)
+        constexpr VkFormat textureFormat(Render::TextureFormat format, bool srgb)
         {
             switch (format)
             {
                 case Render::TextureFormat::RGBA8:
                     return srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+                case Render::TextureFormat::BGRA8:
+                    return srgb ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM;
+                case Render::TextureFormat::RGB8:
+                    return srgb ? VK_FORMAT_R8G8B8_SRGB : VK_FORMAT_R8G8B8_UNORM;
+                case Render::TextureFormat::BGR8:
+                    return srgb ? VK_FORMAT_B8G8R8_SRGB : VK_FORMAT_B8G8R8_UNORM;
+                case Render::TextureFormat::R8:
+                case Render::TextureFormat::Luminance8:
+                    return srgb ? VK_FORMAT_R8_SRGB : VK_FORMAT_R8_UNORM;
+                case Render::TextureFormat::RG8:
+                    return srgb ? VK_FORMAT_R8G8_SRGB : VK_FORMAT_R8G8_UNORM;
+                case Render::TextureFormat::LuminanceAlpha8:
+                    // Alpha must stay linear; decoding both channels as sRGB is incorrect.
+                    return srgb ? VK_FORMAT_UNDEFINED : VK_FORMAT_R8G8_UNORM;
+                case Render::TextureFormat::Alpha8:
+                    return VK_FORMAT_R8_UNORM;
+                case Render::TextureFormat::Count:
+                    return VK_FORMAT_UNDEFINED;
                 case Render::TextureFormat::BC1RGB:
                     return srgb ? VK_FORMAT_BC1_RGB_SRGB_BLOCK : VK_FORMAT_BC1_RGB_UNORM_BLOCK;
                 case Render::TextureFormat::BC1RGBA:
@@ -57,6 +75,19 @@ namespace MWRender::Vulkan
             }
             return VK_FORMAT_UNDEFINED;
         }
+
+        constexpr VkComponentMapping textureComponents(Render::TextureFormat format)
+        {
+            constexpr std::array components{ VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_ZERO,
+                VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B,
+                VK_COMPONENT_SWIZZLE_A };
+            const auto channels = Render::textureSwizzle(format);
+            return { components[static_cast<unsigned>(channels[0])], components[static_cast<unsigned>(channels[1])],
+                components[static_cast<unsigned>(channels[2])], components[static_cast<unsigned>(channels[3])] };
+        }
+        static_assert(textureFormat(Render::TextureFormat::LuminanceAlpha8, true) == VK_FORMAT_UNDEFINED);
+        static_assert(textureFormat(Render::TextureFormat::Alpha8, true) == VK_FORMAT_R8_UNORM);
+        static_assert(textureComponents(Render::TextureFormat::Alpha8).a == VK_COMPONENT_SWIZZLE_R);
 
         VkSamplerAddressMode textureWrap(Render::TextureWrap wrap)
         {
@@ -75,7 +106,7 @@ namespace MWRender::Vulkan
         }
 
         constexpr std::size_t TargetFormats = static_cast<std::size_t>(Render::TargetFormat::Count);
-        constexpr std::size_t TextureFormats = static_cast<std::size_t>(Render::TextureFormat::BC5) + 1;
+        constexpr std::size_t TextureFormats = static_cast<std::size_t>(Render::TextureFormat::Count);
         constexpr std::array TargetVkFormats{ VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT,
             VK_FORMAT_R8_UNORM, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8B8A8_UNORM,
@@ -422,6 +453,7 @@ namespace MWRender::Vulkan
             Render::TextureHandle createTextureSamplerView(
                 Render::TextureHandle texture, const Render::SamplerState& state) override;
             bool supportsTextureFormat(Render::TextureFormat format, bool srgb) const override;
+            bool supportsTexture(const Render::TextureData& data, const Render::SamplerState& state) const override;
             Render::TextureHandle createTexture(
                 const Render::TextureData& data, const Render::SamplerState& sampler = {}) override;
             Render::TextureHandle createRenderTarget(std::uint32_t width, std::uint32_t height,
@@ -467,7 +499,7 @@ namespace MWRender::Vulkan
             std::unique_ptr<Buffer> createBuffer(VkDeviceSize bytes, VkBufferUsageFlags usage, MemoryKind kind);
             std::shared_ptr<Image> createImage(std::uint32_t width, std::uint32_t height, VkFormat format,
                 VkImageUsageFlags usage, VkImageAspectFlags aspect, std::uint32_t mipLevels = 1,
-                std::uint32_t depth = 1);
+                std::uint32_t depth = 1, VkComponentMapping components = {});
             Staging allocateStaging(VkDeviceSize size, VkDeviceSize alignment = 16);
             Staging stage(std::span<const std::byte> bytes);
             std::shared_ptr<GeometryBuffer> allocateGeometry(VkDeviceSize size, VkDeviceSize alignment);
@@ -482,6 +514,7 @@ namespace MWRender::Vulkan
             VkPhysicalDeviceProperties mProperties{};
             VkPhysicalDeviceFeatures mFeatures{};
             std::array<std::array<VkFormatProperties, 2>, TextureFormats> mTextureProperties{};
+            std::array<std::array<std::array<VkImageFormatProperties, 2>, 2>, TextureFormats> mTextureLimits{};
             std::array<VkFormatProperties, TargetFormats> mTargetProperties{};
             VkDevice mDevice = VK_NULL_HANDLE;
             bool mDynamicRaster = false;
@@ -853,8 +886,21 @@ namespace MWRender::Vulkan
                 for (unsigned srgb = 0; srgb < 2; ++srgb)
                 {
                     const auto format = textureFormat(static_cast<Render::TextureFormat>(i), srgb != 0);
-                    if (format != VK_FORMAT_UNDEFINED)
-                        vkGetPhysicalDeviceFormatProperties(mPhysicalDevice, format, &mTextureProperties[i][srgb]);
+                    if (format == VK_FORMAT_UNDEFINED)
+                        continue;
+                    vkGetPhysicalDeviceFormatProperties(mPhysicalDevice, format, &mTextureProperties[i][srgb]);
+                    for (unsigned generate = 0; generate < 2; ++generate)
+                    {
+                        const auto status = vkGetPhysicalDeviceImageFormatProperties(mPhysicalDevice, format,
+                            VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                                | (generate ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0),
+                            0, &mTextureLimits[i][srgb][generate]);
+                        if (status == VK_ERROR_FORMAT_NOT_SUPPORTED)
+                            mTextureLimits[i][srgb][generate] = {};
+                        else
+                            check(status, "Query Vulkan texture limits");
+                    }
                 }
             mDepthFormat = VK_FORMAT_UNDEFINED;
             for (const auto candidate : { VK_FORMAT_D32_SFLOAT, VK_FORMAT_D16_UNORM, VK_FORMAT_D24_UNORM_S8_UINT })
@@ -1120,7 +1166,8 @@ namespace MWRender::Vulkan
         }
 
         std::shared_ptr<Image> VulkanBackend::createImage(std::uint32_t width, std::uint32_t height, VkFormat format,
-            VkImageUsageFlags usage, VkImageAspectFlags aspect, std::uint32_t mipLevels, std::uint32_t depth)
+            VkImageUsageFlags usage, VkImageAspectFlags aspect, std::uint32_t mipLevels, std::uint32_t depth,
+            VkComponentMapping components)
         {
             auto image = std::make_shared<Image>(mDevice);
             image->mWidth = width;
@@ -1156,6 +1203,7 @@ namespace MWRender::Vulkan
             view.image = image->mImage;
             view.viewType = depth == 1 ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_3D;
             view.format = format;
+            view.components = components;
             view.subresourceRange = { aspect, 0, mipLevels, 0, 1 };
             check(vkCreateImageView(mDevice, &view, nullptr, &image->mView), "Create Vulkan image view");
             return image;
@@ -1163,8 +1211,7 @@ namespace MWRender::Vulkan
 
         Staging VulkanBackend::allocateStaging(VkDeviceSize size, VkDeviceSize alignment)
         {
-            // Four-byte buffer copies and all supported compressed texture
-            // blocks are aligned by a shared sixteen-byte slice boundary.
+            // Callers may also request non-power-of-two texel alignment (RGB).
             return mStagingPages.allocate(size, alignment, [&](VkDeviceSize capacity) -> std::shared_ptr<Buffer> {
                 return createBuffer(capacity, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                     MemoryKind::Upload);
@@ -1341,7 +1388,7 @@ namespace MWRender::Vulkan
 
         bool VulkanBackend::supportsTextureFormat(Render::TextureFormat format, bool srgb) const
         {
-            if (format != Render::TextureFormat::RGBA8 && !mFeatures.textureCompressionBC)
+            if (Render::compressedTexture(format) && !mFeatures.textureCompressionBC)
                 return false;
             const auto slot = static_cast<std::size_t>(format);
             if (slot >= TextureFormats)
@@ -1351,35 +1398,45 @@ namespace MWRender::Vulkan
             return (properties.optimalTilingFeatures & required) == required;
         }
 
+        bool VulkanBackend::supportsTexture(const Render::TextureData& data, const Render::SamplerState& state) const
+        {
+            if (data.mLevels.empty() || !supportsTextureFormat(data.mFormat, data.mSrgb))
+                return false;
+            const auto width = data.mLevels.front().mWidth;
+            const auto height = data.mLevels.front().mHeight;
+            const bool generate = data.mGenerateMipmaps && data.mLevels.size() == 1 && std::max(width, height) > 1;
+            const auto levels = generate ? std::bit_width(std::max(width, height)) : data.mLevels.size();
+            const auto slot = static_cast<std::size_t>(data.mFormat);
+            const auto& limits = mTextureLimits[slot][data.mSrgb][generate];
+            if (!width || !height || width > limits.maxExtent.width || height > limits.maxExtent.height
+                || levels > limits.maxMipLevels || !(limits.sampleCounts & VK_SAMPLE_COUNT_1_BIT))
+                return false;
+            VkFormatFeatureFlags required = 0;
+            if (state.mMinFilter == Render::TextureFilter::Linear || state.mMagFilter == Render::TextureFilter::Linear
+                || (state.mAnisotropy > 1 && mFeatures.samplerAnisotropy) || generate)
+                required |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+            if (generate)
+                required |= VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT
+                    | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+            return (mTextureProperties[slot][data.mSrgb].optimalTilingFeatures & required) == required;
+        }
+
         Render::TextureHandle VulkanBackend::createTexture(
             const Render::TextureData& data, const Render::SamplerState& state)
         {
             Render::validateTexture(data);
             const auto width = data.mLevels.front().mWidth;
             const auto height = data.mLevels.front().mHeight;
-            if (width > mProperties.limits.maxImageDimension2D || height > mProperties.limits.maxImageDimension2D)
-                throw std::invalid_argument("Texture dimensions exceed the Vulkan device limit");
-            if (!supportsTextureFormat(data.mFormat, data.mSrgb))
-                throw std::runtime_error("Texture format is not supported by the Vulkan device");
+            if (!supportsTexture(data, state))
+                throw std::runtime_error("Vulkan device does not support the texture layout, dimensions or filtering");
             const VkFormat format = textureFormat(data.mFormat, data.mSrgb);
-            const auto& properties = mTextureProperties[static_cast<std::size_t>(data.mFormat)][data.mSrgb];
-            const bool generate = data.mGenerateMipmaps && data.mLevels.size() == 1;
+            const bool generate = data.mGenerateMipmaps && data.mLevels.size() == 1 && std::max(width, height) > 1;
             const auto levels = generate ? static_cast<std::uint32_t>(std::bit_width(std::max(width, height)))
                                          : static_cast<std::uint32_t>(data.mLevels.size());
-            VkFormatFeatureFlags required = 0;
-            if (state.mMinFilter == Render::TextureFilter::Linear || state.mMagFilter == Render::TextureFilter::Linear
-                || generate)
-                required |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-            if (generate && levels > 1)
-                required |= VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT
-                    | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
-            if ((properties.optimalTilingFeatures & required) != required)
-                throw std::runtime_error(
-                    "Vulkan texture format does not support the requested filtering or mip generation");
             auto image = createImage(width, height, format,
                 VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
                     | (generate && levels > 1 ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0),
-                VK_IMAGE_ASPECT_COLOR_BIT, levels);
+                VK_IMAGE_ASPECT_COLOR_BIT, levels, 1, textureComponents(data.mFormat));
             image->mTextureFormat = data.mFormat;
             image->mSrgb = data.mSrgb;
             image->mSampler = sampler(state);
@@ -1387,18 +1444,21 @@ namespace MWRender::Vulkan
             std::size_t bytes = 0;
             for (const auto& level : data.mLevels)
             {
+                bytes = Render::textureUploadOffset(bytes, data.mFormat);
                 if (level.mBytes.size() > std::numeric_limits<std::size_t>::max() - bytes)
                     throw std::length_error("Texture upload size overflows the host address space");
                 bytes += level.mBytes.size();
             }
             Upload upload;
-            upload.mStaging = allocateStaging(bytes);
+            upload.mStaging
+                = allocateStaging(bytes, std::lcm<std::size_t>(16, Render::textureCopyAlignment(data.mFormat)));
             upload.mImage = image;
             upload.mGenerateMipmaps = generate;
             upload.mImageCopies.reserve(data.mLevels.size());
-            VkDeviceSize offset = 0;
+            std::size_t offset = 0;
             for (std::size_t i = 0; i < data.mLevels.size(); ++i)
             {
+                offset = Render::textureUploadOffset(offset, data.mFormat);
                 const auto& level = data.mLevels[i];
                 std::memcpy(upload.mStaging.mPage->mMemory.mapped() + upload.mStaging.mOffset + offset,
                     level.mBytes.data(), level.mBytes.size());
@@ -1425,7 +1485,8 @@ namespace MWRender::Vulkan
                 throw std::invalid_argument("Sampler views require an immutable uploaded 2D texture");
             const auto& properties
                 = mTextureProperties[static_cast<std::size_t>(*storage->mTextureFormat)][storage->mSrgb];
-            if ((state.mMinFilter == Render::TextureFilter::Linear || state.mMagFilter == Render::TextureFilter::Linear)
+            if ((state.mMinFilter == Render::TextureFilter::Linear || state.mMagFilter == Render::TextureFilter::Linear
+                    || (state.mAnisotropy > 1 && mFeatures.samplerAnisotropy))
                 && !(properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
                 throw std::invalid_argument("Texture format does not support linear filtering");
             auto view = std::make_shared<Image>(mDevice);

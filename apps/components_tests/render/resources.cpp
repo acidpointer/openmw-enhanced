@@ -216,6 +216,28 @@ namespace
     {
         std::size_t operator()(int) const { return 0; }
     };
+    struct ConstantFrameHash
+    {
+        constexpr std::size_t operator()(int) const { return 0; }
+    };
+    constexpr bool frameLookupDoesNotInsert()
+    {
+        Render::FrameCache<int, int, ConstantFrameHash> cache;
+        if (cache.find(1) || cache.capacity())
+            return false;
+        for (int i = 0; i < 80; ++i)
+            cache.getOrCreate(i).first = i * 7;
+        const auto size = cache.size(), capacity = cache.capacity();
+        for (int i = 0; i < 80; ++i)
+            if (!cache.find(i) || *cache.find(i) != i * 7)
+                return false;
+        if (cache.find(81) || cache.size() != size || cache.capacity() != capacity)
+            return false;
+        cache.beginFrame();
+        return !cache.find(0) && !cache.find(79) && cache.capacity() == capacity && cache.size() == 0;
+    }
+    static_assert(frameLookupDoesNotInsert());
+
     TEST(RenderFrameCache, GrowthPreservesFrameValuesThroughCollisions)
     {
         Render::FrameCache<int, int, FrameHash> cache;

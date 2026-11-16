@@ -25,13 +25,22 @@ namespace RenderAssets
 
         std::shared_ptr<Storage> find(const osg::Image& source, bool mipmaps) const
         {
+            return find(source, mipmaps, [](const Storage&) { return true; });
+        }
+
+        template <class Compatible>
+        std::shared_ptr<Storage> find(const osg::Image& source, bool mipmaps, Compatible&& compatible) const
+        {
             const auto found = mEntries.find(&source);
             if (found == mEntries.end() || found->second.mSource.get() != &source
                 || found->second.mRevision != source.getModifiedCount())
                 return {};
-            if (auto full = found->second.mStorage[1].lock())
+            if (auto full = found->second.mStorage[1].lock(); full && compatible(*full))
                 return full;
-            return mipmaps ? nullptr : found->second.mStorage[0].lock();
+            if (!mipmaps)
+                if (auto base = found->second.mStorage[0].lock(); base && compatible(*base))
+                    return base;
+            return {};
         }
 
         void store(const osg::Image& source, bool mipmaps, const std::shared_ptr<Storage>& storage)

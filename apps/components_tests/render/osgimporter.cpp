@@ -1,3 +1,4 @@
+#include <components/render/texture.hpp>
 #include <components/renderassets/imagevariants.hpp>
 #include <components/renderassets/meshkey.hpp>
 #include <components/renderassets/osgimporter.hpp>
@@ -42,6 +43,20 @@ namespace
         EXPECT_EQ(variants.find(*source, true), mipmapped);
         EXPECT_EQ(base.use_count(), 1); // The registry does not pin GPU storage.
         EXPECT_EQ(mipmapped.use_count(), 1);
+    }
+
+    TEST(RenderImageVariants, UnsupportedSamplingCanFallBackToCompatibleBaseStorage)
+    {
+        RenderAssets::ImageVariants<int> variants;
+        osg::ref_ptr<osg::Image> source = new osg::Image;
+        auto base = std::make_shared<int>(1);
+        auto full = std::make_shared<int>(2);
+        variants.store(*source, false, base);
+        variants.store(*source, true, full);
+        const auto compatible = [](int value) { return value == 1; };
+        EXPECT_EQ(variants.find(*source, false, compatible), base);
+        EXPECT_EQ(variants.find(*source, true, compatible), nullptr);
+        EXPECT_EQ(variants.find(*source, true), full);
     }
 
     TEST(RenderImageVariants, AnimatedImageRevisionInvalidatesEverySamplerAndMipVariant)
@@ -988,7 +1003,59 @@ namespace
         EXPECT_FALSE(noMips->mGenerateMipmaps);
     }
 
-    TEST(RenderImageImport, BorrowingFallsBackForConvertedChannelsAndPaddedRows)
+    TEST(RenderImageImport, BorrowsNativeChannelsAndPreservesSourceStorage)
+    {
+        using F = Render::TextureFormat;
+        const std::array layouts{ std::pair{ GL_BGRA, F::BGRA8 }, std::pair{ GL_RGB, F::RGB8 },
+            std::pair{ GL_BGR, F::BGR8 }, std::pair{ GL_RED, F::R8 }, std::pair{ GL_RG, F::RG8 },
+            std::pair{ GL_LUMINANCE, F::Luminance8 }, std::pair{ GL_LUMINANCE_ALPHA, F::LuminanceAlpha8 },
+            std::pair{ GL_ALPHA, F::Alpha8 } };
+        for (const auto& [channels, format] : layouts)
+        {
+            osg::ref_ptr<osg::Image> source = new osg::Image;
+            source->allocateImage(5, 3, 1, channels, GL_UNSIGNED_BYTE, 1);
+            source->setOrigin(osg::Image::BOTTOM_LEFT);
+            std::vector<Render::TextureLevel> levels;
+            const auto view = RenderAssets::OsgImporter::borrowTexture(*source, levels);
+            ASSERT_TRUE(view);
+            EXPECT_EQ(view->mFormat, format);
+            ASSERT_EQ(levels.size(), 1u);
+            EXPECT_EQ(levels[0].mBytes.data(), reinterpret_cast<const std::byte*>(source->data()));
+            EXPECT_EQ(levels[0].mBytes.size(), Render::textureLevelSize(format, 5, 3));
+        }
+    }
+
+    TEST(RenderImageImport, BorrowedSingleChannelMipsNeedNoCpuRepacking)
+    {
+        osg::ref_ptr<osg::Image> source = new osg::Image;
+        source->setImage(
+            3, 3, 1, GL_R8, GL_RED, GL_UNSIGNED_BYTE, new unsigned char[10]{}, osg::Image::USE_NEW_DELETE, 1);
+        source->setMipmapLevels({ 9 });
+        std::vector<Render::TextureLevel> levels;
+        const auto view = RenderAssets::OsgImporter::borrowTexture(*source, levels);
+        ASSERT_TRUE(view);
+        ASSERT_EQ(levels.size(), 2u);
+        EXPECT_EQ(levels[1].mBytes.data(), reinterpret_cast<const std::byte*>(source->data()) + 9);
+        EXPECT_EQ(levels[1].mBytes.size(), 1u);
+        EXPECT_FALSE(view->mGenerateMipmaps);
+    }
+
+    TEST(RenderImageImport, StreamsAndCustomImagesStayOnOwnerThread)
+    {
+        struct CustomImage : osg::Image
+        {
+        };
+        osg::ref_ptr<osg::Image> source = new osg::Image;
+        source->allocateImage(2, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE);
+        EXPECT_TRUE(RenderAssets::OsgImporter::canImportImageInParallel(*source));
+        source->setDataVariance(osg::Object::DYNAMIC);
+        EXPECT_FALSE(RenderAssets::OsgImporter::canImportImageInParallel(*source));
+        source = new CustomImage;
+        source->allocateImage(2, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE);
+        EXPECT_FALSE(RenderAssets::OsgImporter::canImportImageInParallel(*source));
+    }
+
+    TEST(RenderImageImport, BorrowingFallsBackForPaddedRows)
     {
         osg::ref_ptr<osg::Image> source = new osg::Image;
         std::vector<Render::TextureLevel> levels;

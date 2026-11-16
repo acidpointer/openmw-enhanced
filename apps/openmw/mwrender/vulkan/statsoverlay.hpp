@@ -18,6 +18,8 @@ namespace MWRender::Vulkan
         double mScene = 0, mEffects = 0, mOverlay = 0;
         // Nested inside scene/effects preparation, not additional phases.
         double mMeshes = 0, mTextures = 0, mTargets = 0;
+        double mTextureCpu = 0, mTextureCreate = 0;
+        std::size_t mImageConversions = 0;
         double mParticles = 0;
         double mParticleWait = 0;
         std::size_t mMeshBuilds = 0, mMeshUpdates = 0;

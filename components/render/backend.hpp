@@ -120,6 +120,15 @@ namespace Render
         BC3,
         BC4,
         BC5,
+        BGRA8,
+        RGB8,
+        BGR8,
+        R8,
+        RG8,
+        Luminance8,
+        LuminanceAlpha8,
+        Alpha8,
+        Count,
     };
 
     enum class TextureWrap : std::uint8_t
@@ -390,6 +399,12 @@ namespace Render
             throw std::runtime_error("This renderer does not support mesh updates");
         }
         virtual bool supportsTextureFormat(TextureFormat format, bool srgb) const = 0;
+        // Query metadata capabilities without inspecting pixel spans: format,
+        // dimensions, authored/generated mip levels and requested filtering.
+        virtual bool supportsTexture(const TextureData& data, const SamplerState&) const
+        {
+            return supportsTextureFormat(data.mFormat, data.mSrgb);
+        }
         virtual TextureHandle createTexture(const TextureData& data, const SamplerState& sampler = {}) = 0;
         // Share immutable 2D image storage with another sampler. Releasing the
         // original handle does not invalidate a view or cancel its upload.
@@ -444,7 +459,7 @@ namespace Render
     // Private, same-build module ABI. Creation and destruction stay paired in
     // the module; errors are copied into caller-owned memory, never thrown
     // through the exported entry point. No graphics API types cross it.
-    inline constexpr std::uint32_t BackendAbi = 14;
+    inline constexpr std::uint32_t BackendAbi = 15;
     using CreateBackend = Backend* (*)(std::uint32_t abi, const BackendOptions*, char* error, std::size_t errorSize);
     using DestroyBackend = void (*)(Backend*);
 }

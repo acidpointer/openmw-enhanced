@@ -245,6 +245,8 @@ namespace MWRender
             Render::TextureHandle mHandle;
             osg::observer_ptr<const osg::Image> mImage;
             unsigned mRevision = 0;
+            Render::TextureFormat mFormat = Render::TextureFormat::RGBA8;
+            bool mSrgb = false;
             std::uint64_t mSeen = 0;
             explicit GpuTexture(Render::Backend& backend, Render::Residency* residency = nullptr)
                 : mBackend(backend)
@@ -332,7 +334,7 @@ namespace MWRender
             : mViewer(viewer)
             , mWindow(options.mWindow)
             , mModule(Render::BackendModule::load(modulePath(), options))
-            , mMeshWorkers(SceneUtil::ParallelWork::workersFor(std::thread::hardware_concurrency()))
+            , mAssetWorkers(SceneUtil::ParallelWork::workersFor(std::thread::hardware_concurrency()))
         {
             // CPU scene callbacks (including skinning and terrain selection)
             // run once on the owner thread; they never submit a GL world frame.
@@ -494,6 +496,132 @@ namespace MWRender
             return binding.mHandles[slot];
         }
 
+        struct ImagePreparation
+        {
+            osg::ref_ptr<const osg::Image> mSource;
+            unsigned mRevision;
+            unsigned mNeededVariants;
+            std::size_t mWorkSize;
+            std::shared_ptr<const Render::ImageAsset> mConverted;
+            std::exception_ptr mError;
+        };
+
+        std::shared_ptr<GpuTexture> imageStorage(const osg::Image& image, const Render::SamplerState& sampling)
+        {
+            return mImageVariants.find(image, sampling.mUseMipmaps, [&](const auto& storage) {
+                const Render::TextureLevel level{ static_cast<std::uint32_t>(image.s()),
+                    static_cast<std::uint32_t>(image.t()), {} };
+                return backend().supportsTexture({ storage.mFormat, storage.mSrgb, false, { &level, 1 } }, sampling);
+            });
+        }
+
+        void planTexture(const osg::Texture2D* source)
+        {
+            if (!source)
+                return;
+            const auto [planned, inserted] = mPlannedTextures.getOrCreate(source);
+            (void)planned;
+            if (!inserted)
+                return;
+            const auto* image = source->getImage();
+            if (!image || !image->data() || !RenderAssets::OsgImporter::canImportImageInParallel(*image))
+                return;
+            const auto sampling = RenderAssets::OsgImporter::importSampler(*source);
+            if (imageStorage(*image, sampling))
+                return;
+            try
+            {
+                const auto data = RenderAssets::OsgImporter::borrowTexture(*image, mLevels, sampling.mUseMipmaps);
+                if (data && backend().supportsTexture(*data, sampling))
+                    return;
+            }
+            catch (const std::invalid_argument&)
+            {
+                return; // The ordinary import publishes the existing diagnostic.
+            }
+            const auto needed = sampling.mUseMipmaps ? 2u : 1u;
+            if (const auto* index = mImagePlanIndices.find(image))
+            {
+                mImagePlans[*index].mNeededVariants |= needed;
+                return;
+            }
+            // Do not materialize an entire high-resolution mod pack at once.
+            // The owner still imports oversized/overflow jobs on demand; this
+            // bounds additional batch storage independently of texture residency.
+            constexpr std::size_t ConversionBudget = 64 * 1024 * 1024;
+            std::size_t bytes = 0;
+            auto width = static_cast<std::uint32_t>(image->s());
+            auto height = static_cast<std::uint32_t>(image->t());
+            for (unsigned level = 0; level < image->getNumMipmapLevels(); ++level)
+            {
+                const auto size = Render::textureLevelSize(Render::TextureFormat::RGBA8, width, height);
+                if (size > ConversionBudget - mPlannedImageBytes - bytes)
+                    return;
+                bytes += size;
+                width = std::max(1u, width / 2);
+                height = std::max(1u, height / 2);
+            }
+            const auto index = mImagePlans.size();
+            Render::reserveFor(mImagePlans, index + 1);
+            mImagePlans.push_back({ image, image->getModifiedCount(), needed, bytes, {}, {} });
+            mImagePlanIndices.getOrCreate(image).first = index;
+            Render::reserveFor(mImageJobs, mImageJobs.size() + 1);
+            mImageJobs.push_back(index);
+            mPlannedImageBytes += bytes;
+        }
+
+        template <class StateSet>
+        void planMaterialImages(const StateSet& resolved, bool sky)
+        {
+            bool water = false;
+            if (const auto* uniform = RenderAssets::nativeUniform(resolved, NativeUniform::WaterSurface))
+                uniform->get(water);
+            const auto plan = [&](const char* name) {
+                if (const auto unit = RenderAssets::textureUnit(resolved, name))
+                    planTexture(dynamic_cast<const osg::Texture2D*>(
+                        resolved.getTextureAttribute(*unit, osg::StateAttribute::TEXTURE)));
+            };
+            plan(water ? "normalMap" : "diffuseMap");
+            plan(water ? "reflectionMap" : "blendMap");
+            int pass = 0;
+            if (sky)
+                if (const auto* uniform = RenderAssets::nativeUniform(resolved, NativeUniform::Pass))
+                    uniform->get(pass);
+            if (pass == 3)
+                plan("maskMap");
+        }
+
+        ImagePreparation* preparedImage(const osg::Image& source)
+        {
+            const auto* index = mImagePlanIndices.find(&source);
+            if (!index || *index >= mImagePlans.size())
+                return nullptr;
+            auto& image = mImagePlans[*index];
+            return image.mSource.get() == &source && image.mRevision == source.getModifiedCount() ? &image : nullptr;
+        }
+
+        void consumedImage(const osg::Image& source, bool mipmaps)
+        {
+            if (auto* image = preparedImage(source))
+            {
+                image->mNeededVariants &= mipmaps ? 0u : ~1u;
+                if (!image->mNeededVariants)
+                    image->mConverted.reset();
+            }
+        }
+
+        Render::TextureData convertedData(const Render::ImageAsset& image, bool mipmaps)
+        {
+            mLevels.clear();
+            for (const auto& level : image.mLevels)
+            {
+                mLevels.push_back({ level.mWidth, level.mHeight, level.mBytes });
+                if (!mipmaps)
+                    break;
+            }
+            return { image.mFormat, image.mSrgb, image.mGenerateMipmaps && mipmaps, mLevels };
+        }
+
         Render::TextureHandle importTexture(const osg::Texture2D* source, bool gui)
         {
             if (!source)
@@ -513,35 +641,48 @@ namespace MWRender
                 || slot->mRevision != sourceImage->getModifiedCount())
             {
                 PrepareTimer timer{ mPrepare.mTextures };
-                if (auto existingStorage = mImageVariants.find(*sourceImage, sampling.mUseMipmaps))
+                if (auto existingStorage = imageStorage(*sourceImage, sampling))
                 {
                     auto view = std::make_shared<GpuTexture>(backend());
                     view->mImage = sourceImage;
                     view->mRevision = sourceImage->getModifiedCount();
                     view->mStorage = std::move(existingStorage);
-                    view->mHandle = backend().createTextureSamplerView(view->mStorage->mHandle, sampling);
+                    view->mFormat = view->mStorage->mFormat;
+                    view->mSrgb = view->mStorage->mSrgb;
+                    {
+                        PrepareTimer creation{ mPrepare.mTextureCreate };
+                        view->mHandle = backend().createTextureSamplerView(view->mStorage->mHandle, sampling);
+                    }
+                    consumedImage(*sourceImage, sampling.mUseMipmaps);
                     slot = std::move(view);
                 }
                 else
                 {
                     auto data = RenderAssets::OsgImporter::borrowTexture(*sourceImage, mLevels, sampling.mUseMipmaps);
                     std::shared_ptr<const Render::ImageAsset> converted;
-                    if (!data || !backend().supportsTextureFormat(data->mFormat, data->mSrgb))
+                    if (!data || !backend().supportsTexture(*data, sampling))
                     {
-                        converted = mImporter.importImage(*sourceImage, true);
-                        if (!backend().supportsTextureFormat(converted->mFormat, converted->mSrgb))
-                            converted = converted->mDecode ? converted->mDecode() : converted->mUncompressed;
-                        if (!converted)
-                            throw std::runtime_error("Live texture has no supported device format");
-                        mLevels.clear();
-                        for (const auto& level : converted->mLevels)
+                        if (auto* prepared = preparedImage(*sourceImage))
                         {
-                            mLevels.push_back({ level.mWidth, level.mHeight, level.mBytes });
-                            if (!sampling.mUseMipmaps)
-                                break;
+                            if (prepared->mError)
+                                std::rethrow_exception(prepared->mError);
+                            converted = prepared->mConverted;
                         }
-                        data = Render::TextureData{ converted->mFormat, converted->mSrgb,
-                            converted->mGenerateMipmaps && sampling.mUseMipmaps, mLevels };
+                        if (!converted)
+                        {
+                            PrepareTimer conversion{ mPrepare.mTextureCpu };
+                            converted = mImporter.importImage(*sourceImage, true);
+                            ++mPrepare.mImageConversions;
+                        }
+                        data = convertedData(*converted, sampling.mUseMipmaps);
+                        if (!backend().supportsTexture(*data, sampling))
+                        {
+                            PrepareTimer conversion{ mPrepare.mTextureCpu };
+                            converted = converted->mDecode ? converted->mDecode() : converted->mUncompressed;
+                            if (!converted)
+                                throw std::runtime_error("Live texture has no supported device format");
+                            data = convertedData(*converted, sampling.mUseMipmaps);
+                        }
                     }
                     // Keep uploaded image generations immutable. Animated images
                     // replace their storage; already recorded views retain the old
@@ -549,7 +690,13 @@ namespace MWRender
                     auto storage = std::make_shared<GpuTexture>(backend(), &mTextureResidency);
                     storage->mImage = sourceImage;
                     storage->mRevision = sourceImage->getModifiedCount();
-                    storage->mHandle = backend().createTexture(*data, sampling);
+                    storage->mFormat = data->mFormat;
+                    storage->mSrgb = data->mSrgb;
+                    {
+                        PrepareTimer creation{ mPrepare.mTextureCreate };
+                        storage->mHandle = backend().createTexture(*data, sampling);
+                    }
+                    consumedImage(*sourceImage, sampling.mUseMipmaps);
                     std::uint64_t bytes = 0;
                     for (const auto& level : mLevels)
                         bytes += level.mBytes.size();
@@ -762,7 +909,7 @@ namespace MWRender
             return mesh(planMesh(geometry, uvUnit));
         }
 
-        void clearMeshPlans()
+        void clearAssetPlans()
         {
             for (auto* mesh : mMeshPlans)
             {
@@ -781,6 +928,11 @@ namespace MWRender
             }
             mMeshPlans.clear();
             mMeshJobs.clear();
+            mImagePlans.clear();
+            mImageJobs.clear();
+            mPlannedImageBytes = 0;
+            mImagePlanIndices.beginFrame();
+            mPlannedTextures.beginFrame();
         }
 
         void drawGui(
@@ -1082,7 +1234,7 @@ namespace MWRender
             unsigned mUVUnit = 0;
             bool mLightsPrepared = false;
             bool mShadowsPrepared = false;
-            std::uint64_t mDrawFrame = 0;
+            std::uint64_t mDrawFrame = 0, mImagesPlannedFrame = 0;
             std::uint64_t mFrame = 0;
         };
 
@@ -1294,7 +1446,10 @@ namespace MWRender
                 const auto* geometry = drawable->asGeometry();
                 const auto* state = drawable->getStateSet();
                 if (geometry && geometry->getVertexArray() && state)
+                {
+                    planMaterialImages(*state, false);
                     planMesh(*geometry, RenderAssets::textureUnit(*state, "diffuseMap").value_or(0));
+                }
             }
         }
 
@@ -1544,6 +1699,18 @@ namespace MWRender
                 !mShadowCasting && mask && !mask->getRedMask() && !mask->getGreenMask() && !mask->getBlueMask()
                 && !mask->getAlphaMask())
                 return;
+            if (cached.mImagesPlannedFrame != mSerial)
+            {
+                try
+                {
+                    planMaterialImages(resolved, sky);
+                }
+                catch (const std::invalid_argument&)
+                {
+                    // Preserve the owner-thread draw diagnostic.
+                }
+                cached.mImagesPlannedFrame = mSerial;
+            }
             GpuMesh* mesh = nullptr;
             if (geometry && !particle)
             {
@@ -1648,16 +1815,40 @@ namespace MWRender
                 PrepareTimer timer{ mPrepare.mMeshes };
                 // Start large mod meshes early instead of leaving one large
                 // conversion on a worker after every other task has finished.
-                if (mMeshWorkers.workerCount() && mMeshJobs.size() >= 8)
+                if (mAssetWorkers.workerCount() && mMeshJobs.size() >= 8)
                     std::sort(mMeshJobs.begin(), mMeshJobs.end(),
                         [](const auto* left, const auto* right) { return left->mWorkSize > right->mWorkSize; });
-                mMeshWorkers.run(
+                mAssetWorkers.run(
                     mMeshJobs.size(),
                     [](void* context, std::size_t index) {
                         auto& owner = *static_cast<Impl*>(context);
                         prepareMesh(*owner.mMeshJobs[index]);
                     },
                     this);
+            }
+            {
+                PrepareTimer textures{ mPrepare.mTextures };
+                PrepareTimer conversion{ mPrepare.mTextureCpu };
+                if (mAssetWorkers.workerCount() && mImageJobs.size() >= 8)
+                    std::sort(mImageJobs.begin(), mImageJobs.end(), [&](auto left, auto right) {
+                        return mImagePlans[left].mWorkSize > mImagePlans[right].mWorkSize;
+                    });
+                mAssetWorkers.run(
+                    mImageJobs.size(),
+                    [](void* context, std::size_t index) {
+                        auto& owner = *static_cast<Impl*>(context);
+                        auto& image = owner.mImagePlans[owner.mImageJobs[index]];
+                        try
+                        {
+                            image.mConverted = owner.mImporter.importImage(*image.mSource, true);
+                        }
+                        catch (...)
+                        {
+                            image.mError = std::current_exception();
+                        }
+                    },
+                    this);
+                mPrepare.mImageConversions += mImageJobs.size();
             }
             for (std::size_t i = 0; i < mViewCount; ++i)
             {
@@ -1805,7 +1996,7 @@ namespace MWRender
                 : std::chrono::duration<double, std::milli>(now - mLastSubmit).count();
             const bool waiting
                 = !mFrameSubmitted && sinceSubmit >= 250 && !(SDL_GetWindowFlags(mWindow) & SDL_WINDOW_MINIMIZED);
-            if ((total >= 250 || timing.mMilliseconds[2] >= 32 || outside >= 250 || waiting)
+            if ((total >= 20 || timing.mMilliseconds[2] >= 16 || outside >= 250 || waiting)
                 && now >= mNextSlowFrameReport)
             {
                 mNextSlowFrameReport = now + std::chrono::seconds(5);
@@ -1820,7 +2011,10 @@ namespace MWRender
                                     << ", retired=" << mRetired << ", prepare scene=" << mPrepare.mScene
                                     << "ms effects=" << mPrepare.mEffects << "ms overlay=" << mPrepare.mOverlay
                                     << "ms (nested mesh=" << mPrepare.mMeshes << "ms texture=" << mPrepare.mTextures
-                                    << "ms target=" << mPrepare.mTargets << "ms), mesh builds=" << mPrepare.mMeshBuilds
+                                    << "ms target=" << mPrepare.mTargets << "ms; texture CPU=" << mPrepare.mTextureCpu
+                                    << "ms create/stage=" << mPrepare.mTextureCreate
+                                    << "ms conversions=" << mPrepare.mImageConversions
+                                    << "), mesh builds=" << mPrepare.mMeshBuilds
                                     << ", stream updates=" << mPrepare.mMeshUpdates
                                     << ", particles=" << mPrepare.mParticles << "ms (lock=" << mPrepare.mParticleWait
                                     << "ms), native states=" << mPrepare.mStateBindings
@@ -1843,7 +2037,7 @@ namespace MWRender
             struct ClearPlans
             {
                 Impl& mOwner;
-                ~ClearPlans() { mOwner.clearMeshPlans(); }
+                ~ClearPlans() { mOwner.clearAssetPlans(); }
             } clear{ *this };
             mFrameSubmitted = false;
             mMeshChanges = 0;
@@ -1953,7 +2147,7 @@ namespace MWRender
                     mViews[i].mDraws.clear();
                 for (std::size_t i = mCompositeViewCount; i < mCompositeViews.size(); ++i)
                     mCompositeViews[i].mDraws.clear();
-                clearMeshPlans();
+                clearAssetPlans();
             }
             timing.finish(2);
             if (mStats)
@@ -2093,8 +2287,13 @@ namespace MWRender
         std::unique_ptr<Render::BackendModule> mModule;
         osg::ref_ptr<NativeRenderer> mRenderer;
         osg::ref_ptr<osgUtil::SceneView> mSceneView;
-        SceneUtil::ParallelWork mMeshWorkers;
+        SceneUtil::ParallelWork mAssetWorkers;
         std::vector<GpuMesh*> mMeshPlans, mMeshJobs;
+        std::vector<ImagePreparation> mImagePlans;
+        std::vector<std::size_t> mImageJobs;
+        std::size_t mPlannedImageBytes = 0;
+        Render::FrameCache<const osg::Image*, std::size_t> mImagePlanIndices;
+        Render::FrameCache<const osg::Texture2D*, bool> mPlannedTextures;
         Render::Residency mMeshResidency{ 64 * 1024 * 1024 };
         Render::Residency mTextureResidency{ 256 * 1024 * 1024 };
         RenderAssets::OsgImporter mImporter;
