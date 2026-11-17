@@ -444,7 +444,7 @@ OMW::Engine::Engine(Files::ConfigurationManager& configurationManager)
     , mRandomSeed(0)
     , mNewGame(false)
     , mCfgMgr(configurationManager)
-    , mGlMaxTextureImageUnits(0)
+    , mMaxTextureImageUnits(0)
 {
     SDL_SetHint(SDL_HINT_MAC_OPENGL_ASYNC_DISPATCH, "1");
     SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0"); // We use only gamepads
@@ -516,8 +516,6 @@ OMW::Engine::~Engine()
         SDL_DestroyWindow(mWindow);
         mWindow = nullptr;
     }
-    if (mCompatibilityWindow)
-        SDL_DestroyWindow(mCompatibilityWindow);
 
     SDL_Quit();
 
@@ -578,7 +576,7 @@ void OMW::Engine::createWindow()
     const Settings::WindowMode windowMode = Settings::video().mWindowMode;
     const bool windowBorder = Settings::video().mWindowBorder;
     const SDLUtil::VSyncMode vsync = Settings::video().mVsyncMode;
-    unsigned antialiasing = mUseVulkan ? 0 : static_cast<unsigned>(Settings::video().mAntialiasing);
+    unsigned antialiasing = static_cast<unsigned>(Settings::video().mAntialiasing);
 
     int posX = SDL_WINDOWPOS_CENTERED_DISPLAY(screen);
     int posY = SDL_WINDOWPOS_CENTERED_DISPLAY(screen);
@@ -589,15 +587,77 @@ void OMW::Engine::createWindow()
         posY = SDL_WINDOWPOS_UNDEFINED_DISPLAY(screen);
     }
 
+    if (mUseVulkan)
+    {
+        Uint32 nativeFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+        if (windowMode == Settings::WindowMode::Fullscreen)
+            nativeFlags |= SDL_WINDOW_FULLSCREEN;
+        else if (windowMode == Settings::WindowMode::WindowedFullscreen)
+            nativeFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+        if (!windowBorder)
+            nativeFlags |= SDL_WINDOW_BORDERLESS;
+        SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, Settings::video().mMinimizeOnFocusLoss ? "1" : "0");
+        mWindow = SDL_CreateWindow("OpenMW — Vulkan (experimental)", posX, posY, width, height, nativeFlags);
+        if (!mWindow)
+            throw std::runtime_error("Failed to create Vulkan window: " + std::string(SDL_GetError()));
+        setWindowIcon();
+        int drawableWidth = width, drawableHeight = height;
+        SDLUtil::getDrawableSize(mWindow, drawableWidth, drawableHeight);
+        int logicalWidth = width, logicalHeight = height;
+        SDL_GetWindowSize(mWindow, &logicalWidth, &logicalHeight);
+        if (windowMode == Settings::WindowMode::Windowed && drawableWidth > 0 && drawableHeight > 0 && logicalWidth > 0
+            && logicalHeight > 0)
+        {
+            SDL_SetWindowSize(mWindow, std::max(1, static_cast<int>(double(width) * logicalWidth / drawableWidth)),
+                std::max(1, static_cast<int>(double(height) * logicalHeight / drawableHeight)));
+            SDLUtil::getDrawableSize(mWindow, drawableWidth, drawableHeight);
+        }
+        osg::ref_ptr<osg::GraphicsContext::Traits> nativeTraits = new osg::GraphicsContext::Traits;
+        nativeTraits->width = drawableWidth;
+        nativeTraits->height = drawableHeight;
+        nativeTraits->inheritedWindowData = new SDLUtil::GraphicsWindowSDL2::WindowData(mWindow);
+        osg::ref_ptr<SDLUtil::GraphicsWindowSDL2> nativeWindow
+            = new SDLUtil::GraphicsWindowSDL2(nativeTraits, SDLUtil::VSyncMode::Disabled);
+        if (!nativeWindow->valid())
+            throw std::runtime_error("Failed to create native window adapter");
+        auto* camera = mViewer->getCamera();
+        camera->setGraphicsContext(nativeWindow);
+        camera->setViewport(0, 0, drawableWidth, drawableHeight);
+        mViewer->getEventQueue()->getCurrentEventState()->setWindowRectangle(0, 0, drawableWidth, drawableHeight);
+        // Color selection only initializes CPU format metadata; unlike the
+        // depth probe it does not require a graphics context. RTT nodes need
+        // these defaults even though native startup skips GL realization.
+        (*mSelectColorFormatOperation)(nullptr);
+        SceneUtil::AutoDepth::setReversed(true);
+        SceneUtil::AutoDepth::setDepthFormat(GL_DEPTH_COMPONENT32F);
+        Render::BackendOptions options;
+        options.mWindow = mWindow;
+        options.mShaderPath = mResDir / "shaders" / "vulkan";
+        options.mPipelineCachePath = mCfgMgr.getCachePath() / "vulkan-pipelines.bin";
+        if (const char* selectedGpu = std::getenv("OPENMW_RENDER_GPU"))
+            options.mDevicePciAddress = selectedGpu;
+        options.mPresentMode = vsync == SDLUtil::VSyncMode::Disabled ? Render::PresentMode::Immediate
+            : vsync == SDLUtil::VSyncMode::Adaptive                  ? Render::PresentMode::Adaptive
+                                                                     : Render::PresentMode::Fifo;
+        mFrameDriver = std::make_unique<MWRender::VulkanFrameDriver>(*mViewer, options);
+        const auto* native = dynamic_cast<Render::Presentation*>(camera->getRenderer());
+        if (!native || !native->nativeDeviceInfo())
+            throw std::runtime_error("Native renderer did not publish device capabilities");
+        const auto descriptorLimit = native->nativeDeviceInfo()->mMaxSampledImageDescriptors;
+        mMaxTextureImageUnits = static_cast<int>(Render::sceneTextureUnitCount(descriptorLimit));
+        if (mMaxTextureImageUnits == 0)
+            throw std::runtime_error("Native renderer reported no scene texture units");
+        Log(Debug::Info) << "Vulkan scene texture units: " << mMaxTextureImageUnits
+                         << " (hardware descriptor limit: " << descriptorLimit << ")";
+        Log(Debug::Info) << "Vulkan startup: native window and device capabilities; no OpenGL context";
+        return;
+    }
+
     Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
     if (windowMode == Settings::WindowMode::Fullscreen)
         flags |= SDL_WINDOW_FULLSCREEN;
     else if (windowMode == Settings::WindowMode::WindowedFullscreen)
         flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
-    const Uint32 vulkanFlags = (flags & ~SDL_WINDOW_OPENGL) | SDL_WINDOW_VULKAN;
-    if (mUseVulkan)
-        flags = SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN | SDL_WINDOW_ALLOW_HIGHDPI;
-
     // Allows for Windows snapping features to properly work in borderless window
     SDL_SetHint("SDL_BORDERLESS_WINDOWED_STYLE", "1");
     SDL_SetHint("SDL_BORDERLESS_RESIZABLE_STYLE", "1");
@@ -620,15 +680,13 @@ void OMW::Engine::createWindow()
         checkSDLError(SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1));
         checkSDLError(SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, antialiasing));
     }
-    else if (mUseVulkan)
-        checkSDLError(SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 0));
 
     osg::ref_ptr<SDLUtil::GraphicsWindowSDL2> graphicsWindow;
     while (!graphicsWindow || !graphicsWindow->valid())
     {
         while (!mWindow)
         {
-            mWindow = SDL_CreateWindow("OpenMW", posX, posY, mUseVulkan ? 16 : width, mUseVulkan ? 16 : height, flags);
+            mWindow = SDL_CreateWindow("OpenMW", posX, posY, width, height, flags);
             if (!mWindow)
             {
                 // Try with a lower AA
@@ -656,7 +714,7 @@ void OMW::Engine::createWindow()
         SDL_GetWindowSize(mWindow, &w, &h);
         int dw, dh;
         SDL_GL_GetDrawableSize(mWindow, &dw, &dh);
-        if (!mUseVulkan && (dw != w || dh != h))
+        if (dw != w || dh != h)
         {
             SDL_SetWindowSize(mWindow, width / (dw / w), height / (dh / h));
         }
@@ -670,9 +728,9 @@ void OMW::Engine::createWindow()
         traits->windowDecoration = !(SDL_GetWindowFlags(mWindow) & SDL_WINDOW_BORDERLESS);
         traits->screenNum = SDL_GetWindowDisplayIndex(mWindow);
         traits->vsync = 0;
-        traits->inheritedWindowData = new SDLUtil::GraphicsWindowSDL2::WindowData(mWindow, mUseVulkan);
+        traits->inheritedWindowData = new SDLUtil::GraphicsWindowSDL2::WindowData(mWindow);
 
-        graphicsWindow = new SDLUtil::GraphicsWindowSDL2(traits, mUseVulkan ? SDLUtil::VSyncMode::Disabled : vsync);
+        graphicsWindow = new SDLUtil::GraphicsWindowSDL2(traits, vsync);
         if (!graphicsWindow->valid())
             throw std::runtime_error("Failed to create GraphicsContext");
 
@@ -778,47 +836,10 @@ void OMW::Engine::createWindow()
     }
 
     mViewer->realize();
-    mGlMaxTextureImageUnits = identifyOp->getMaxTextureImageUnits();
+    mMaxTextureImageUnits = identifyOp->getMaxTextureImageUnits();
 
     mViewer->getEventQueue()->getCurrentEventState()->setWindowRectangle(
         0, 0, graphicsWindow->getTraits()->width, graphicsWindow->getTraits()->height);
-    if (mUseVulkan)
-    {
-        // GL-only capability services retain a hidden compatibility context
-        // during migration. It never presents or draws the visible world.
-        mCompatibilityWindow = mWindow;
-        mWindow = SDL_CreateWindow("OpenMW — Vulkan (experimental)", posX, posY, width, height,
-            windowBorder ? vulkanFlags : vulkanFlags | SDL_WINDOW_BORDERLESS);
-        if (!mWindow)
-            throw std::runtime_error("Failed to create Vulkan window: " + std::string(SDL_GetError()));
-        int nativeWidth = width;
-        int nativeHeight = height;
-        SDLUtil::getDrawableSize(mWindow, nativeWidth, nativeHeight);
-        int logicalWidth = 0;
-        int logicalHeight = 0;
-        SDL_GetWindowSize(mWindow, &logicalWidth, &logicalHeight);
-        if (windowMode == Settings::WindowMode::Windowed && nativeWidth > 0 && nativeHeight > 0 && logicalWidth > 0
-            && logicalHeight > 0)
-        {
-            SDL_SetWindowSize(mWindow, std::max(1, static_cast<int>(double(width) * logicalWidth / nativeWidth)),
-                std::max(1, static_cast<int>(double(height) * logicalHeight / nativeHeight)));
-            SDLUtil::getDrawableSize(mWindow, nativeWidth, nativeHeight);
-        }
-        graphicsWindow->resized(0, 0, nativeWidth, nativeHeight);
-        camera->setViewport(0, 0, nativeWidth, nativeHeight);
-        mViewer->getEventQueue()->getCurrentEventState()->setWindowRectangle(0, 0, nativeWidth, nativeHeight);
-        setWindowIcon();
-        Render::BackendOptions options;
-        options.mWindow = mWindow;
-        options.mShaderPath = mResDir / "shaders" / "vulkan";
-        options.mPipelineCachePath = mCfgMgr.getCachePath() / "vulkan-pipelines.bin";
-        if (const char* selectedGpu = std::getenv("OPENMW_RENDER_GPU"))
-            options.mDevicePciAddress = selectedGpu;
-        options.mPresentMode = vsync == SDLUtil::VSyncMode::Disabled ? Render::PresentMode::Immediate
-            : vsync == SDLUtil::VSyncMode::Adaptive                  ? Render::PresentMode::Adaptive
-                                                                     : Render::PresentMode::Fifo;
-        mFrameDriver = std::make_unique<MWRender::VulkanFrameDriver>(*mViewer, options);
-    }
 }
 
 void OMW::Engine::setWindowIcon()
@@ -867,7 +888,7 @@ void OMW::Engine::prepareEngine()
 
     mResourceSystem = std::make_unique<Resource::ResourceSystem>(
         mVFS.get(), Settings::cells().mCacheExpiryDelay, &mEncoder.get()->getStatelessEncoder(), !mUseVulkan);
-    mResourceSystem->getSceneManager()->getShaderManager().setMaxTextureUnits(mGlMaxTextureImageUnits);
+    mResourceSystem->getSceneManager()->getShaderManager().setMaxTextureUnits(mMaxTextureImageUnits);
     mResourceSystem->getSceneManager()->setUnRefImageDataAfterApply(
         false); // keep to Off for now to allow better state sharing
     mResourceSystem->getSceneManager()->setFilterSettings(Settings::general().mTextureMagFilter,
@@ -933,12 +954,14 @@ void OMW::Engine::prepareEngine()
     // gui needs our shaders path before everything else
     mResourceSystem->getSceneManager()->setShaderPath(mResDir / "shaders");
 
-    osg::GLExtensions& exts = SceneUtil::getGLExtensions();
-
 #if OSG_VERSION_LESS_THAN(3, 6, 6)
-    // hack fix for https://github.com/openscenegraph/OpenSceneGraph/issues/1028
-    if (!osg::isGLExtensionSupported(exts.contextID, "NV_framebuffer_multisample_coverage"))
-        exts.glRenderbufferStorageMultisampleCoverageNV = nullptr;
+    if (!mUseVulkan)
+    {
+        osg::GLExtensions& exts = SceneUtil::getGLExtensions();
+        // hack fix for https://github.com/openscenegraph/OpenSceneGraph/issues/1028
+        if (!osg::isGLExtensionSupported(exts.contextID, "NV_framebuffer_multisample_coverage"))
+            exts.glRenderbufferStorageMultisampleCoverageNV = nullptr;
+    }
 #endif
 
     osg::ref_ptr<osg::Group> guiRoot = new osg::Group;

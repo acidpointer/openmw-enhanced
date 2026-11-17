@@ -50,7 +50,7 @@ namespace Constants
 
     // Identifier for main scene camera
     const std::string SceneCamera = "SceneCam";
-
+    const std::string WaterReflectionCamera = "ReflectionCamera";
 }
 
 #endif

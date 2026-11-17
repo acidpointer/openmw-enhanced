@@ -2,6 +2,27 @@ Shaders Settings
 ################
 
 .. omw-setting::
+   :title: native hemisphere lighting strength
+   :type: float
+   :range: 0.0 to 1.0
+   :default: 0.35
+
+   Vulkan outdoor ambient shading. Upward-facing surfaces receive more sky-colored
+   ambient light, while downward-facing surfaces receive less. The two hemispheres
+   average to the original authored ambient in each color channel. Existing vertex
+   normals and weather sky colors are used; additional textures are unnecessary.
+   Direct sunlight, point lights and emissive material contributions are preserved.
+
+   Zero disables the modulation. Interiors, underwater views, inventory previews,
+   maps and shadow passes retain their existing lighting. Exterior-like interiors
+   use outdoor shading. This is an ambient approximation and does not detect roofs
+   or other objects blocking the sky. Water reflections use their actual view
+   transform so the lighting remains oriented in world space.
+
+   This setting currently has no effect with the OpenGL renderer and is configured
+   through ``settings.cfg``.
+
+.. omw-setting::
    :title: force per pixel lighting
    :type: boolean
    :range: true, false

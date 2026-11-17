@@ -1,3 +1,4 @@
+#include <components/render/memorypolicy.hpp>
 #include <components/render/uploadpages.hpp>
 
 #include <gtest/gtest.h>
@@ -6,6 +7,30 @@
 
 namespace
 {
+    TEST(RenderUploadPages, RetentionBudgetFitsTwoPreferredTexturePagesAlongsideGeometryUploads)
+    {
+        constexpr std::uint64_t MiB = 1024 * 1024;
+        constexpr std::uint64_t LocalMemory = 4ull * 1024 * MiB;
+        constexpr auto Preferred = Render::imageMemoryBlockSize(LocalMemory);
+        Render::UploadPages<int> pages(4 * MiB);
+        int created = 0;
+        const auto create = [&](std::uint64_t) { return std::make_shared<int>(++created); };
+        auto geometry = pages.allocate(MiB, 16, create);
+        auto first = pages.allocate(Preferred, 16, create, Preferred);
+        auto second = pages.allocate(Preferred, 16, create, Preferred);
+        const auto* firstPage = first.mPage.get();
+        const auto* secondPage = second.mPage.get();
+        geometry = {};
+        first = {};
+        second = {};
+        pages.trim(Render::uploadMemoryRetentionBytes(LocalMemory), 32);
+        auto reusedFirst = pages.allocate(Preferred, 16, create, Preferred);
+        auto reusedSecond = pages.allocate(Preferred, 16, create, Preferred);
+        EXPECT_EQ(reusedFirst.mPage.get(), firstPage);
+        EXPECT_EQ(reusedSecond.mPage.get(), secondPage);
+        EXPECT_EQ(created, 3);
+    }
+
     TEST(RenderUploadPages, LargeTextureUploadsSharePreferredPages)
     {
         Render::UploadPages<int> pages(4);

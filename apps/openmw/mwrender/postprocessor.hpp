@@ -179,8 +179,10 @@ namespace MWRender
         bool isTechniqueEnabled(const std::shared_ptr<Fx::Technique>& technique) const;
 
         void setExteriorFlag(bool exterior) { mExteriorFlag = exterior; }
+        bool isExterior() const { return mExteriorFlag; }
 
         void setUnderwaterFlag(bool underwater) { mUnderwater = underwater; }
+        bool isUnderwater() const { return mUnderwater; }
 
         void toggleMode();
 

@@ -3,6 +3,7 @@
 
 #include <components/debug/debuglog.hpp>
 #include <components/fx/scratchrouting.hpp>
+#include <components/render/effectlifetime.hpp>
 #include <components/render/math.hpp>
 #include <components/renderassets/effectshader.hpp>
 #include <components/renderassets/osgimporter.hpp>
@@ -18,10 +19,13 @@
 #include <osg/observer_ptr>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <future>
+#include <limits>
 #include <map>
+#include <numbers>
 #include <regex>
 #include <set>
 
@@ -78,7 +82,7 @@ namespace MWRender::Vulkan
                 uniform = state.getUniform(member.mName);
             const void* source = matrix;
             std::size_t count = matrix ? 16 : 0;
-            if (!matrix && uniform)
+            if (!source && uniform)
             {
                 if (member.mScalar == RenderAssets::EffectMember::Scalar::Float && uniform->getFloatArray())
                 {
@@ -154,7 +158,16 @@ namespace MWRender::Vulkan
             std::weak_ptr<Fx::Technique> mOwner;
             osg::observer_ptr<const osg::Texture2D> mSource;
             std::unique_ptr<Target> mTarget;
+            Target* mPooled = nullptr;
+            Target* get() const { return mPooled ? mPooled : mTarget.get(); }
         };
+        struct TransientTarget
+        {
+            std::unique_ptr<Target> mTarget;
+            std::size_t mFirst = 0, mLast = 0;
+            std::uint64_t mSeen = 0;
+        };
+        std::vector<TransientTarget> mTransientTargets;
         std::map<std::pair<const Fx::Technique*, std::string>, NamedTarget> mNamed;
         struct Program
         {
@@ -164,6 +177,7 @@ namespace MWRender::Vulkan
             std::stop_source mStop;
             std::future<RenderAssets::EffectShader> mCompilation;
             std::string mError;
+            std::uint64_t mLastUsed = 0;
             explicit Program(Render::Backend& backend)
                 : mBackend(backend)
             {
@@ -193,20 +207,36 @@ namespace MWRender::Vulkan
             std::unique_ptr<Target> mTexture;
         };
         std::map<const osg::Texture3D*, VolumeRecord> mVolumes;
+        using Code = std::pair<std::string, std::string>;
         struct ProgramRecord
         {
             osg::observer_ptr<const osg::Program> mSource;
             std::shared_ptr<Program> mProgram;
             std::string mError;
+            const Code* mCode = nullptr;
         };
         std::map<const osg::Program*, ProgramRecord> mPrograms;
         std::map<std::pair<std::string, std::string>, std::shared_ptr<Program>> mCode;
+        std::uint64_t mSerial = 0, mCompilations = 0;
         struct Prepared
         {
             const Fx::DispatchNode* node = nullptr;
+            std::string mName;
             std::vector<std::pair<std::shared_ptr<Program>, const osg::StateSet*>> passes;
+            std::vector<osg::observer_ptr<const osg::Program>> sources;
+            struct Recipe
+            {
+                std::string mOutput;
+                Render::EffectBlend mBlend;
+                bool mOverwrite = false, mMipmaps = false;
+            };
+            std::vector<Recipe> mRecipes;
+            std::map<std::string, std::optional<std::pair<std::size_t, std::size_t>>, std::less<>> mLifetimes;
+            std::weak_ptr<Fx::Technique> mOwner;
         };
         std::vector<Prepared> mPrepared;
+        Fx::ExecutionPlan mPlan;
+        osg::Matrixf mInverseProjection;
         struct Work
         {
             std::vector<std::vector<std::byte>> mData;
@@ -305,6 +335,7 @@ namespace MWRender::Vulkan
         }
         std::shared_ptr<Program> complete(const std::shared_ptr<Program>& result)
         {
+            result->mLastUsed = mSerial;
             if (!result->mError.empty())
                 throw std::invalid_argument(result->mError);
             if (!result->mHandle)
@@ -331,21 +362,41 @@ namespace MWRender::Vulkan
         std::shared_ptr<Program> queue(
             const std::string& vertex, const std::string& fragment, const std::vector<std::string>& samplers)
         {
+            ++mCompilations;
             auto result = std::make_shared<Program>(mBackend);
             result->mCompilation = std::async(std::launch::async,
                 [compiler = mCompiler, vertex, fragment, samplers, stop = result->mStop.get_token()] {
-                    return RenderAssets::compileEffectShader(compiler, vertex, fragment, samplers, stop);
+                    const auto bindings
+                        = samplers.empty() ? RenderAssets::effectSamplerNames(vertex, fragment) : samplers;
+                    return RenderAssets::compileEffectShader(compiler, vertex, fragment, bindings, stop);
                 });
             return result;
         }
 
+        bool programCurrent(const ProgramRecord& record, const osg::Program* source) const
+        {
+            if (!source || record.mSource.get() != source)
+                return false;
+            if (!record.mCode)
+                return !record.mError.empty();
+            for (unsigned i = 0; i < source->getNumShaders(); ++i)
+            {
+                const auto* shader = source->getShader(i);
+                const auto* code = shader->getType() == osg::Shader::VERTEX ? &record.mCode->first
+                    : shader->getType() == osg::Shader::FRAGMENT            ? &record.mCode->second
+                                                                            : nullptr;
+                if (!code || *code != shader->getShaderSource())
+                    return false;
+            }
+            return source->getNumShaders() == 2;
+        }
         std::shared_ptr<Program> program(const RenderAssets::OsgStateView& state)
         {
             const auto* source = dynamic_cast<const osg::Program*>(state.getAttribute(osg::StateAttribute::PROGRAM));
             if (!source)
                 throw std::invalid_argument("Effect pass has no shader program");
             auto& record = mPrograms[source];
-            if (record.mSource.get() == source)
+            if (programCurrent(record, source))
             {
                 if (!record.mError.empty())
                     throw std::invalid_argument(record.mError);
@@ -369,19 +420,17 @@ namespace MWRender::Vulkan
                 if (code.first.empty() || code.second.empty())
                     throw std::invalid_argument("Incomplete effect shader pair");
                 if (const auto found = mCode.find(code); found != mCode.end())
+                {
+                    record.mCode = &found->first;
                     return complete(record.mProgram = found->second);
-                std::vector<std::string> samplers;
-                const std::regex declaration(R"(uniform\s+[iu]?sampler\w*\s+(\w+))");
-                for (const auto* stage : { &code.first, &code.second })
-                    for (std::sregex_iterator match(stage->begin(), stage->end(), declaration), end; match != end;
-                        ++match)
-                        samplers.push_back((*match)[1].str());
-                std::sort(samplers.begin(), samplers.end());
-                samplers.erase(std::unique(samplers.begin(), samplers.end()), samplers.end());
-                auto result = queue(code.first, code.second, samplers);
-                mCode.emplace(std::move(code), result);
+                }
+                auto result = queue(code.first, code.second, {});
+                record.mCode = &mCode.emplace(std::move(code), result).first->first;
                 record.mProgram = result;
-                Log(Debug::Info) << "Vulkan OMWFX queued: " << source->getName();
+                Log(Debug::Info) << "Vulkan OMWFX queued: " << source->getName() << " source=" << std::hex
+                                 << (std::hash<std::string>{}(record.mCode->first)
+                                        ^ std::hash<std::string>{}(record.mCode->second))
+                                 << std::dec;
                 return complete(result);
             }
             catch (const ShaderPending&)
@@ -394,6 +443,64 @@ namespace MWRender::Vulkan
                 throw;
             }
         }
+        std::optional<std::pair<std::size_t, std::size_t>> transientLifetime(
+            const Prepared& item, std::string_view name, const RenderAssets::OsgStateView& canvasState)
+        {
+            const auto& node = *item.node;
+            Render::EffectLifetime lifetime;
+            for (std::size_t p = 0; p < item.passes.size(); ++p)
+            {
+                const auto& [shader, sourceState] = item.passes[p];
+                for (const auto& resource : shader->mShader.mResources)
+                    if (resource.mName == name)
+                    {
+                        lifetime.read(p);
+                    }
+                const auto& source = node.mHandle->getPasses()[p];
+                if (source->getTarget() == name)
+                {
+                    RenderAssets::OsgStateView root(&canvasState, node.mRootStateSet);
+                    RenderAssets::OsgStateView state(&root, sourceState);
+                    lifetime.write(p,
+                        source->usesDefaultVertexShader() && !shader->mShader.mMayDiscard
+                            && !RenderAssets::effectBlend(state).mEnabled);
+                }
+            }
+            if (!lifetime.transient())
+                return {};
+            return std::pair{ lifetime.first(), lifetime.last() };
+        }
+        Target& transientTarget(unsigned width, unsigned height, Render::TargetFormat format,
+            Render::SamplerState sampling, bool mipmaps, std::size_t first, std::size_t last)
+        {
+            sampling.mUseMipmaps &= mipmaps;
+            auto found = std::find_if(mTransientTargets.begin(), mTransientTargets.end(), [&](const auto& slot) {
+                const auto& t = *slot.mTarget;
+                return t.mWidth == width && t.mHeight == height && t.mFormat == format && t.mSampler == sampling
+                    && t.mMipmaps == mipmaps
+                    && (slot.mSeen != mSerial || Render::disjointEffectLifetimes(slot.mFirst, slot.mLast, first, last));
+            });
+            if (found == mTransientTargets.end())
+            {
+                std::unique_ptr<Target> holder;
+                target(holder, width, height, format, sampling, false, mipmaps);
+                mTransientTargets.push_back({ std::move(holder), first, last, mSerial });
+                return *mTransientTargets.back().mTarget;
+            }
+            if (found->mSeen == mSerial)
+            {
+                found->mFirst = std::min(found->mFirst, first);
+                found->mLast = std::max(found->mLast, last);
+            }
+            else
+            {
+                found->mFirst = first;
+                found->mLast = last;
+                found->mSeen = mSerial;
+            }
+            return *found->mTarget;
+        }
+
         template <class ResolveTexture>
         void uniforms(Work& work, const Program& program, const RenderAssets::OsgStateView& state,
             const osg::Matrixf& projection, const ResolveTexture& texture)
@@ -402,7 +509,7 @@ namespace MWRender::Vulkan
             work.mInputs.reserve(program.mShader.mResources.size());
             work.mInputs.clear();
             std::size_t block = 0;
-            const auto inverse = osg::Matrixf::inverse(projection);
+            const auto& inverse = mInverseProjection;
             for (const auto& resource : program.mShader.mResources)
             {
                 if (resource.mBinding.mKind == Render::EffectBindingKind::Texture)
@@ -513,6 +620,7 @@ void main() {
             uniforms(first, *luminance, {}, projection, [&](const std::string&) { return scene; });
             effects.push_back({ {}, lum.mColor, {}, false, {}, luminance->mHandle, first.mInputs });
             effects.back().mOverwrite = !luminance->mShader.mMayDiscard;
+            effects.back().mLabel = "Exposure reduction";
             const auto now = std::chrono::steady_clock::now();
             const auto elapsed = mExposureTime.time_since_epoch().count()
                 ? std::chrono::duration<float>(now - mExposureTime).count()
@@ -533,6 +641,7 @@ void main() {
                 [&](const std::string& name) { return name == "currentLum" ? lum.mColor : previous.mColor; });
             effects.push_back({ {}, current.mColor, {}, false, {}, adapt->mHandle, second.mInputs });
             effects.back().mOverwrite = !adapt->mShader.mMayDiscard;
+            effects.back().mLabel = "Exposure adaptation";
             mInitialized.push_back(&current);
             mExposureQueued = true;
             return current.mColor;
@@ -591,13 +700,19 @@ void main() {
             const RenderAssets::OsgStateView& canvasState, const osg::Matrixd& projection, const osg::Matrixd& view,
             std::span<const Render::Draw> distortion)
         {
+            ++mSerial;
+            for (auto& [key, named] : mNamed)
+                named.mPooled = nullptr;
+            std::erase_if(mTransientTargets, [&](const auto& slot) { return mSerial - slot.mSeen > 256; });
             mExposureQueued = false;
             mCameraQueued = false;
             mWorkUsed = 0;
             mEngineBuffersUsed = 0;
             mInitialized.clear();
             mResolve.clear();
-            const auto plan = Fx::makeExecutionPlan(canvas.getPasses(), canvas.getMask(), canvas.getPostProcessing());
+            Fx::updateExecutionPlan(mPlan, canvas.getPasses(), canvas.getMask(), canvas.getPostProcessing());
+            const auto& plan = mPlan;
+            mInverseProjection = osg::Matrixf::inverse(osg::Matrixf(projection));
             if (plan.mNodes.empty())
             {
                 mHasPreviousView = false;
@@ -645,17 +760,68 @@ void main() {
                         mPrepared.emplace_back();
                     auto& result = mPrepared[preparedCount];
                     result.node = &node;
-                    result.passes.clear();
-                    for (const auto& pass : node.mPasses)
+                    bool unchanged = result.mOwner.lock() == node.mHandle && result.passes.size() == node.mPasses.size()
+                        && result.sources.size() == node.mPasses.size();
+                    for (std::size_t p = 0; unchanged && p < node.mPasses.size(); ++p)
                     {
                         RenderAssets::OsgStateView root(&canvasState, node.mRootStateSet);
+                        RenderAssets::OsgStateView state(&root, node.mPasses[p].mStateSet);
+                        unchanged = result.passes[p].second == node.mPasses[p].mStateSet.get()
+                            && result.sources[p].get() == state.getAttribute(osg::StateAttribute::PROGRAM);
+                        if (unchanged)
+                        {
+                            const auto found = mPrograms.find(result.sources[p].get());
+                            unchanged
+                                = found != mPrograms.end() && programCurrent(found->second, result.sources[p].get());
+                        }
+                    }
+                    if (!unchanged)
+                    {
+                        result.passes.clear();
+                        result.sources.clear();
+                        result.mRecipes.clear();
+                        result.mOwner = node.mHandle;
+                        result.mName = node.mHandle->getName();
+                    }
+                    bool rebuildGraph
+                        = !unchanged || result.mLifetimes.size() != node.mHandle->getRenderTargetsMap().size();
+                    for (const auto& [name, source] : node.mHandle->getRenderTargetsMap())
+                        rebuildGraph |= !result.mLifetimes.contains(name);
+                    for (std::size_t p = 0; p < node.mPasses.size(); ++p)
+                    {
+                        const auto& pass = node.mPasses[p];
+                        RenderAssets::OsgStateView root(&canvasState, node.mRootStateSet);
                         RenderAssets::OsgStateView state(&root, pass.mStateSet);
-                        auto shader = program(state);
+                        auto shader = unchanged ? complete(result.passes[p].first) : program(state);
                         if (!mBackend.deviceInfo().mFloatNormals
                             && std::any_of(shader->mShader.mResources.begin(), shader->mShader.mResources.end(),
                                 [](const auto& resource) { return resource.mName == "omw_SamplerNormals"; }))
                             throw std::invalid_argument("Device has no blendable floating-point normal attachment");
-                        result.passes.emplace_back(std::move(shader), pass.mStateSet.get());
+                        const auto blending = RenderAssets::effectBlend(state);
+                        const auto& passSource = node.mHandle->getPasses()[p];
+                        const bool overwrite = !blending.mEnabled && passSource->usesDefaultVertexShader()
+                            && !shader->mShader.mMayDiscard;
+                        if (p == result.mRecipes.size())
+                            result.mRecipes.emplace_back();
+                        auto& recipe = result.mRecipes[p];
+                        if (recipe.mOutput != passSource->getTarget() || recipe.mBlend != blending
+                            || recipe.mOverwrite != overwrite || recipe.mMipmaps != pass.mMipMap)
+                        {
+                            recipe = { passSource->getTarget(), blending, overwrite, pass.mMipMap };
+                            rebuildGraph = true;
+                        }
+                        if (!unchanged)
+                        {
+                            result.sources.emplace_back(
+                                dynamic_cast<const osg::Program*>(state.getAttribute(osg::StateAttribute::PROGRAM)));
+                            result.passes.emplace_back(std::move(shader), pass.mStateSet.get());
+                        }
+                    }
+                    if (rebuildGraph)
+                    {
+                        result.mLifetimes.clear();
+                        for (const auto& [name, source] : node.mHandle->getRenderTargetsMap())
+                            result.mLifetimes.emplace(name, transientLifetime(result, name, canvasState));
                     }
                     ++preparedCount;
                 }
@@ -665,6 +831,7 @@ void main() {
                 }
                 catch (const std::exception& error)
                 {
+                    node.mHandle->setRendererError(error.what());
                     const auto message = node.mHandle->getName() + ": " + error.what();
                     if (mWarnings.insert(message).second)
                         Log(Debug::Warning) << "Vulkan OMWFX skipped " << message;
@@ -749,6 +916,7 @@ void main(){
                     [&](const std::string& name) { return name == "worldDepth" ? worldDepth : scene.mDepth; });
                 effects.push_back({ {}, merged.mColor, {}, false, {}, shader->mHandle, work.mInputs });
                 effects.back().mOverwrite = !shader->mShader.mMayDiscard;
+                effects.back().mLabel = "Depth conversion";
                 depth = merged.mColor;
             }
             Render::TextureHandle distortionTexture;
@@ -760,6 +928,7 @@ void main(){
                     draw.mMaskTexture = depth;
                 effects.push_back({ mDistortionDraws, field.mColor, { 0, 0, 0, 0 }, true });
                 effects.back().mReversedDepth = true;
+                effects.back().mLabel = "Distortion";
                 distortionTexture = field.mColor;
             }
             bool needsExposure = false;
@@ -771,7 +940,7 @@ void main(){
                 = needsExposure ? exposure(effects, scene.mColor, osg::Matrixf(projection)) : Render::TextureHandle{};
             Fx::ScratchRouting routing;
             bool presentDirectly = false;
-            const auto scratch = [&](int slot) {
+            const auto scratch = [&](int slot, bool overwrite = false) {
                 if (slot < 0)
                     return scene.mColor;
                 const auto scratchFormat
@@ -782,15 +951,18 @@ void main(){
                 if (!destination.mInitialized
                     && std::find(mInitialized.begin(), mInitialized.end(), &destination) == mInitialized.end())
                 {
-                    effects.push_back({ {}, destination.mColor, { .5f, .5f, .5f, 1.f }, true });
+                    if (!overwrite)
+                        effects.push_back({ {}, destination.mColor, { .5f, .5f, .5f, 1.f }, true });
                     mInitialized.push_back(&destination);
                 }
                 return destination.mColor;
             };
-            std::size_t completed = 0;
+            std::size_t completed = 0, ordinal = 0;
             for (const auto& item : prepared)
             {
                 const auto& node = *item.node;
+                const auto base = ordinal;
+                ordinal += item.passes.size() + 1;
                 const auto passCount = effects.size(), initializedCount = mInitialized.size();
                 const auto workCount = mWorkUsed, engineCount = mEngineBuffersUsed;
                 const auto previousRouting = routing;
@@ -807,10 +979,23 @@ void main(){
                             entry.mSource = source.mTarget.get();
                         }
                         const auto [w, h] = source.mSize.get(width, height);
-                        auto& destination
-                            = target(entry.mTarget, w, h, targetFormat(source.mTarget->getInternalFormat()),
+                        const bool uniqueTechnique
+                            = std::count_if(prepared.begin(), prepared.end(),
+                                  [&](const auto& other) { return other.node->mHandle == node.mHandle; })
+                            == 1;
+                        const auto lifetime = uniqueTechnique ? item.mLifetimes.find(name)->second : std::nullopt;
+                        if (lifetime)
+                        {
+                            entry.mTarget.reset();
+                            entry.mPooled = &transientTarget(w, h, targetFormat(source.mTarget->getInternalFormat()),
+                                RenderAssets::OsgImporter::importSampler(*source.mTarget), source.mMipMap,
+                                base + lifetime->first, base + lifetime->second);
+                        }
+                        else
+                            target(entry.mTarget, w, h, targetFormat(source.mTarget->getInternalFormat()),
                                 RenderAssets::OsgImporter::importSampler(*source.mTarget), false, source.mMipMap);
-                        if (!destination.mInitialized)
+                        auto& destination = *entry.get();
+                        if (!lifetime && !destination.mInitialized)
                         {
                             effects.push_back({ {}, destination.mColor,
                                 { source.mClearColor.r(), source.mClearColor.g(), source.mClearColor.b(),
@@ -824,18 +1009,17 @@ void main(){
                         const auto& [shader, sourceState] = item.passes[index];
                         RenderAssets::OsgStateView root(&canvasState, node.mRootStateSet);
                         RenderAssets::OsgStateView state(&root, sourceState);
-                        const auto& source = node.mHandle->getPasses()[index];
-                        const auto name = source->getTarget();
-                        const auto blending = RenderAssets::effectBlend(state);
-                        const bool overwrite
-                            = !blending.mEnabled && source->usesDefaultVertexShader() && !shader->mShader.mMayDiscard;
+                        const auto& recipe = item.mRecipes[index];
+                        const auto& name = recipe.mOutput;
+                        const auto& blending = recipe.mBlend;
+                        const bool overwrite = recipe.mOverwrite;
                         presentDirectly = &item == &prepared.back() && index + 1 == item.passes.size() && name.empty()
                             && overwrite && !shader->mShader.mRequiresOffscreen;
                         auto nextRouting = routing;
                         const int slot = name.empty() ? nextRouting.selectOutput(index + 1 == item.passes.size()) : -1;
-                        const auto output = !name.empty() ? mNamed.at({ node.mHandle.get(), name }).mTarget->mColor
+                        const auto output = !name.empty() ? mNamed.at({ node.mHandle.get(), name }).get()->mColor
                             : presentDirectly             ? Render::TextureHandle{}
-                                                          : scratch(slot);
+                                                          : scratch(slot, overwrite);
                         auto& work = nextWork();
                         uniforms(work, *shader, state, osg::Matrixf(projection), [&](const std::string& sampler) {
                             if (sampler == "omw_SamplerDistortion")
@@ -852,8 +1036,13 @@ void main(){
                                 return worldDepth;
                             if (sampler == "omw_SamplerDepth")
                                 return depth;
-                            if (const auto named = mNamed.find({ node.mHandle.get(), sampler }); named != mNamed.end())
-                                return named->second.mTarget->mColor;
+                            if (const auto named = mNamed.find({ node.mHandle.get(), sampler });
+                                named != mNamed.end() && node.mHandle->getRenderTargetsMap().contains(sampler))
+                            {
+                                if (!named->second.get())
+                                    throw std::invalid_argument("OMWFX target has no initialized storage: " + sampler);
+                                return named->second.get()->mColor;
+                            }
                             const auto unit = RenderAssets::textureUnit(state, sampler);
                             const auto* attribute
                                 = unit ? state.getTextureAttribute(*unit, osg::StateAttribute::TEXTURE) : nullptr;
@@ -869,7 +1058,8 @@ void main(){
                         effects.push_back({ {}, output, {}, false, {}, shader->mHandle, work.mInputs });
                         effects.back().mOverwrite = overwrite;
                         effects.back().mEffectBlend = blending;
-                        effects.back().mGenerateMipmaps = node.mPasses[index].mMipMap;
+                        effects.back().mLabel = item.mName;
+                        effects.back().mGenerateMipmaps = recipe.mMipmaps;
                         routing = nextRouting;
                         if (presentDirectly)
                         {
@@ -877,7 +1067,24 @@ void main(){
                             effects.back().mClear = true;
                         }
                     }
+                    bool pipelinesReady = true;
+                    for (std::size_t p = passCount; p < effects.size(); ++p)
+                        if (effects[p].mEffect)
+                            pipelinesReady &= mBackend.prepareEffect(
+                                effects[p].mEffect, effects[p].mTarget, effects[p].mEffectBlend);
+                    if (!pipelinesReady)
+                        throw ShaderPending{};
+                    node.mHandle->setRendererError({});
                     ++completed;
+                }
+                catch (const ShaderPending&)
+                {
+                    effects.resize(passCount);
+                    mInitialized.resize(initializedCount);
+                    mWorkUsed = workCount;
+                    mEngineBuffersUsed = engineCount;
+                    routing = previousRouting;
+                    presentDirectly = previousDirect;
                 }
                 catch (const std::exception& error)
                 {
@@ -889,6 +1096,7 @@ void main(){
                     mEngineBuffersUsed = engineCount;
                     routing = previousRouting;
                     presentDirectly = previousDirect;
+                    node.mHandle->setRendererError(error.what());
                     const auto message = node.mHandle->getName() + ": " + error.what();
                     if (mWarnings.insert(message).second)
                         Log(Debug::Warning) << "Vulkan OMWFX skipped " << message;
@@ -916,26 +1124,48 @@ void main(){
             // scene intact, rather than stranding it in an offscreen target.
             static_assert(
                 std::is_nothrow_copy_constructible_v<Render::Pass> && std::is_nothrow_move_assignable_v<Render::Pass>);
+            bool builtinsReady = true;
+            for (const auto& pass : effects)
+                if (pass.mEffect)
+                    builtinsReady &= mBackend.prepareEffect(pass.mEffect, pass.mTarget, pass.mEffectBlend);
+            if (!builtinsReady)
+                throw ShaderPending{};
             passes.reserve(passes.size() + effects.size() + 1);
             passes[sceneIndex].mViewport = { 0, 0, width, height };
             passes[sceneIndex].mTarget = scene.mColor;
+            passes[sceneIndex].mLabel = "Scene";
             passes[sceneIndex].mPreserveWorldDepth = firstPerson;
             passes[sceneIndex].mDiscardDepthAfter = !needsDepth && !needsDistortion;
             passes.insert(passes.begin() + sceneIndex + 1, effects.begin(), effects.end());
             if (!presentDirectly)
-                passes.insert(
-                    passes.begin() + sceneIndex + effects.size() + 1, { mResolve, {}, {}, true, windowViewport });
+            {
+                Render::Pass resolve{ mResolve, {}, {}, true, windowViewport };
+                resolve.mLabel = "Final resolve";
+                passes.insert(passes.begin() + sceneIndex + effects.size() + 1, resolve);
+            }
             mCameraQueued = true;
             std::erase_if(mNamed, [](const auto& pair) { return pair.second.mOwner.expired(); });
             std::erase_if(mVolumes, [](const auto& pair) { return !pair.second.mSource.valid(); });
             std::erase_if(mPrograms, [](const auto& pair) { return !pair.second.mSource.valid(); });
-            std::erase_if(mCode, [](const auto& pair) {
-                const auto& program = pair.second;
-                // Destroying an unfinished async future would join its worker.
-                return program.use_count() == 1
-                    && (!program->mCompilation.valid()
-                        || program->mCompilation.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
-            });
+            // Temporary OSG programs disappear during HUD/chain rebuilds. Keep
+            // their compiled content warm instead of compiling it again.
+            const auto unused = [&] {
+                return std::count_if(
+                    mCode.begin(), mCode.end(), [](const auto& entry) { return entry.second.use_count() == 1; });
+            };
+            while (unused() > 64)
+            {
+                auto oldest = mCode.end();
+                for (auto it = mCode.begin(); it != mCode.end(); ++it)
+                    if (it->second.use_count() == 1
+                        && (!it->second->mCompilation.valid()
+                            || it->second->mCompilation.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                        && (oldest == mCode.end() || it->second->mLastUsed < oldest->second->mLastUsed))
+                        oldest = it;
+                if (oldest == mCode.end())
+                    break;
+                mCode.erase(oldest);
+            }
         }
     };
 
@@ -968,6 +1198,10 @@ void main(){
             if (mImpl->mWarnings.insert(error.what()).second)
                 Log(Debug::Warning) << "Vulkan OMWFX: " << error.what();
         }
+    }
+    std::uint64_t Effects::shaderCompilations() const
+    {
+        return mImpl->mCompilations;
     }
     void Effects::submitted()
     {

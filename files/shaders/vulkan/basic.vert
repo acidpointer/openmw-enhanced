@@ -8,6 +8,15 @@ const uint surfaceShader = materialShader == 7u ? 0u : materialShader == 8u ? 5u
 layout(constant_id = 1) const bool writeNormals = true;
 layout(constant_id = 2) const bool hardwareDepthClamp = true;
 
+layout(push_constant) uniform SceneState
+{
+    vec4 color;
+    vec4 range;
+    vec4 worldUp;
+    vec4 hemisphere;
+    vec4 heightFog;
+} fog;
+
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec2 inUV;
 layout(location = 2) in vec4 inColor;
@@ -146,7 +155,7 @@ void main()
     // Window and reflection passes do not write normal attachments. Unlit
     // surfaces in those passes need neither a view transform nor normalized
     // normals; fog already uses reciprocal clip W in the fragment shader.
-    viewPosition = litSurface || clipping || surfaceShader == 1u
+    viewPosition = litSurface || clipping || surfaceShader == 1u || fog.heightFog.x > 0.0
         ? (data.viewFromModel * vec4(inPosition, 1.0)).xyz : vec3(0.0);
     viewNormal = litSurface || surfaceShader == 1u || (writeNormals && surfaceShader != 2u)
         ? safeNormal(mat3(data.normalFromModel) * inNormal) : vec3(0.0, 0.0, 1.0);
@@ -167,7 +176,10 @@ void main()
     bool hasSpecular = data.specular.w > 0.0 && any(notEqual(specular, vec3(0.0)));
     vec3 eye = hasSpecular ? safeNormal(-position) : vec3(0.0);
     vec3 direction = safeNormal(data.sunPosition.xyz);
-    vec3 lit = ambient * data.sunAmbient.rgb + emission;
+    float facingSky = clamp(dot(normal, fog.worldUp.xyz) * fog.hemisphere.w, -1.0, 1.0);
+    // Opposing hemispheres average to authored ambient, channel by channel.
+    vec3 ambientLight = data.sunAmbient.rgb * (vec3(1.0) + fog.hemisphere.rgb * facingSky);
+    vec3 lit = ambient * ambientLight + emission;
     lit += diffuse.rgb * data.sunDiffuse.rgb * max(dot(normal, direction), 0.0);
     if (receivesShadows)
         sunDiffuseColor = diffuse.rgb * data.sunDiffuse.rgb * max(dot(normal, direction), 0.0) * data.tint.rgb;

@@ -12,6 +12,7 @@ namespace Render
         virtual ~Presentation() = default;
         virtual void setPresentMode(PresentMode mode) = 0;
         virtual void setStatsLevel(int) {}
+        virtual const DeviceInfo* nativeDeviceInfo() const { return nullptr; }
         virtual CapturedImage capture(bool includeGui = true) = 0;
     };
 }

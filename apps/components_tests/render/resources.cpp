@@ -1,8 +1,10 @@
 #include <components/render/allocationranges.hpp>
+#include <components/render/backend.hpp>
 #include <components/render/bufferarena.hpp>
 #include <components/render/bufferversions.hpp>
 #include <components/render/capture.hpp>
 #include <components/render/drawranges.hpp>
+#include <components/render/effectlifetime.hpp>
 #include <components/render/framecache.hpp>
 #include <components/render/memorypolicy.hpp>
 #include <components/render/meshindices.hpp>
@@ -11,6 +13,10 @@
 #include <components/render/residency.hpp>
 #include <components/render/resourcepool.hpp>
 #include <components/sceneutil/fade.hpp>
+#include <components/shader/shadermanager.hpp>
+
+#include <osg/StateSet>
+#include <osg/Texture2D>
 
 #include <gtest/gtest.h>
 
@@ -23,6 +29,58 @@
 
 namespace
 {
+    static_assert(Render::sceneTextureUnitCount(1'048'576) == 32);
+    static_assert(Render::sceneTextureUnitCount(std::numeric_limits<std::uint32_t>::max()) == 32);
+    static_assert(Render::sceneTextureUnitCount(16) == 16);
+    static_assert(Render::sceneTextureUnitCount(0) == 0);
+
+    TEST(SceneTextureUnits, LargeDescriptorCapacityKeepsOsgStateArraysBounded)
+    {
+        Shader::ShaderManager shaders;
+        shaders.setMaxTextureUnits(Render::sceneTextureUnitCount(1'048'576));
+        osg::ref_ptr<osg::StateSet> state = new osg::StateSet;
+        osg::ref_ptr<osg::Texture2D> texture = new osg::Texture2D;
+        for (const auto& [slot, count] : std::array{ std::pair{ Shader::ShaderManager::Slot::ShadowMaps, 4 },
+                 std::pair{ Shader::ShaderManager::Slot::OpaqueColorTexture, 1 },
+                 std::pair{ Shader::ShaderManager::Slot::OpaqueDepthTexture, 1 },
+                 std::pair{ Shader::ShaderManager::Slot::SkyTexture, 1 } })
+        {
+            const int unit = shaders.reserveGlobalTextureUnits(slot, count);
+            ASSERT_GE(unit, 0);
+            ASSERT_LE(unit + count, 32);
+            for (int i = 0; i < count; ++i)
+                state->setTextureAttributeAndModes(unit + i, texture, osg::StateAttribute::ON);
+        }
+        EXPECT_LE(state->getTextureAttributeList().size(), 32u);
+        EXPECT_LE(state->getTextureModeList().size(), 32u);
+        EXPECT_EQ(shaders.getAvailableTextureUnits(), 25);
+    }
+
+    static_assert([] {
+        Render::EffectLifetime history;
+        history.read(0);
+        history.write(1, true);
+        if (history.transient())
+            return false;
+        Render::EffectLifetime feedback;
+        feedback.read(0);
+        feedback.write(0, true);
+        if (feedback.transient())
+            return false;
+        Render::EffectLifetime blended;
+        blended.write(0, false);
+        blended.write(1, true);
+        if (blended.transient())
+            return false;
+        Render::EffectLifetime temporary;
+        temporary.write(1, true);
+        temporary.read(3);
+        if (!temporary.transient() || temporary.first() != 1 || temporary.last() != 3)
+            return false;
+        return !Render::disjointEffectLifetimes(1, 3, 3, 5) && Render::disjointEffectLifetimes(1, 3, 4, 6)
+            && Render::disjointEffectLifetimes(4, 6, 1, 3);
+    }());
+
     constexpr bool captureKeepsPresentationOverlays()
     {
         Render::CaptureBoundary thumbnail(true, false);
@@ -43,6 +101,9 @@ namespace
     static_assert(Render::imageMemoryBlockSize(512ull * 1024 * 1024) == 16 * 1024 * 1024);
     static_assert(Render::imageMemoryBlockSize(2ull * 1024 * 1024 * 1024) == 32 * 1024 * 1024);
     static_assert(Render::imageMemoryBlockSize(24ull * 1024 * 1024 * 1024) == 64 * 1024 * 1024);
+    static_assert(Render::uploadMemoryRetentionBytes(0) == 36 * 1024 * 1024);
+    static_assert(Render::uploadMemoryRetentionBytes(2ull * 1024 * 1024 * 1024) == 68 * 1024 * 1024);
+    static_assert(Render::uploadMemoryRetentionBytes(std::numeric_limits<std::uint64_t>::max()) == 132 * 1024 * 1024);
     static_assert(SceneUtil::smoothFade(0, 1, -1) == 0 && SceneUtil::smoothFade(0, 1, 2) == 1);
     static_assert(SceneUtil::smoothFade(0, 1, .5f) == .5f);
     static_assert(SceneUtil::smoothFade(0, 1, .25f) == .15625f);
@@ -265,6 +326,42 @@ namespace
         return !cache.find(0) && !cache.find(79) && cache.capacity() == capacity && cache.size() == 0;
     }
     static_assert(frameLookupDoesNotInsert());
+
+    struct AlignedFrameKey
+    {
+        std::size_t mIndex;
+        std::size_t* mComparisons;
+        constexpr bool operator==(const AlignedFrameKey& other) const
+        {
+            ++*mComparisons;
+            return mIndex == other.mIndex;
+        }
+    };
+    struct AlignedFrameHash
+    {
+        constexpr std::size_t operator()(const AlignedFrameKey& key) const { return key.mIndex << 20; }
+    };
+    constexpr bool alignedFrameLookupsStayBounded()
+    {
+        Render::FrameCache<AlignedFrameKey, unsigned, AlignedFrameHash> cache;
+        std::size_t comparisons = 0;
+        for (unsigned frame = 0; frame < 2; ++frame)
+        {
+            cache.beginFrame();
+            for (unsigned i = 0; i < 128; ++i)
+                cache.getOrCreate({ i, &comparisons }).first = i * 3;
+            for (unsigned i = 0; i < 128; ++i)
+            {
+                const auto* value = cache.find({ i, &comparisons });
+                if (!value || *value != i * 3)
+                    return false;
+            }
+        }
+        // Aligned addresses must not turn a frame's lookups into a quadratic
+        // scan. Compare work, not wall-clock timing or a particular layout.
+        return comparisons < 128 * 12;
+    }
+    static_assert(alignedFrameLookupsStayBounded());
 
     TEST(RenderFrameCache, GrowthPreservesFrameValuesThroughCollisions)
     {

@@ -19,7 +19,6 @@
 #include <components/vfs/manager.hpp>
 
 #include "parseconstants.hpp"
-#include "shadercompatibility.hpp"
 
 namespace
 {
@@ -68,6 +67,7 @@ namespace Fx
     {
         mTextures.clear();
         mStatus = Status::Uncompiled;
+        mRendererError.clear();
         mValid = false;
         mHDR = false;
         mNormals = false;
@@ -180,23 +180,7 @@ namespace Fx
 
                 mValid = true;
             };
-            if (auto optimized = optimizeLegacyShader(
-                    mName, source, mUBO && !Stereo::getMultiview() && mWidth >= 128 && mHeight >= 128))
-            {
-                try
-                {
-                    prepare(std::move(optimized->mSource));
-                    Log(Debug::Info) << "Postprocess compatibility: " << mFilePath << " (" << optimized->mRevision
-                                     << ")";
-                }
-                catch (const std::runtime_error& error)
-                {
-                    Log(Debug::Warning) << "Postprocess compatibility fallback: " << mFilePath << ": " << error.what();
-                    prepare(std::move(source));
-                }
-            }
-            else
-                prepare(std::move(source));
+            prepare(std::move(source));
         }
         catch (const std::runtime_error& e)
         {
@@ -218,13 +202,8 @@ namespace Fx
 
     void Technique::setRenderSize(int width, int height)
     {
-        const bool compactBefore = mWidth >= 128 && mHeight >= 128;
         mWidth = width;
         mHeight = height;
-        // The packed-mask guard band must contain every blur/filter footprint.
-        // Very small render surfaces keep the original full-size mask routing.
-        if (mName == "godrays" && compactBefore != (width >= 128 && height >= 128))
-            compile();
     }
 
     bool Technique::setLastModificationTime(std::filesystem::file_time_type timeStamp)

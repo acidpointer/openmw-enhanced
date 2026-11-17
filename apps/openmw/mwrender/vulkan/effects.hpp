@@ -28,6 +28,7 @@ namespace MWRender
             void append(std::vector<Render::Pass>& passes, PingPongCanvas& canvas,
                 const RenderAssets::OsgStateView& state, const osg::Matrixd& projection, const osg::Matrixd& view,
                 std::span<const Render::Draw> distortion = {});
+            std::uint64_t shaderCompilations() const;
             void submitted();
             void stop();
 

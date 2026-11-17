@@ -141,12 +141,12 @@ add_component_dir (shader
 add_component_dir (render
     backend resourcepool allocationranges module
     )
-list(APPEND COMPONENT_FILES render/bufferarena.hpp render/bufferversions.hpp render/drawranges.hpp render/framecache.hpp render/meshindices.hpp)
+list(APPEND COMPONENT_FILES render/bufferarena.hpp render/bufferversions.hpp render/drawranges.hpp render/effectlifetime.hpp render/framecache.hpp render/meshindices.hpp)
 
 add_component_dir (renderassets
     model osgimporter osgstate particles effectshader
     )
-list(APPEND COMPONENT_FILES renderassets/imagevariants.hpp)
+list(APPEND COMPONENT_FILES renderassets/imagevariants.hpp renderassets/imagebinding.hpp)
 list(APPEND COMPONENT_FILES renderassets/meshkey.hpp)
 
 add_component_dir (sceneutil
@@ -188,7 +188,7 @@ add_component_dir(esm attr common defs gameformat esmcommon records util luascri
     exteriorcelllocation
     )
 
-add_component_dir(fx pass technique lexer lexertypes parseconstants widgets stateupdater executionplan shadercompatibility scratchrouting)
+add_component_dir(fx pass technique lexer lexertypes parseconstants widgets stateupdater executionplan scratchrouting)
 
 add_component_dir(std140 ubo)
 

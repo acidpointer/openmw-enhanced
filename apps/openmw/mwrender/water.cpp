@@ -250,7 +250,7 @@ namespace MWRender
         {
             camera->setReferenceFrame(osg::Camera::RELATIVE_RF);
             camera->setSmallFeatureCullingPixelSize(Settings::water().mSmallFeatureCullingPixelSize);
-            camera->setName("ReflectionCamera");
+            camera->setName(Constants::WaterReflectionCamera);
             camera->addCullCallback(new InheritViewPointCallback);
 
             // Inform the shader that we're in a reflection

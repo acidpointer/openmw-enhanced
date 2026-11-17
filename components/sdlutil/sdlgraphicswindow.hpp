@@ -19,6 +19,7 @@ namespace SDLUtil
         bool mRealized;
         bool mOwnsWindow;
         bool mOffscreen = false;
+        bool mNative = false;
         VSyncMode mVSyncMode;
 
         void init();
@@ -36,6 +37,7 @@ namespace SDLUtil
         const char* className() const override { return "GraphicsWindowSDL2"; }
 
         bool valid() const override { return mValid; }
+        void runOperations() override;
 
         /** Realise the GraphicsContext.*/
         bool realizeImplementation() override;

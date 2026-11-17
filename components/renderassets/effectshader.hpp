@@ -53,6 +53,7 @@ namespace RenderAssets
     // the effect files/settings used by the OMWFX parser and editor.
     std::string translateEffectShader(
         std::string_view source, bool fragment, std::span<const std::string> samplers = {});
+    std::vector<std::string> effectSamplerNames(std::string_view vertex, std::string_view fragment);
     std::vector<EffectResource> reflectEffectShader(std::span<const std::uint32_t> words);
     std::vector<std::string> effectCompilerArguments(
         const std::filesystem::path& compiler, const std::vector<std::string>& samplers);

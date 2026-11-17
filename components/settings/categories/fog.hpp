@@ -27,6 +27,11 @@ namespace Settings
         SettingValue<float> mDistantInteriorFogEnd{ mIndex, "Fog", "distant interior fog end" };
         SettingValue<bool> mRadialFog{ mIndex, "Fog", "radial fog" };
         SettingValue<bool> mExponentialFog{ mIndex, "Fog", "exponential fog" };
+        SettingValue<float> mNativeHeightFogStrength{ mIndex, "Fog", "native height fog strength",
+            makeClampSanitizerFloat(0, 1) };
+        SettingValue<float> mNativeHeightFogHalfHeight{ mIndex, "Fog", "native height fog half height",
+            makeClampSanitizerFloat(1, 10000000) };
+        SettingValue<float> mNativeHeightFogBaseHeight{ mIndex, "Fog", "native height fog base height" };
         SettingValue<bool> mSkyBlending{ mIndex, "Fog", "sky blending" };
         SettingValue<float> mSkyBlendingStart{ mIndex, "Fog", "sky blending start",
             makeClampStrictMaxSanitizerFloat(0, 1) };

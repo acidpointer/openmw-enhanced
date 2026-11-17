@@ -20,6 +20,8 @@ namespace Settings
 
         SettingValue<bool> mForcePerPixelLighting{ mIndex, "Shaders", "force per pixel lighting" };
         SettingValue<bool> mClampLighting{ mIndex, "Shaders", "clamp lighting" };
+        SettingValue<float> mNativeHemisphereLightingStrength{ mIndex, "Shaders", "native hemisphere lighting strength",
+            makeClampSanitizerFloat(0, 1) };
         SettingValue<bool> mParticlePointLighting{ mIndex, "Shaders", "particle point lighting" };
         SettingValue<bool> mAutoUseObjectNormalMaps{ mIndex, "Shaders", "auto use object normal maps" };
         SettingValue<bool> mAutoUseObjectSpecularMaps{ mIndex, "Shaders", "auto use object specular maps" };

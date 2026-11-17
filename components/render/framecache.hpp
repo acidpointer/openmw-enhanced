@@ -34,7 +34,7 @@ namespace Render
                 grow();
             for (;;)
             {
-                auto slot = mHash(key) & (mEntries.size() - 1);
+                auto slot = hash(key) & (mEntries.size() - 1);
                 while (mEntries[slot].mEpoch == mEpoch)
                 {
                     if (mEntries[slot].mKey == key)
@@ -57,7 +57,7 @@ namespace Render
         {
             if (mEntries.empty())
                 return nullptr;
-            auto slot = mHash(key) & (mEntries.size() - 1);
+            auto slot = hash(key) & (mEntries.size() - 1);
             while (mEntries[slot].mEpoch == mEpoch)
             {
                 if (mEntries[slot].mKey == key)
@@ -70,6 +70,31 @@ namespace Render
         constexpr std::size_t capacity() const { return mEntries.size() / 2; }
 
     private:
+        constexpr std::size_t hash(const Key& key) const
+        {
+            // Pointer hashes commonly preserve allocation alignment. Masking
+            // them directly into a power-of-two table clusters scene objects
+            // and aligned uniform slices into long linear-probe runs.
+            std::size_t value = mHash(key);
+            if constexpr (sizeof(std::size_t) >= 8)
+            {
+                value ^= value >> 30;
+                value *= 0xbf58476d1ce4e5b9ull;
+                value ^= value >> 27;
+                value *= 0x94d049bb133111ebull;
+                value ^= value >> 31;
+            }
+            else
+            {
+                value ^= value >> 16;
+                value *= 0x7feb352du;
+                value ^= value >> 15;
+                value *= 0x846ca68bu;
+                value ^= value >> 16;
+            }
+            return value;
+        }
+
         struct Entry
         {
             std::uint64_t mEpoch = 0;
@@ -85,7 +110,7 @@ namespace Render
             {
                 if (entry.mEpoch != mEpoch)
                     continue;
-                auto slot = mHash(entry.mKey) & (replacement.size() - 1);
+                auto slot = hash(entry.mKey) & (replacement.size() - 1);
                 while (replacement[slot].mEpoch == mEpoch)
                     slot = (slot + 1) & (replacement.size() - 1);
                 replacement[slot] = std::move(entry);

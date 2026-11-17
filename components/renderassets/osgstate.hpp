@@ -148,10 +148,13 @@ namespace RenderAssets
         // general resolver. No allocation or full inherited-state copy on bind.
         mutable std::array<const osg::StateSet::RefUniformPair*, static_cast<unsigned>(NativeUniform::Count)>
             mUniformCache{};
-        mutable std::array<const osg::StateSet::RefAttributePair*, 32> mAttributeCache{};
+        // Ordinary texture/matrix slots 0..7 plus semantic labels through
+        // unit 31. Reserved shadow/scene units must not force repeated walks
+        // of the inherited chain when a material has no blend/normal map.
+        mutable std::array<const osg::StateSet::RefAttributePair*, 56> mAttributeCache{};
         mutable std::array<const osg::StateAttribute::GLModeValue*, 5> mModeCache{};
         mutable std::uint64_t mUniformSeen = 0;
-        mutable std::uint32_t mAttributeSeen = 0;
+        mutable std::uint64_t mAttributeSeen = 0;
         mutable unsigned mModeSeen = 0;
         mutable unsigned mTextureUnits = 0;
         mutable bool mNativeStatePrepared = false;

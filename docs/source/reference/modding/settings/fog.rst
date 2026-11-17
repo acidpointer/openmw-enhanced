@@ -2,6 +2,47 @@ Fog Settings
 ############
 
 .. omw-setting::
+   :title: native height fog strength
+   :type: float
+   :range: 0.0 to 1.0
+   :default: 0.5
+
+   Vulkan outdoor height fog. Redistributes the current weather's distance-fog
+   optical depth using the analytically integrated density along the view ray.
+   Lower regions become foggier and higher regions clearer. Existing fog color,
+   the clear start boundary and fully fogged end boundary are retained. Density
+   redistribution is bounded to avoid extreme opacity changes at large heights.
+   High-altitude clearing fades back to the weather fog near its end boundary
+   to keep distant geometry from ending at a visible clipping edge.
+   Zero preserves the existing distance-fog factor.
+
+   This runs in the existing material pass, independently of postprocessing.
+   Interiors, underwater views, previews, maps and shadow passes are excluded.
+   Exterior-like interiors use outdoor fog. Reflections integrate the physical
+   path folded at the water plane, rather than fog beneath a mirrored camera.
+   This setting currently affects only Vulkan and is configured in ``settings.cfg``.
+
+.. omw-setting::
+   :title: native height fog half height
+   :type: float
+   :range: 1.0 to 10000000.0
+   :default: 8192.0
+
+   Vertical distance in world units over which outdoor fog density halves.
+   Larger values make the altitude variation gentler. The density at height
+   ``z`` is proportional to ``2 ** (-(z - base height) / half height)``.
+
+.. omw-setting::
+   :title: native height fog base height
+   :type: float
+   :default: 0.0
+
+   World-space reference altitude for outdoor height fog. At this height, a
+   horizontal ray retains the weather's ordinary fog factor. Zero corresponds
+   to the standard sea-level reference; configure another value for worlds
+   using a different altitude origin. This is independent of local lake levels.
+
+.. omw-setting::
    :title: use distant fog
    :type: boolean
    :range: true, false

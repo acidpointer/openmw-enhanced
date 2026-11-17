@@ -137,7 +137,6 @@ namespace OMW
     class Engine
     {
         SDL_Window* mWindow;
-        SDL_Window* mCompatibilityWindow = nullptr;
         bool mUseVulkan = false;
         std::unique_ptr<VFS::Manager> mVFS;
         std::unique_ptr<Resource::ResourceSystem> mResourceSystem;
@@ -200,7 +199,7 @@ namespace OMW
         bool mNewGame;
 
         Files::ConfigurationManager& mCfgMgr;
-        int mGlMaxTextureImageUnits;
+        int mMaxTextureImageUnits;
 
         // not implemented
         Engine(const Engine&);

@@ -1,7 +1,10 @@
 #include "sdlgraphicswindow.hpp"
+#include "drawablesize.hpp"
 
 #include <SDL_video.h>
 #include <components/debug/frametrace.hpp>
+#include <components/render/presentation.hpp>
+#include <osg/Camera>
 #include <osg/FrameStamp>
 
 #ifdef OPENMW_GL4ES_MANUAL_INIT
@@ -13,7 +16,24 @@ namespace SDLUtil
 
     GraphicsWindowSDL2::~GraphicsWindowSDL2()
     {
-        close(true);
+        close(!mNative);
+        if (mNative)
+            closeImplementation();
+    }
+
+    void GraphicsWindowSDL2::runOperations()
+    {
+        if (!mNative)
+        {
+            osgViewer::GraphicsWindow::runOperations();
+            return;
+        }
+        // The native driver collects child RTT cameras during CPU culling.
+        // Only native presentation adapters submit; OSG's GL operations and
+        // default camera renderers must never execute on this window.
+        for (auto* camera : getCameras())
+            if (auto* renderer = camera->getRenderer(); dynamic_cast<Render::Presentation*>(renderer))
+                (*renderer)(this);
     }
 
     GraphicsWindowSDL2::GraphicsWindowSDL2(osg::GraphicsContext::Traits* traits, VSyncMode vsyncMode)
@@ -31,6 +51,8 @@ namespace SDLUtil
         {
             setState(new osg::State);
             getState()->setGraphicsContext(this);
+            if (mNative)
+                getState()->setCheckForGLErrors(osg::State::NEVER_CHECK_GL_ERRORS);
 
             if (_traits.valid() && _traits->sharedContext.valid())
             {
@@ -61,7 +83,7 @@ namespace SDLUtil
         int w, h;
         SDL_GetWindowSize(mWindow, &w, &h);
         int dw, dh;
-        SDL_GL_GetDrawableSize(mWindow, &dw, &dh);
+        getDrawableSize(mWindow, dw, dh);
 
         SDL_SetWindowPosition(mWindow, x, y);
         SDL_SetWindowSize(mWindow, width / (dw / w), height / (dh / h));
@@ -98,6 +120,17 @@ namespace SDLUtil
         if (mOwnsWindow)
         {
             OSG_FATAL << "Error: No SDL window provided." << std::endl;
+            return;
+        }
+
+        mNative = (SDL_GetWindowFlags(mWindow) & SDL_WINDOW_VULKAN) != 0;
+        if (mNative)
+        {
+            // This is a CPU window/state adapter, not a GL context. Mark it
+            // realized so Viewer::frame() never attempts GL realization.
+            _traits->samples = _traits->sampleBuffers = 0;
+            mRealized = mValid = true;
+            getEventQueue()->syncWindowRectangleWithGraphicsContext();
             return;
         }
 
@@ -209,6 +242,10 @@ namespace SDLUtil
 
     bool GraphicsWindowSDL2::makeCurrentImplementation()
     {
+        // GraphicsContext::makeCurrent initializes GL extension entry points
+        // on success. Native rendering must never claim a current GL context.
+        if (mNative)
+            return false;
         if (!mRealized)
         {
             OSG_WARN << "Warning: GraphicsWindow not realized, cannot do makeCurrent." << std::endl;
@@ -220,6 +257,8 @@ namespace SDLUtil
 
     bool GraphicsWindowSDL2::releaseContextImplementation()
     {
+        if (mNative)
+            return true;
         if (!mRealized)
         {
             OSG_WARN << "Warning: GraphicsWindow not realized, cannot do releaseContext." << std::endl;
@@ -245,7 +284,7 @@ namespace SDLUtil
 
     void GraphicsWindowSDL2::swapBuffersImplementation()
     {
-        if (!mRealized || mOffscreen)
+        if (!mRealized || mOffscreen || mNative)
             return;
 
         const auto* stamp = getState() ? getState()->getFrameStamp() : nullptr;
@@ -261,6 +300,8 @@ namespace SDLUtil
 
     void GraphicsWindowSDL2::setSyncToVBlank(VSyncMode mode)
     {
+        if (mNative)
+            return;
         SDL_Window* oldWin = SDL_GL_GetCurrentWindow();
         SDL_GLContext oldCtx = SDL_GL_GetCurrentContext();
 

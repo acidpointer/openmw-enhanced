@@ -1,4 +1,5 @@
 find_package(Vulkan 1.1 REQUIRED)
+find_package(Threads REQUIRED)
 find_program(OPENMW_GLSLANG_VALIDATOR NAMES glslangValidator)
 if(NOT OPENMW_GLSLANG_VALIDATOR)
     message(FATAL_ERROR "The Vulkan renderer requires glslangValidator to compile its shaders")
@@ -8,12 +9,12 @@ endif()
 # loader mandatory even when the user chooses OpenGL.
 add_library(openmw-renderer-vulkan MODULE
     backend.cpp backend.hpp
-    check.hpp
+    check.hpp pipelineworker.hpp
     memory.cpp memory.hpp
     module.cpp
 )
 target_include_directories(openmw-renderer-vulkan PRIVATE "${CMAKE_SOURCE_DIR}")
-target_link_libraries(openmw-renderer-vulkan PRIVATE openmw-render-core Vulkan::Vulkan SDL2::SDL2)
+target_link_libraries(openmw-renderer-vulkan PRIVATE openmw-render-core Vulkan::Vulkan SDL2::SDL2 Threads::Threads)
 set_target_properties(openmw-renderer-vulkan PROPERTIES
     PREFIX ""
     CXX_VISIBILITY_PRESET hidden
@@ -32,7 +33,7 @@ foreach(shader basic.vert basic.frag)
     add_custom_command(OUTPUT "${output}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${vulkan_resource_root}/resources/shaders/vulkan"
         COMMAND "${OPENMW_GLSLANG_VALIDATOR}" --target-env vulkan1.1 -V "${source}" -o "${output}"
-        DEPENDS "${source}"
+        DEPENDS "${source}" "${CMAKE_SOURCE_DIR}/files/shaders/vulkan/heightfog.glsl"
         VERBATIM
     )
     list(APPEND vulkan_shader_outputs "${output}")

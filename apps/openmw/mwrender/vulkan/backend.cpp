@@ -2,11 +2,13 @@
 
 #include "check.hpp"
 #include "memory.hpp"
+#include "pipelineworker.hpp"
 
 #include <components/render/bufferarena.hpp>
 #include <components/render/bufferversions.hpp>
 #include <components/render/capture.hpp>
 #include <components/render/framecache.hpp>
+#include <components/render/memorypolicy.hpp>
 #include <components/render/meshindices.hpp>
 #include <components/render/pipelinecache.hpp>
 #include <components/render/raster.hpp>
@@ -155,6 +157,7 @@ namespace MWRender::Vulkan
             VkDevice mDevice;
             VkBuffer mBuffer = VK_NULL_HANDLE;
             Allocation mMemory;
+            VkDeviceSize mSize = 0;
             std::uint64_t mLastUploadSubmission = 0;
             explicit Buffer(VkDevice device)
                 : mDevice(device)
@@ -214,6 +217,10 @@ namespace MWRender::Vulkan
             std::size_t mSamplerViews = 0;
             VkSampler mSampler = VK_NULL_HANDLE;
             bool mTarget = false;
+            bool mUsesMipmaps = false, mMipsDirty = false, mDepthReadOnly = false;
+            VkImageAspectFlags mAspect = VK_IMAGE_ASPECT_COLOR_BIT;
+            VkPipelineStageFlags mReaders = 0, mWriter = 0;
+            VkPipelineStageFlags mVisible = 0;
             Render::TargetFormat mTargetFormat = Render::TargetFormat::RGBA8;
             VkFramebuffer mFramebuffer = VK_NULL_HANDLE;
             std::shared_ptr<Image> mDepth;
@@ -248,28 +255,42 @@ namespace MWRender::Vulkan
             }
         };
 
-        struct Effect
+        struct EffectObjects
         {
             VkDevice mDevice;
             VkDescriptorSetLayout mDescriptorLayout = VK_NULL_HANDLE;
             VkPipelineLayout mLayout = VK_NULL_HANDLE;
             std::array<VkShaderModule, 2> mModules{};
-            std::map<std::pair<std::size_t, Render::EffectBlend>, VkPipeline> mPipelines;
-            VkFormat mWindowFormat = VK_FORMAT_UNDEFINED;
-            bool mVertexTextureReads = true;
-            std::vector<Render::EffectBinding> mBindings;
-            explicit Effect(VkDevice device)
+            explicit EffectObjects(VkDevice device)
                 : mDevice(device)
             {
             }
-            ~Effect()
+            ~EffectObjects()
             {
-                for (const auto& [key, pipeline] : mPipelines)
-                    vkDestroyPipeline(mDevice, pipeline, nullptr);
                 for (auto module : mModules)
                     vkDestroyShaderModule(mDevice, module, nullptr);
                 vkDestroyPipelineLayout(mDevice, mLayout, nullptr);
                 vkDestroyDescriptorSetLayout(mDevice, mDescriptorLayout, nullptr);
+            }
+        };
+        struct Effect
+        {
+            struct PipelineEntry
+            {
+                PipelineWorker::Value mReady;
+                std::future<PipelineWorker::Value> mPending;
+                std::exception_ptr mError;
+            };
+            std::shared_ptr<EffectObjects> mObjects;
+            std::future<PipelineWorker::Value> mObjectsPending;
+            bool mObjectsReady = false;
+            std::exception_ptr mObjectsError;
+            std::map<std::tuple<std::size_t, VkFormat, Render::EffectBlend>, PipelineEntry> mPipelines;
+            bool mVertexTextureReads = true;
+            std::vector<Render::EffectBinding> mBindings;
+            explicit Effect(VkDevice device)
+                : mObjects(std::make_shared<EffectObjects>(device))
+            {
             }
         };
 
@@ -304,6 +325,21 @@ namespace MWRender::Vulkan
             VkDescriptorSet mDataDescriptor = VK_NULL_HANDLE;
             std::vector<VkDescriptorPool> mEffectPools;
             std::size_t mEffectPoolIndex = 0;
+            std::vector<VkDescriptorPool> mPersistentEffectPools;
+            struct EffectDescriptor
+            {
+                VkDescriptorSet mSet = VK_NULL_HANDLE;
+                VkDescriptorPool mPool = VK_NULL_HANDLE;
+                std::shared_ptr<EffectObjects> mObjects;
+                std::vector<VkDescriptorBufferInfo> mBuffers;
+                std::vector<VkDescriptorImageInfo> mImages;
+                std::vector<std::shared_ptr<Image>> mRetainedImages;
+            };
+            std::vector<EffectDescriptor> mEffectDescriptors;
+            std::size_t mEffectDescriptorsUsed = 0;
+            std::vector<std::shared_ptr<Buffer>> mUniformPages;
+            std::size_t mUniformPage = 0;
+            VkDeviceSize mUniformOffset = 0;
             struct UniformSlice
             {
                 std::size_t mSize = 0, mInputSize = 0;
@@ -315,6 +351,14 @@ namespace MWRender::Vulkan
             std::optional<std::uint32_t> mAcquiredImage;
             std::shared_ptr<Image> mWaterDepth;
             bool mWaterDepthInitialized = false;
+            VkQueryPool mQueries = VK_NULL_HANDLE;
+            struct Region
+            {
+                std::string mName;
+                unsigned mStart, mEnd;
+            };
+            std::vector<Region> mRegions;
+            unsigned mQueryCount = 0;
         };
 
         constexpr std::size_t BlendCount = 5;
@@ -373,6 +417,14 @@ namespace MWRender::Vulkan
             bool mOverwrite = false;
             bool mWater = false;
             std::shared_ptr<Image> mWaterDepth{};
+            struct Sample
+            {
+                Image* mImage;
+                VkPipelineStageFlags mStages;
+            };
+            std::span<const Sample> mSamples{};
+            std::string_view mLabel{};
+            Render::SceneEnvironment mEnvironment{};
         };
 
         struct InstanceData
@@ -463,6 +515,10 @@ namespace MWRender::Vulkan
                         return false;
                     check(image, "Check acquired Vulkan image completion");
                 }
+                // Release completed leases before preparation requests writable
+                // geometry and staging slices, rather than after those requests.
+                frame.mResources.clear();
+                frame.mUploads.clear();
                 return true;
             }
             void setPresentMode(Render::PresentMode mode) override
@@ -493,6 +549,19 @@ namespace MWRender::Vulkan
             Render::TextureHandle worldDepthTexture(Render::TextureHandle target) override;
             Render::EffectHandle createEffect(const Render::EffectProgram& program) override;
             void releaseEffect(Render::EffectHandle handle) override { mEffects.erase(handle); }
+            void setEffectDiagnostics(bool enabled) override { mDiagnostics = enabled; }
+            Render::EffectDiagnostics effectDiagnostics() const override
+            {
+                return { mGpuTimings, mPipelineMisses, mTargetCreations, mDescriptorUpdates, mGpuAvailable };
+            }
+            bool prepareEffect(
+                Render::EffectHandle handle, Render::TextureHandle target, const Render::EffectBlend& blend) override
+            {
+                if (!target && !mRenderPass)
+                    return false;
+                return effectPipeline(*mEffects.get(handle), target ? mTextures.get(target).get() : nullptr, blend)
+                    != VK_NULL_HANDLE;
+            }
             void releaseMesh(Render::MeshHandle mesh) override;
             void releaseTexture(Render::TextureHandle texture) override;
             bool render(std::span<const Render::Draw> draws, const std::array<float, 4>& clearColor) override;
@@ -512,6 +581,10 @@ namespace MWRender::Vulkan
                 bool discardDepth = false);
             void copyWorldDepth(VkCommandBuffer commands, Image& target);
             void generateTargetMips(VkCommandBuffer commands, const Image& target);
+            void sampleImage(Frame& frame, Image& image, VkPipelineStageFlags stages);
+            unsigned beginTiming(Frame& frame, std::string_view label);
+            void endTiming(Frame& frame, unsigned index);
+            void collectTimings(Frame& frame);
             std::shared_ptr<Image> createDepthSnapshot(std::uint32_t width, std::uint32_t height);
             void copyDepth(VkCommandBuffer commands, const Image& source, Image& destination, bool& initialized);
             void createPipeline(std::size_t index);
@@ -519,7 +592,8 @@ namespace MWRender::Vulkan
             void loadPipelineCache();
             void savePipelineCache() noexcept;
             VkPipeline effectPipeline(Effect& effect, const Image* target, const Render::EffectBlend& blending);
-            VkDescriptorSet allocateFrameDescriptor(Frame& frame, VkDescriptorSetLayout layout);
+            VkDescriptorSet allocateFrameDescriptor(
+                Frame& frame, VkDescriptorSetLayout layout, VkDescriptorPool* persistentPool = nullptr);
             VkDescriptorSet dataDescriptor(Frame& frame, const Render::ShadowSet* shadows);
             VkDescriptorSet effectDescriptor(Frame& frame, Effect& effect, std::span<const Render::EffectInput> inputs);
             void retainGeometry(Frame& frame, const std::shared_ptr<GeometryBuffer>& buffer);
@@ -572,6 +646,11 @@ namespace MWRender::Vulkan
             std::vector<LightOffset> mLightOffsets;
             std::vector<std::uint32_t> mDrawLightOffsets;
             VkPipelineCache mPipelineCache = VK_NULL_HANDLE;
+            std::unique_ptr<PipelineWorker> mPipelineWorker;
+            std::uint64_t mPipelineMisses = 0, mTargetCreations = 0, mDescriptorUpdates = 0;
+            bool mDiagnostics = false, mGpuAvailable = false;
+            unsigned mTimestampBits = 0;
+            std::vector<Render::GpuTiming> mGpuTimings;
             std::array<VkShaderModule, 2> mShaderModules{};
             std::vector<std::unique_ptr<Sampler>> mSamplers;
             std::vector<std::shared_ptr<DescriptorPage>> mDescriptorPools;
@@ -593,6 +672,7 @@ namespace MWRender::Vulkan
             std::array<VkPipeline, PipelinesPerTarget*(TargetFormats + 1)> mPipelines{};
             std::vector<const Render::Draw*> mFrameDraws;
             std::vector<PreparedPass> mPreparedPasses;
+            std::vector<std::vector<PreparedPass::Sample>> mPassSamples;
             std::vector<VkImage> mSwapchainImages;
             std::vector<bool> mSwapchainInitialized;
             std::vector<VkImageView> mSwapchainViews;
@@ -637,6 +717,17 @@ namespace MWRender::Vulkan
             {
                 // Destruction and swapchain recreation may drain the device;
                 // ordinary rendering only waits for a reused frame/image.
+                if (mPipelineWorker)
+                {
+                    try
+                    {
+                        mPipelineWorker->stopAndMerge(mPipelineCache);
+                    }
+                    catch (...)
+                    {
+                    }
+                    mPipelineWorker.reset();
+                }
                 vkDeviceWaitIdle(mDevice);
                 savePipelineCache();
                 // All submissions are complete and these pools/blocks are
@@ -656,8 +747,13 @@ namespace MWRender::Vulkan
                     frame.mLightUpload.reset();
                     frame.mLights.reset();
                     frame.mWaterDepth.reset();
+                    frame.mEffectDescriptors.clear();
+                    frame.mUniformPages.clear();
+                    for (auto pool : frame.mPersistentEffectPools)
+                        vkDestroyDescriptorPool(mDevice, pool, nullptr);
                     for (auto pool : frame.mEffectPools)
                         vkDestroyDescriptorPool(mDevice, pool, nullptr);
+                    vkDestroyQueryPool(mDevice, frame.mQueries, nullptr);
                     vkDestroySemaphore(mDevice, frame.mAcquired, nullptr);
                     vkDestroyFence(mDevice, frame.mFence, nullptr);
                     vkDestroyCommandPool(mDevice, frame.mPool, nullptr);
@@ -730,6 +826,11 @@ namespace MWRender::Vulkan
             selectDevice();
             createDevice();
             createLayouts();
+            // Attachment formats are known at startup. First-use compilation
+            // during an effect change would stall the preparation phase.
+            for (std::size_t slot = 0; slot < TargetFormats; ++slot)
+                if (mTargetPasses[slot].mClear && Render::targetHasDepth(static_cast<Render::TargetFormat>(slot)))
+                    warmPipelines(slot + 1);
             createFrames();
             const std::array<std::byte, 4> white{ std::byte{ 255 }, std::byte{ 255 }, std::byte{ 255 },
                 std::byte{ 255 } };
@@ -897,6 +998,11 @@ namespace MWRender::Vulkan
                     vkGetDeviceProcAddr(mDevice, "vkCmdSetDepthCompareOpEXT"));
                 mDynamicRaster = mSetCullMode && mSetFrontFace && mSetDepthTest && mSetDepthWrite && mSetDepthCompare;
             }
+            std::uint32_t familyCount = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(mPhysicalDevice, &familyCount, nullptr);
+            std::vector<VkQueueFamilyProperties> queueProperties(familyCount);
+            vkGetPhysicalDeviceQueueFamilyProperties(mPhysicalDevice, &familyCount, queueProperties.data());
+            mTimestampBits = queueProperties.at(mGraphicsFamily).timestampValidBits;
             vkGetDeviceQueue(mDevice, mGraphicsFamily, 0, &mGraphicsQueue);
             vkGetDeviceQueue(mDevice, mPresentFamily, 0, &mPresentQueue);
             auto budget = vkInfo<VkPhysicalDeviceMemoryBudgetPropertiesEXT>(
@@ -970,6 +1076,8 @@ namespace MWRender::Vulkan
                 }
             }
             mInfo.mFloatNormals = mNormalFormat != VK_FORMAT_UNDEFINED;
+            mInfo.mMaxSampledImageDescriptors = std::min(mProperties.limits.maxPerStageDescriptorSamplers,
+                mProperties.limits.maxPerStageDescriptorSampledImages);
             for (std::size_t i = 0; i < TargetFormats; ++i)
             {
                 auto& properties = mTargetProperties[i];
@@ -1041,11 +1149,16 @@ namespace MWRender::Vulkan
             const std::array materialLayouts{ mDescriptorLayout, mDescriptorLayout, mDataLayout, mDescriptorLayout };
             layout.setLayoutCount = materialLayouts.size();
             layout.pSetLayouts = materialLayouts.data();
-            const VkPushConstantRange fogConstants{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32 };
+            const VkPushConstantRange sceneConstants{ VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                32 + sizeof(Render::SceneEnvironment) };
+            static_assert(32 + sizeof(Render::SceneEnvironment) <= 128);
             layout.pushConstantRangeCount = 1;
-            layout.pPushConstantRanges = &fogConstants;
+            layout.pPushConstantRanges = &sceneConstants;
             check(vkCreatePipelineLayout(mDevice, &layout, nullptr, &mPipelineLayout), "Create Vulkan pipeline layout");
             loadPipelineCache();
+            // Cache seeding and worker initialization belong to startup, not
+            // the first in-game effect whose shader compilation completes.
+            mPipelineWorker = std::make_unique<PipelineWorker>(mDevice, mPipelineCache);
         }
 
         void VulkanBackend::loadPipelineCache()
@@ -1185,6 +1298,7 @@ namespace MWRender::Vulkan
             auto buffer = std::make_unique<Buffer>(mDevice);
             auto info = vkInfo<VkBufferCreateInfo>(VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
             info.size = bytes;
+            buffer->mSize = bytes;
             info.usage = usage;
             info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
             check(vkCreateBuffer(mDevice, &info, nullptr, &buffer->mBuffer), "Create Vulkan buffer");
@@ -1214,6 +1328,7 @@ namespace MWRender::Vulkan
             image->mWidth = width;
             image->mHeight = height;
             image->mMipLevels = mipLevels;
+            image->mAspect = aspect;
             auto info = vkInfo<VkImageCreateInfo>(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
             info.imageType = depth == 1 ? VK_IMAGE_TYPE_2D : VK_IMAGE_TYPE_3D;
             info.format = format;
@@ -1556,6 +1671,7 @@ namespace MWRender::Vulkan
             view->mMipLevels = storage->mMipLevels;
             view->mTextureFormat = storage->mTextureFormat;
             view->mSrgb = storage->mSrgb;
+            view->mUsesMipmaps = state.mUseMipmaps;
             view->mSampler = sampler(state);
             allocateDescriptor(*view);
             return mTextures.insert(std::move(view));
@@ -1588,6 +1704,8 @@ namespace MWRender::Vulkan
                     | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                 VK_IMAGE_ASPECT_COLOR_BIT, levels);
             image->mTarget = true;
+            image->mUsesMipmaps = sampling.mUseMipmaps && mipmaps;
+            ++mTargetCreations;
             image->mTargetFormat = format;
             sampling.mUseMipmaps = sampling.mUseMipmaps && mipmaps;
             if (levels > 1)
@@ -1716,11 +1834,113 @@ namespace MWRender::Vulkan
             return depth;
         }
 
+        unsigned VulkanBackend::beginTiming(Frame& frame, std::string_view label)
+        {
+            if (!mDiagnostics || !frame.mQueries || frame.mQueryCount + 2 > 512)
+                return std::numeric_limits<unsigned>::max();
+            const auto index = static_cast<unsigned>(frame.mRegions.size());
+            frame.mRegions.push_back({ std::string(label), frame.mQueryCount, frame.mQueryCount + 1 });
+            frame.mQueryCount += 2;
+            vkCmdWriteTimestamp(
+                frame.mCommands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, frame.mQueries, frame.mRegions.back().mStart);
+            return index;
+        }
+        void VulkanBackend::endTiming(Frame& frame, unsigned index)
+        {
+            if (index < frame.mRegions.size())
+                vkCmdWriteTimestamp(
+                    frame.mCommands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, frame.mQueries, frame.mRegions[index].mEnd);
+        }
+        void VulkanBackend::collectTimings(Frame& frame)
+        {
+            if (!mDiagnostics)
+            {
+                mGpuTimings.clear();
+                mGpuAvailable = false;
+                return;
+            }
+            if (!frame.mQueryCount)
+                return;
+            struct Query
+            {
+                std::uint64_t value, available;
+            };
+            std::array<Query, 512> results{};
+            const auto status = vkGetQueryPoolResults(mDevice, frame.mQueries, 0, frame.mQueryCount,
+                frame.mQueryCount * sizeof(Query), results.data(), sizeof(Query),
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+            if (status == VK_NOT_READY)
+                return;
+            check(status, "Read completed GPU timings");
+            for (unsigned i = 0; i < frame.mQueryCount; ++i)
+                if (!results[i].available)
+                    return;
+            mGpuTimings.clear();
+            const auto mask = mTimestampBits >= 64 ? ~std::uint64_t{ 0 } : (std::uint64_t{ 1 } << mTimestampBits) - 1;
+            for (const auto& region : frame.mRegions)
+            {
+                const auto ticks = (results[region.mEnd].value - results[region.mStart].value) & mask;
+                const auto milliseconds = ticks * double(mProperties.limits.timestampPeriod) / 1e6;
+                auto entry = std::find_if(
+                    mGpuTimings.begin(), mGpuTimings.end(), [&](const auto& t) { return t.mName == region.mName; });
+                if (entry == mGpuTimings.end())
+                    mGpuTimings.push_back({ region.mName, milliseconds });
+                else
+                    entry->mMilliseconds += milliseconds;
+            }
+            mGpuAvailable = true;
+        }
+
+        void VulkanBackend::sampleImage(Frame& frame, Image& image, VkPipelineStageFlags stages)
+        {
+            const auto commands = frame.mCommands;
+            if (image.mStorage)
+            {
+                sampleImage(frame, *image.mStorage, stages);
+                return;
+            }
+            if (image.mMipsDirty && image.mUsesMipmaps)
+            {
+                const auto timing = beginTiming(frame, "Mip generation");
+                generateTargetMips(commands, image);
+                endTiming(frame, timing);
+                image.mMipsDirty = false;
+                image.mWriter = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                image.mReaders = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                image.mVisible = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            }
+            const auto missing = stages & ~image.mVisible;
+            if (image.mWriter && missing)
+            {
+                auto barrier = vkInfo<VkImageMemoryBarrier>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
+                barrier.srcAccessMask
+                    = (image.mWriter & VK_PIPELINE_STAGE_TRANSFER_BIT ? VK_ACCESS_TRANSFER_WRITE_BIT : 0)
+                    | (image.mWriter & VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                            ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                            : 0)
+                    | (image.mWriter
+                                & (VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                                    | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT)
+                            ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+                            : 0);
+                barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                barrier.oldLayout = barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                barrier.image = image.mImage;
+                barrier.subresourceRange = { image.mAspect, 0, image.mMipLevels, 0, 1 };
+                if ((image.mAspect & VK_IMAGE_ASPECT_DEPTH_BIT) && mDepthFormat == VK_FORMAT_D24_UNORM_S8_UINT)
+                    barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+                vkCmdPipelineBarrier(commands, image.mWriter, missing, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+                image.mVisible |= stages;
+            }
+            image.mReaders |= stages;
+        }
+
         void VulkanBackend::generateTargetMips(VkCommandBuffer commands, const Image& target)
         {
             if (target.mMipLevels < 2)
                 return;
-            constexpr auto shaders = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            constexpr auto shaders = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
             std::array<VkImageMemoryBarrier, 2> barriers{};
             for (auto& barrier : barriers)
             {
@@ -1735,10 +1955,13 @@ namespace MWRender::Vulkan
             barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             barriers[1].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 1, target.mMipLevels - 1, 0, 1 };
             barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barriers[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+            barriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT
+                | (target.mReaders & (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+                        ? VK_ACCESS_SHADER_READ_BIT
+                        : 0);
             barriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             vkCmdPipelineBarrier(commands,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | shaders | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | target.mReaders | VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, barriers.data());
             auto width = static_cast<std::int32_t>(target.mWidth);
             auto height = static_cast<std::int32_t>(target.mHeight);
@@ -1822,6 +2045,10 @@ namespace MWRender::Vulkan
                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
                     | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                 0, 0, nullptr, 0, nullptr, 2, barriers.data());
+            destination.mDepthReadOnly = true;
+            destination.mWriter = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            destination.mReaders = 0;
+            destination.mVisible = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
             initialized = true;
         }
 
@@ -1837,6 +2064,8 @@ namespace MWRender::Vulkan
                 if (std::any_of(
                         bindings.begin(), bindings.end(), [&](const auto& b) { return b.binding == binding.mBinding; }))
                     throw std::invalid_argument("Duplicate effect descriptor binding");
+                if (!binding.mStages || (binding.mStages & ~3u))
+                    throw std::invalid_argument("Invalid effect descriptor shader stages");
                 const bool texture = binding.mKind == Render::EffectBindingKind::Texture;
                 if (texture)
                     ++textures;
@@ -1848,7 +2077,9 @@ namespace MWRender::Vulkan
                 }
                 bindings.push_back({ binding.mBinding,
                     texture ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr });
+                    static_cast<VkShaderStageFlags>((binding.mStages & 1 ? VK_SHADER_STAGE_VERTEX_BIT : 0)
+                        | (binding.mStages & 2 ? VK_SHADER_STAGE_FRAGMENT_BIT : 0)),
+                    nullptr });
             }
             const auto& limits = mProperties.limits;
             if (textures > std::min({ limits.maxPerStageDescriptorSamplers, limits.maxPerStageDescriptorSampledImages,
@@ -1856,52 +2087,43 @@ namespace MWRender::Vulkan
                 || buffers > std::min(limits.maxPerStageDescriptorUniformBuffers, limits.maxDescriptorSetUniformBuffers)
                 || textures + buffers > limits.maxPerStageResources)
                 throw std::invalid_argument("Effect descriptor count exceeds device limits");
-            auto descriptor
-                = vkInfo<VkDescriptorSetLayoutCreateInfo>(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO);
-            descriptor.bindingCount = static_cast<std::uint32_t>(bindings.size());
-            descriptor.pBindings = bindings.data();
-            check(vkCreateDescriptorSetLayout(mDevice, &descriptor, nullptr, &effect->mDescriptorLayout),
-                "Create effect descriptors");
-            auto layout = vkInfo<VkPipelineLayoutCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
-            layout.setLayoutCount = 1;
-            layout.pSetLayouts = &effect->mDescriptorLayout;
-            check(vkCreatePipelineLayout(mDevice, &layout, nullptr, &effect->mLayout), "Create effect layout");
-            const std::array code{ program.mVertex, program.mFragment };
-            for (std::size_t i = 0; i < code.size(); ++i)
-            {
-                if (code[i].size() < 5 || code[i][0] != 0x07230203)
-                    throw std::invalid_argument("Invalid effect SPIR-V");
-                auto module = vkInfo<VkShaderModuleCreateInfo>(VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO);
-                module.codeSize = code[i].size_bytes();
-                module.pCode = code[i].data();
-                check(vkCreateShaderModule(mDevice, &module, nullptr, &effect->mModules[i]), "Create effect shader");
-            }
+            std::array<std::vector<std::uint32_t>, 2> code{ std::vector<std::uint32_t>(
+                                                                program.mVertex.begin(), program.mVertex.end()),
+                std::vector<std::uint32_t>(program.mFragment.begin(), program.mFragment.end()) };
+            if (!mPipelineWorker)
+                mPipelineWorker = std::make_unique<PipelineWorker>(mDevice, mPipelineCache);
+            effect->mObjectsPending = mPipelineWorker->submit(
+                [device = mDevice, objects = effect->mObjects, bindings = std::move(bindings), code = std::move(code)](
+                    VkPipelineCache) {
+                    auto descriptor
+                        = vkInfo<VkDescriptorSetLayoutCreateInfo>(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO);
+                    descriptor.bindingCount = static_cast<std::uint32_t>(bindings.size());
+                    descriptor.pBindings = bindings.data();
+                    check(vkCreateDescriptorSetLayout(device, &descriptor, nullptr, &objects->mDescriptorLayout),
+                        "Create effect descriptors");
+                    auto layout = vkInfo<VkPipelineLayoutCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
+                    layout.setLayoutCount = 1;
+                    layout.pSetLayouts = &objects->mDescriptorLayout;
+                    check(vkCreatePipelineLayout(device, &layout, nullptr, &objects->mLayout), "Create effect layout");
+                    for (std::size_t i = 0; i < code.size(); ++i)
+                    {
+                        if (code[i].size() < 5 || code[i][0] != 0x07230203)
+                            throw std::invalid_argument("Invalid effect SPIR-V");
+                        auto module = vkInfo<VkShaderModuleCreateInfo>(VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO);
+                        module.codeSize = code[i].size() * sizeof(std::uint32_t);
+                        module.pCode = code[i].data();
+                        check(vkCreateShaderModule(device, &module, nullptr, &objects->mModules[i]),
+                            "Create effect shader");
+                    }
+                    return PipelineWorker::Value{};
+                });
             return mEffects.insert(std::move(effect));
         }
 
-        VkPipeline VulkanBackend::effectPipeline(
-            Effect& effect, const Image* target, const Render::EffectBlend& blending)
+        PipelineWorker::Value compileEffectPipeline(VkDevice device, VkPipelineCache cache, const EffectObjects& effect,
+            VkRenderPass renderPass, const Render::EffectBlend& blending)
         {
-            const auto slot = target ? static_cast<std::size_t>(target->mTargetFormat) + 1 : 0;
-            if (slot > TargetFormats || (target && !mTargetPasses[slot - 1].mClear))
-                throw std::invalid_argument("Unsupported effect output format");
-            if (!target && effect.mWindowFormat != mColorFormat)
-            {
-                // A swapchain format change has already waited for device idle.
-                std::erase_if(effect.mPipelines, [&](const auto& entry) {
-                    if (entry.first.first != 0)
-                        return false;
-                    vkDestroyPipeline(mDevice, entry.second, nullptr);
-                    return true;
-                });
-                effect.mWindowFormat = mColorFormat;
-            }
-            auto& pipeline = effect.mPipelines[{ slot, blending }];
-            if (pipeline)
-                return pipeline;
-            if (blending.mEnabled && target
-                && !(mTargetProperties[slot - 1].optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT))
-                throw std::invalid_argument("Effect target format does not support attachment blending");
+            auto pipeline = std::make_shared<CompiledEffectPipeline>(device);
             std::array<VkPipelineShaderStageCreateInfo, 2> shaders{};
             for (std::size_t i = 0; i < shaders.size(); ++i)
             {
@@ -1973,43 +2195,110 @@ namespace MWRender::Vulkan
             info.pColorBlendState = &blend;
             info.pDynamicState = &dynamic;
             info.layout = effect.mLayout;
-            info.renderPass = target ? mTargetPasses[slot - 1].mClear : mRenderPass;
-            check(vkCreateGraphicsPipelines(mDevice, mPipelineCache, 1, &info, nullptr, &pipeline),
+            info.renderPass = renderPass;
+            check(vkCreateGraphicsPipelines(device, cache, 1, &info, nullptr, &pipeline->mPipeline),
                 "Create native effect pipeline");
             return pipeline;
         }
 
-        VkDescriptorSet VulkanBackend::allocateFrameDescriptor(Frame& frame, VkDescriptorSetLayout layout)
+        VkPipeline VulkanBackend::effectPipeline(
+            Effect& effect, const Image* target, const Render::EffectBlend& blending)
         {
+            if (effect.mObjectsError)
+                std::rethrow_exception(effect.mObjectsError);
+            if (!effect.mObjectsReady)
+            {
+                if (effect.mObjectsPending.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+                    return VK_NULL_HANDLE;
+                try
+                {
+                    effect.mObjectsPending.get();
+                }
+                catch (...)
+                {
+                    effect.mObjectsError = std::current_exception();
+                    throw;
+                }
+                effect.mObjectsReady = true;
+            }
+            const auto slot = target ? static_cast<std::size_t>(target->mTargetFormat) + 1 : 0;
+            if (slot > TargetFormats || (target && !mTargetPasses[slot - 1].mClear))
+                throw std::invalid_argument("Unsupported effect output format");
+            auto& entry = effect.mPipelines[{ slot, target ? VK_FORMAT_UNDEFINED : mColorFormat, blending }];
+            if (entry.mError)
+                std::rethrow_exception(entry.mError);
+            if (entry.mReady)
+                return entry.mReady->mPipeline;
+            if (entry.mPending.valid())
+            {
+                if (entry.mPending.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+                    return VK_NULL_HANDLE;
+                try
+                {
+                    entry.mReady = entry.mPending.get();
+                }
+                catch (...)
+                {
+                    entry.mError = std::current_exception();
+                    throw;
+                }
+                return entry.mReady->mPipeline;
+            }
+            if (blending.mEnabled && target
+                && !(mTargetProperties[slot - 1].optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT))
+                throw std::invalid_argument("Effect target format does not support attachment blending");
+            if (!mPipelineWorker)
+                mPipelineWorker = std::make_unique<PipelineWorker>(mDevice, mPipelineCache);
+            const auto renderPass = target ? mTargetPasses[slot - 1].mClear : mRenderPass;
+            // Hold shader modules/layout alive until the worker finishes. The
+            // result owns its pipeline even if its requesting handle disappears.
+            auto retained = effect.mObjects;
+            entry.mPending
+                = mPipelineWorker->submit([device = mDevice, retained, renderPass, blending](VkPipelineCache cache) {
+                      return compileEffectPipeline(device, cache, *retained, renderPass, blending);
+                  });
+            ++mPipelineMisses;
+            return VK_NULL_HANDLE;
+        }
+
+        VkDescriptorSet VulkanBackend::allocateFrameDescriptor(
+            Frame& frame, VkDescriptorSetLayout layout, VkDescriptorPool* persistentPool)
+        {
+            auto& pools = persistentPool ? frame.mPersistentEffectPools : frame.mEffectPools;
+            std::size_t persistentIndex = 0;
+            auto& index = persistentPool ? persistentIndex : frame.mEffectPoolIndex;
             VkDescriptorSet descriptor = VK_NULL_HANDLE;
             for (;;)
             {
-                if (frame.mEffectPoolIndex == frame.mEffectPools.size())
+                if (index == pools.size())
                 {
                     const std::array sizes{ VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024 },
                         VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 256 },
                         VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 128 } };
                     auto pool = vkInfo<VkDescriptorPoolCreateInfo>(VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO);
+                    pool.flags = persistentPool ? VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT : 0;
                     pool.maxSets = 64;
                     pool.poolSizeCount = sizes.size();
                     pool.pPoolSizes = sizes.data();
                     VkDescriptorPool value = VK_NULL_HANDLE;
                     check(vkCreateDescriptorPool(mDevice, &pool, nullptr, &value), "Create effect descriptor page");
-                    frame.mEffectPools.push_back(value);
+                    pools.push_back(value);
                 }
                 auto info = vkInfo<VkDescriptorSetAllocateInfo>(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO);
-                info.descriptorPool = frame.mEffectPools[frame.mEffectPoolIndex];
+                info.descriptorPool = pools[index];
                 info.descriptorSetCount = 1;
                 info.pSetLayouts = &layout;
                 const auto result = vkAllocateDescriptorSets(mDevice, &info, &descriptor);
                 if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL)
                 {
-                    ++frame.mEffectPoolIndex;
+                    ++index;
                     continue;
                 }
                 check(result, "Allocate effect descriptor");
                 break;
             }
+            if (persistentPool)
+                *persistentPool = pools[index];
             return descriptor;
         }
 
@@ -2085,7 +2374,19 @@ namespace MWRender::Vulkan
         VkDescriptorSet VulkanBackend::effectDescriptor(
             Frame& frame, Effect& effect, std::span<const Render::EffectInput> inputs)
         {
-            const auto descriptor = allocateFrameDescriptor(frame, effect.mDescriptorLayout);
+            if (frame.mEffectDescriptorsUsed == frame.mEffectDescriptors.size())
+                frame.mEffectDescriptors.emplace_back();
+            auto& cachedSet = frame.mEffectDescriptors[frame.mEffectDescriptorsUsed++];
+            if (cachedSet.mObjects != effect.mObjects)
+            {
+                if (cachedSet.mSet)
+                    check(vkFreeDescriptorSets(mDevice, cachedSet.mPool, 1, &cachedSet.mSet),
+                        "Release effect descriptor");
+                cachedSet = {};
+                cachedSet.mSet = allocateFrameDescriptor(frame, effect.mObjects->mDescriptorLayout, &cachedSet.mPool);
+                cachedSet.mObjects = effect.mObjects;
+            }
+            const auto descriptor = cachedSet.mSet;
             auto& writes = mEffectWrites;
             auto& buffers = mEffectBuffers;
             auto& images = mEffectImages;
@@ -2095,6 +2396,9 @@ namespace MWRender::Vulkan
             writes.reserve(effect.mBindings.size());
             buffers.reserve(effect.mBindings.size());
             images.reserve(effect.mBindings.size());
+            auto retained = std::move(cachedSet.mRetainedImages);
+            retained.clear();
+            retained.reserve(effect.mBindings.size());
             for (const auto& binding : effect.mBindings)
             {
                 const auto input = std::find_if(
@@ -2108,7 +2412,7 @@ namespace MWRender::Vulkan
                     if (input == inputs.end() || !input->mTexture)
                         throw std::invalid_argument("Missing native effect texture");
                     auto image = mTextures.get(input->mTexture);
-                    frame.mResources.push_back(image);
+                    retained.push_back(image);
                     images.push_back({ image->mSampler, image->mView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL });
                     write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                     write.pImageInfo = &images.back();
@@ -2121,18 +2425,27 @@ namespace MWRender::Vulkan
                     auto [cached, inserted] = frame.mEffectUniforms.getOrCreate(data.data());
                     if (inserted || cached.mSize != binding.mSize || cached.mInputSize != data.size())
                     {
-                        auto slice = allocateStaging(binding.mSize,
-                            std::max(VkDeviceSize{ 16 }, mProperties.limits.minUniformBufferOffsetAlignment));
-                        if (slice.mPage->mLastUploadSubmission != mSubmission)
+                        const auto alignment
+                            = std::max(VkDeviceSize{ 16 }, mProperties.limits.minUniformBufferOffsetAlignment);
+                        const auto offset = (frame.mUniformOffset + alignment - 1) / alignment * alignment;
+                        auto at = offset;
+                        while (frame.mUniformPage < frame.mUniformPages.size()
+                            && (at > frame.mUniformPages[frame.mUniformPage]->mSize
+                                || binding.mSize > frame.mUniformPages[frame.mUniformPage]->mSize - at))
                         {
-                            frame.mUploads.push_back(slice.mPage);
-                            slice.mPage->mLastUploadSubmission = mSubmission;
+                            ++frame.mUniformPage;
+                            frame.mUniformOffset = at = 0;
                         }
-                        auto* destination = slice.mPage->mMemory.mapped() + slice.mOffset;
+                        if (frame.mUniformPage == frame.mUniformPages.size())
+                            frame.mUniformPages.push_back(createBuffer(std::max<VkDeviceSize>(65536, binding.mSize),
+                                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, MemoryKind::Upload));
+                        const auto& page = frame.mUniformPages[frame.mUniformPage];
+                        auto* destination = page->mMemory.mapped() + at;
                         if (!data.empty())
                             std::memcpy(destination, data.data(), data.size());
                         std::memset(destination + data.size(), 0, binding.mSize - data.size());
-                        cached = { binding.mSize, data.size(), { slice.mPage->mBuffer, slice.mOffset, binding.mSize } };
+                        cached = { binding.mSize, data.size(), { page->mBuffer, at, binding.mSize } };
+                        frame.mUniformOffset = at + binding.mSize;
                     }
                     buffers.push_back(cached.mBuffer);
                     write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -2140,7 +2453,23 @@ namespace MWRender::Vulkan
                 }
                 writes.push_back(write);
             }
-            vkUpdateDescriptorSets(mDevice, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+            const auto sameBuffer = [](const auto& a, const auto& b) {
+                return a.buffer == b.buffer && a.offset == b.offset && a.range == b.range;
+            };
+            const auto sameImage = [](const auto& a, const auto& b) {
+                return a.sampler == b.sampler && a.imageView == b.imageView && a.imageLayout == b.imageLayout;
+            };
+            if (!std::equal(
+                    buffers.begin(), buffers.end(), cachedSet.mBuffers.begin(), cachedSet.mBuffers.end(), sameBuffer)
+                || !std::equal(
+                    images.begin(), images.end(), cachedSet.mImages.begin(), cachedSet.mImages.end(), sameImage))
+            {
+                vkUpdateDescriptorSets(mDevice, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+                cachedSet.mBuffers.assign(buffers.begin(), buffers.end());
+                cachedSet.mImages.assign(images.begin(), images.end());
+                ++mDescriptorUpdates;
+            }
+            cachedSet.mRetainedImages = std::move(retained);
             return descriptor;
         }
 
@@ -2195,6 +2524,8 @@ namespace MWRender::Vulkan
 
         void VulkanBackend::destroyWindowPipelines()
         {
+            if (mPipelineWorker)
+                mPipelineWorker->finish();
             for (auto& pipeline : std::span(mPipelines).first(PipelinesPerTarget))
             {
                 vkDestroyPipeline(mDevice, pipeline, nullptr);
@@ -2480,12 +2811,6 @@ namespace MWRender::Vulkan
             depthDependency.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
             depthDependency.dstAccessMask
                 = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
-            if (offscreen)
-            {
-                depthDependency.srcStageMask
-                    |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-                depthDependency.srcAccessMask |= VK_ACCESS_SHADER_READ_BIT;
-            }
             auto& outputDependency = dependencies[2];
             outputDependency.srcSubpass = 0;
             outputDependency.dstSubpass = VK_SUBPASS_EXTERNAL;
@@ -2521,6 +2846,11 @@ namespace MWRender::Vulkan
                 if (!mPipelines[index])
                     createPipeline(index);
             };
+            if (target && static_cast<Render::TargetFormat>(target - 1) == Render::TargetFormat::ShadowMap)
+            {
+                warm(MaterialShader::Shadow, Render::BlendMode::Opaque);
+                return;
+            }
             if (target && !Render::targetHasDepth(static_cast<Render::TargetFormat>(target - 1)))
             {
                 warm(MaterialShader::Distortion, Render::BlendMode::Alpha);
@@ -2534,6 +2864,11 @@ namespace MWRender::Vulkan
                 warm(MaterialShader::SolidSurface, blend);
             }
             warm(MaterialShader::Water, Render::BlendMode::Alpha);
+            for (const auto blend : { Render::BlendMode::Opaque, Render::BlendMode::Alpha })
+            {
+                warm(MaterialShader::SurfaceShadowed, blend);
+                warm(MaterialShader::SolidSurfaceShadowed, blend);
+            }
             warm(MaterialShader::Sky, Render::BlendMode::Opaque);
             warm(MaterialShader::Sky, Render::BlendMode::Alpha);
             warm(MaterialShader::Sky, Render::BlendMode::Additive);
@@ -2759,7 +3094,9 @@ namespace MWRender::Vulkan
                 else
                 {
                     upload.mImage->mUpload.reset();
-                    const auto& image = *upload.mImage;
+                    auto& image = *upload.mImage;
+                    image.mWriter = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                    image.mVisible = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
                     auto barrier = vkInfo<VkImageMemoryBarrier>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
                     barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
                     barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -2986,6 +3323,16 @@ namespace MWRender::Vulkan
             if (reusable == VK_TIMEOUT)
                 return false;
             check(reusable, "Wait for reusable frame");
+            collectTimings(frame);
+            frame.mRegions.clear();
+            frame.mQueryCount = 0;
+            if (mDiagnostics && mTimestampBits && !frame.mQueries)
+            {
+                auto queries = vkInfo<VkQueryPoolCreateInfo>(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO);
+                queries.queryType = VK_QUERY_TYPE_TIMESTAMP;
+                queries.queryCount = 512;
+                check(vkCreateQueryPool(mDevice, &queries, nullptr, &frame.mQueries), "Create GPU timing queries");
+            }
             for (auto& fence : mImageFences)
                 if (fence == frame.mFence)
                     fence = VK_NULL_HANDLE;
@@ -2996,18 +3343,26 @@ namespace MWRender::Vulkan
                 check(vkResetDescriptorPool(mDevice, pool, 0), "Recycle effect descriptors");
             frame.mEffectPoolIndex = 0;
             frame.mEffectUniforms.beginFrame();
+            frame.mUniformPage = frame.mUniformOffset = 0;
+            frame.mEffectDescriptorsUsed = 0;
             if (mSubmission % 16 == 0)
             {
-                mStagingPages.trim(32 * 1024 * 1024, 8);
+                mStagingPages.trim(Render::uploadMemoryRetentionBytes(mInfo.mLocalMemoryBytes), 32);
                 mGeometryPages.trim(32 * 1024 * 1024, 8);
                 mAllocator->trim();
             }
             Render::reserveFor(mPrepared, draws.size());
             Render::reserveFor(frame.mResources, draws.size() * 5 + mPendingUploads.size() * 3 + passes.size() * 4);
             ++mSubmission;
+            if (mPassSamples.size() < mPreparedPasses.size())
+                mPassSamples.resize(mPreparedPasses.size());
             for (std::size_t i = 0; i < mPreparedPasses.size(); ++i)
             {
                 auto& pass = mPreparedPasses[i];
+                pass.mLabel = passes[i].mLabel;
+                pass.mEnvironment = passes[i].mEnvironment;
+                auto& samples = mPassSamples[i];
+                samples.clear();
                 if (pass.mTarget)
                     frame.mResources.push_back(pass.mTarget);
                 if (pass.mWater)
@@ -3032,15 +3387,40 @@ namespace MWRender::Vulkan
                     pass.mEffect = mEffects.get(passes[i].mEffect);
                     frame.mResources.push_back(pass.mEffect);
                     for (const auto& input : passes[i].mEffectInputs)
+                    {
+                        if (input.mTexture)
+                        {
+                            const auto binding
+                                = std::find_if(pass.mEffect->mBindings.begin(), pass.mEffect->mBindings.end(),
+                                    [&](const auto& b) { return b.mBinding == input.mBinding; });
+                            if (binding == pass.mEffect->mBindings.end())
+                                throw std::invalid_argument("Unknown effect texture binding");
+                            const VkPipelineStageFlags stages
+                                = (binding->mStages & 1 ? VK_PIPELINE_STAGE_VERTEX_SHADER_BIT : 0)
+                                | (binding->mStages & 2 ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : 0);
+                            samples.push_back({ mTextures.get(input.mTexture).get(), stages });
+                        }
                         if (pass.mTarget && input.mTexture
                             && (mTextures.get(input.mTexture) == pass.mTarget
                                 || mTextures.get(input.mTexture) == pass.mTarget->mDepth
                                 || mTextures.get(input.mTexture) == pass.mTarget->mNormals))
                             throw std::invalid_argument("An effect cannot sample its own framebuffer attachment");
+                    }
+                    pass.mSamples = samples;
                     pass.mEffectDescriptor = effectDescriptor(frame, *pass.mEffect, passes[i].mEffectInputs);
                     pass.mEffectPipeline = effectPipeline(*pass.mEffect, pass.mTarget.get(), pass.mEffectBlend);
+                    if (!pass.mEffectPipeline)
+                        return false;
                     frame.mResources.push_back(mMeshes.get(mFullscreenMesh));
                 }
+            }
+            for (std::size_t i = frame.mEffectDescriptorsUsed; i < frame.mEffectDescriptors.size(); ++i)
+            {
+                auto& unused = frame.mEffectDescriptors[i];
+                if (unused.mSet)
+                    check(vkFreeDescriptorSets(mDevice, unused.mPool, 1, &unused.mSet),
+                        "Release unused effect descriptor");
+                unused = {};
             }
             std::size_t drawPass = 0;
             std::size_t drawNumber = 0;
@@ -3113,7 +3493,8 @@ namespace MWRender::Vulkan
                 mPrepared.push_back({ mesh.get(), texture.get(), mask.get(), pipeline, rasterKey,
                     draw.mClearDepthBefore, draw.mIndexCount ? draw.mIndexCount : mesh->mIndexCount,
                     { draw.mFogColor[0], draw.mFogColor[1], draw.mFogColor[2], draw.mFogColor[3], draw.mFogStart,
-                        draw.mFogEnd, 0, 0 },
+                        draw.mFogEnd, draw.mBlend == Render::BlendMode::Additive && !draw.mTerrainLayer ? 0.f : 1.f,
+                        draw.mBlend == Render::BlendMode::PremultipliedAlpha ? 1.f : 0.f },
                     draw.mWater });
                 mPrepared.back().mReversedDepth = reversedDepth;
                 mPrepared.back().mDepthBias = { draw.mDepthBiasConstant, draw.mDepthBiasSlope };
@@ -3253,6 +3634,8 @@ namespace MWRender::Vulkan
             auto begin = vkInfo<VkCommandBufferBeginInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
             begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             check(vkBeginCommandBuffer(frame.mCommands, &begin), "Begin Vulkan frame");
+            if (mDiagnostics && frame.mQueries)
+                vkCmdResetQueryPool(frame.mCommands, frame.mQueries, 0, 512);
             recordUploads(frame, draws.size() * sizeof(InstanceData), mLightData.size() * sizeof(Render::PointLight));
             bool windowWritten = mSwapchainInitialized[imageIndex];
             Render::CaptureBoundary capture(mCaptureRequested, mCaptureIncludesGui);
@@ -3260,18 +3643,18 @@ namespace MWRender::Vulkan
             {
                 if (capture.before(view.mGui, static_cast<bool>(view.mTarget)))
                     recordCapture(frame.mCommands, imageIndex);
-                if (view.mEffect && view.mEffect->mVertexTextureReads)
+                for (const auto& sample : view.mSamples)
+                    sampleImage(frame, *sample.mImage, sample.mStages);
+                for (std::size_t drawIndex = view.mFirst; drawIndex < view.mFirst + view.mCount; ++drawIndex)
                 {
-                    // Custom vertex texture reads can also consume persistent
-                    // history written in a previous frame. Synchronize at that
-                    // rare consumer instead of stalling vertices after every
-                    // ordinary fragment-only fullscreen pass.
-                    auto barrier = vkInfo<VkMemoryBarrier>(VK_STRUCTURE_TYPE_MEMORY_BARRIER);
-                    barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-                    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-                    vkCmdPipelineBarrier(frame.mCommands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+                    sampleImage(frame, *mPrepared[drawIndex].mTexture, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                    sampleImage(frame, *mPrepared[drawIndex].mMask, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
                 }
+                const auto timing = beginTiming(frame,
+                    !view.mLabel.empty() ? view.mLabel
+                        : view.mGui      ? "GUI"
+                        : view.mEffect   ? "Effect"
+                                         : "Scene / camera");
                 const VkExtent2D extent
                     = view.mTarget ? VkExtent2D{ view.mTarget->mWidth, view.mTarget->mHeight } : mExtent;
                 const auto x = std::min(view.mViewport[0], extent.width);
@@ -3280,7 +3663,10 @@ namespace MWRender::Vulkan
                 const auto viewHeight
                     = std::min(view.mViewport[3] ? view.mViewport[3] : extent.height, extent.height - y);
                 if (!viewWidth || !viewHeight)
+                {
+                    endTiming(frame, timing);
                     continue;
+                }
                 // Texture rows retain the source GL bottom-up convention. Only
                 // the displayed window uses a negative-height viewport.
                 const VkViewport viewport{ float(x), float(view.mTarget ? y : extent.height - y), float(viewWidth),
@@ -3289,6 +3675,11 @@ namespace MWRender::Vulkan
                                             static_cast<std::int32_t>(
                                                 view.mTarget ? y : extent.height - y - viewHeight) },
                     { viewWidth, viewHeight } };
+                // A base-only write may intentionally preserve the previous
+                // pyramid. Finish that requested generation before replacing
+                // level zero, even if no sampler has consumed it yet.
+                if (view.mTarget && view.mTarget->mMipsDirty && !view.mGenerateMipmaps)
+                    sampleImage(frame, *view.mTarget, 0);
                 if (view.mTarget)
                     for (const auto& attachment : { view.mTarget, view.mTarget->mNormals })
                     {
@@ -3297,8 +3688,15 @@ namespace MWRender::Vulkan
                         auto barrier = vkInfo<VkImageMemoryBarrier>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
                         // Also cover LOAD after a prior attachment write or
                         // initial transfer clear, even if no shader sampled it.
-                        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                            | VK_ACCESS_TRANSFER_WRITE_BIT;
+                        barrier.srcAccessMask = (attachment->mReaders
+                                                            & (VK_PIPELINE_STAGE_VERTEX_SHADER_BIT
+                                                                | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT)
+                                                        ? VK_ACCESS_SHADER_READ_BIT
+                                                        : 0)
+                            | (attachment->mWriter & VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                    ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                                    : 0)
+                            | (attachment->mWriter & VK_PIPELINE_STAGE_TRANSFER_BIT ? VK_ACCESS_TRANSFER_WRITE_BIT : 0);
                         barrier.dstAccessMask
                             = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
                         barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -3308,10 +3706,32 @@ namespace MWRender::Vulkan
                         barrier.image = attachment->mImage;
                         barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
                         vkCmdPipelineBarrier(frame.mCommands,
-                            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                                | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            attachment->mReaders | attachment->mWriter | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+                        attachment->mReaders = 0;
                     }
+                if (view.mTarget && view.mTarget->mDepth && view.mTarget->mDepth->mDepthReadOnly)
+                {
+                    auto& depthImage = *view.mTarget->mDepth;
+                    auto barrier = vkInfo<VkImageMemoryBarrier>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
+                    barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+                        | (depthImage.mReaders ? VK_ACCESS_SHADER_READ_BIT : 0);
+                    barrier.dstAccessMask
+                        = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                    barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    barrier.image = depthImage.mImage;
+                    barrier.subresourceRange = { depthImage.mAspect, 0, 1, 0, 1 };
+                    if (mDepthFormat == VK_FORMAT_D24_UNORM_S8_UINT)
+                        barrier.subresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+                    constexpr auto tests
+                        = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                    vkCmdPipelineBarrier(frame.mCommands, depthImage.mWriter | depthImage.mReaders, tests, 0, 0,
+                        nullptr, 0, nullptr, 1, &barrier);
+                    depthImage.mReaders = 0;
+                    depthImage.mDepthReadOnly = false;
+                }
                 std::array<VkClearValue, 3> clear{};
                 clear[2].color = { { .5f, .5f, .5f, 0.f } };
                 std::copy(view.mClearColor.begin(), view.mClearColor.end(), clear[0].color.float32);
@@ -3350,6 +3770,9 @@ namespace MWRender::Vulkan
                 VkIndexType boundIndexType = VK_INDEX_TYPE_UINT32;
                 VkDeviceSize boundVertexOffset = 0, boundIndexOffset = 0;
                 std::optional<std::array<float, 8>> boundFog;
+                vkCmdPushConstants(frame.mCommands, mPipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 32, sizeof(Render::SceneEnvironment),
+                    &view.mEnvironment);
                 std::optional<std::array<float, 2>> boundDepthBias;
                 if (!mPrepared.empty())
                 {
@@ -3459,8 +3882,8 @@ namespace MWRender::Vulkan
                     }
                     if (!boundFog || *boundFog != draw.mFog)
                     {
-                        vkCmdPushConstants(
-                            frame.mCommands, mPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, draw.mFog.data());
+                        vkCmdPushConstants(frame.mCommands, mPipelineLayout,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, draw.mFog.data());
                         boundFog = draw.mFog;
                     }
                     if (boundTexture != draw.mTexture->mDescriptor || boundMask != draw.mMask->mDescriptor)
@@ -3505,8 +3928,8 @@ namespace MWRender::Vulkan
                     const auto& fullscreen = *mMeshes.get(mFullscreenMesh);
                     const VkDeviceSize offset = fullscreen.mVertices.current()->mRange.offset();
                     vkCmdBindPipeline(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, view.mEffectPipeline);
-                    vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, view.mEffect->mLayout, 0,
-                        1, &view.mEffectDescriptor, 0, nullptr);
+                    vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        view.mEffect->mObjects->mLayout, 0, 1, &view.mEffectDescriptor, 0, nullptr);
                     vkCmdBindVertexBuffers(
                         frame.mCommands, 0, 1, &fullscreen.mVertices.current()->mRange.page().mBuffer, &offset);
                     vkCmdBindIndexBuffer(frame.mCommands, fullscreen.mIndices.current()->mRange.page().mBuffer,
@@ -3516,14 +3939,31 @@ namespace MWRender::Vulkan
                 vkCmdEndRenderPass(frame.mCommands);
                 if (view.mPreserveWorldDepth && view.mTarget && view.mTarget->mWorldDepth && !savedWorldDepth)
                     copyWorldDepth(frame.mCommands, *view.mTarget);
+                if (view.mTarget)
+                    for (const auto& attachment : { view.mTarget, view.mTarget->mNormals })
+                        if (attachment)
+                        {
+                            attachment->mWriter = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                            attachment->mVisible = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                        }
                 if (view.mGenerateMipmaps)
-                    generateTargetMips(frame.mCommands, *view.mTarget);
+                    view.mTarget->mMipsDirty = true;
                 if (view.mTarget && view.mTarget->mDepth)
                 {
+                    view.mTarget->mDepth->mWriter
+                        = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                    view.mTarget->mDepth->mReaders = 0;
+                }
+                if (view.mTarget && view.mTarget->mDepth && !discardDepth)
+                {
+                    view.mTarget->mDepth->mDepthReadOnly = true;
                     auto barrier = vkInfo<VkImageMemoryBarrier>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
                     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
                     barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                     barrier.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+                    view.mTarget->mDepth->mWriter
+                        = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                    view.mTarget->mDepth->mVisible = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
                     barrier.image = view.mTarget->mDepth->mImage;
                     barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
                     barrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -3535,6 +3975,7 @@ namespace MWRender::Vulkan
                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
                 }
+                endTiming(frame, timing);
             }
             if (capture.atEnd())
                 recordCapture(frame.mCommands, imageIndex);

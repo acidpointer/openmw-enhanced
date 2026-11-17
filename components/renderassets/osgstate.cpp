@@ -53,8 +53,10 @@ namespace RenderAssets
                 return -1;
             if (unit >= 0)
             {
-                if (unit >= 8)
+                if (unit >= 32)
                     return -1;
+                if (unit >= 8)
+                    return type == SceneUtil::TextureType::AttributeType ? 32 + unit - 8 : -1;
                 const int kind = type == osg::StateAttribute::TEXTURE ? 0
                     : type == osg::StateAttribute::TEXMAT             ? 1
                     : type == SceneUtil::TextureType::AttributeType   ? 2
@@ -202,7 +204,7 @@ namespace RenderAssets
             attributes(-1, mLocal->getAttributeList());
             const auto& textures = mLocal->getTextureAttributeList();
             mTextureUnits = std::max(mTextureUnits, static_cast<unsigned>(textures.size()));
-            for (unsigned unit = 0; unit < std::min<std::size_t>(textures.size(), 8); ++unit)
+            for (unsigned unit = 0; unit < std::min<std::size_t>(textures.size(), 32); ++unit)
                 attributes(unit, textures[unit]);
             for (const auto& [mode, binding] : mLocal->getModeList())
             {
@@ -214,7 +216,7 @@ namespace RenderAssets
                 }
             }
         }
-        mAttributeSeen = std::numeric_limits<std::uint32_t>::max();
+        mAttributeSeen = std::numeric_limits<std::uint64_t>::max();
         mModeSeen = (1u << nativeModes.size()) - 1;
         mNativeStatePrepared = true;
     }
@@ -259,7 +261,7 @@ namespace RenderAssets
         int unit, osg::StateAttribute::Type type, unsigned member) const
     {
         const int slot = attributeSlot(unit, type, member);
-        const auto bit = slot < 0 ? 0u : std::uint32_t{ 1 } << slot;
+        const auto bit = slot < 0 ? std::uint64_t{ 0 } : std::uint64_t{ 1 } << slot;
         if (mAttributeSeen & bit)
             return mAttributeCache[slot];
         const osg::StateSet::RefAttributePair* local = nullptr;

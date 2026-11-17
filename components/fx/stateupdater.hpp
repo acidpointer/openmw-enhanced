@@ -37,6 +37,7 @@ namespace Fx
         void setAmbientColor(const osg::Vec4f& color) { mData.get<AmbientColor>() = color; }
 
         void setSkyColor(const osg::Vec4f& color) { mData.get<SkyColor>() = color; }
+        const osg::Vec4f& getSkyColor() const { return mData.get<SkyColor>(); }
 
         void setSunColor(const osg::Vec4f& color) { mData.get<SunColor>() = color; }
 
@@ -88,6 +89,7 @@ namespace Fx
         void setNextWeatherId(int id) { mData.get<NextWeatherID>() = id; }
 
         void setWaterHeight(float height) { mData.get<WaterHeight>() = height; }
+        float getWaterHeight() const { return mData.get<WaterHeight>(); }
 
         void setIsWaterEnabled(bool enabled) { mData.get<IsWaterEnabled>() = enabled; }
 

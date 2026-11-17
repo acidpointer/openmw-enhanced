@@ -32,6 +32,8 @@ file(GLOB UNITTEST_SRC_FILES
     misc/teststringops.cpp
 
     render/resources.cpp
+    render/environment.cpp
+    render/imagebinding.cpp
     render/scene.cpp
     render/texture.cpp
     render/osgimporter.cpp

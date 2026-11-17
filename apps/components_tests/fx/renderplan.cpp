@@ -4,7 +4,6 @@
 
 #include <components/fx/executionplan.hpp>
 #include <components/fx/scratchrouting.hpp>
-#include <components/fx/shadercompatibility.hpp>
 #include <components/resource/imagemanager.hpp>
 #include <components/terrain/material.hpp>
 #include <components/testing/util.hpp>
@@ -53,6 +52,24 @@ namespace
         const auto empty = Fx::makeExecutionPlan(nodes, 0, true);
         EXPECT_TRUE(empty.mNodes.empty());
         EXPECT_FALSE(empty.mNormals || empty.mHDR || empty.mLights);
+    }
+
+    TEST(FxRenderPlan, UpdatingRetainsStorageAndInvalidatesRequirements)
+    {
+        Fx::DispatchArray nodes{ node(0, true, true) };
+        Fx::ExecutionPlan plan;
+        Fx::updateExecutionPlan(plan, nodes, 0, true);
+        const auto* storage = plan.mNodes.data();
+        const auto capacity = plan.mNodes.capacity();
+        Fx::updateExecutionPlan(plan, nodes, 0, true);
+        EXPECT_EQ(plan.mNodes.data(), storage);
+        Fx::updateExecutionPlan(plan, nodes, 0, false);
+        EXPECT_TRUE(plan.mNodes.empty());
+        EXPECT_FALSE(plan.mNormals || plan.mHDR || plan.mLights);
+        EXPECT_EQ(plan.mNodes.capacity(), capacity);
+        nodes[0].mHDR = nodes[0].mNormals = false;
+        Fx::updateExecutionPlan(plan, nodes, 0, true);
+        EXPECT_FALSE(plan.mNormals || plan.mHDR);
     }
 
     TEST(FxRenderPlan, CopiedDispatchRetainsRequirementsAndOutputRouting)
@@ -142,13 +159,29 @@ namespace
         EXPECT_TRUE(pool->get(*state, *inputB)[1]);
     }
 
-    TEST(FxCompatibility, EditedOrUnrecognizedSourcesAreNeverPatchedByName)
+    TEST(FxRenderPlan, TechniqueNamesNeverAlterAuthoredPasses)
     {
-        const std::string source = "fragment rays {} technique { passes = rays; version = \"1.2\"; }";
-        EXPECT_FALSE(Fx::optimizeLegacyShader("godrays", source, true));
-        EXPECT_FALSE(Fx::optimizeLegacyShader("depth_of_field", source, false));
-        EXPECT_FALSE(Fx::optimizeLegacyShader("user_custom_effect", source, true));
-        EXPECT_FALSE(Fx::optimizeLegacyShader("godrays", "\xef\xbb\xbf" + source + "\r\n", true));
+        TestingOpenMW::VFSTestFile file(R"(
+            uniform_float authoredStrength { default = 1.25; }
+            fragment authoredPass { void main() { omw_FragColor = vec4(authoredStrength); } }
+            technique { passes = authoredPass; }
+        )");
+        const VFS::Path::NormalizedView path("shaders/source.omwfx");
+        auto vfs = TestingOpenMW::createTestVFS({ { path, &file } });
+        Resource::ImageManager images(vfs.get(), 0);
+        for (const char* name : { "custom", "ssao_hq", "godrays", "depth_of_field" })
+        {
+            Fx::Technique technique(*vfs, images, path, name, 2880, 1800, true, true);
+            ASSERT_TRUE(technique.compile()) << technique.getLastError();
+            ASSERT_EQ(technique.getPasses().size(), 1);
+            EXPECT_EQ(technique.getPasses()[0]->getName(), "authoredPass");
+            EXPECT_TRUE(technique.getRenderTargetsMap().empty());
+            technique.setRendererError("Unsupported renderer input");
+            EXPECT_EQ(technique.getRendererError(), "Unsupported renderer input");
+            EXPECT_EQ(technique.getPasses().size(), 1);
+            technique.setRendererError({});
+            EXPECT_TRUE(technique.getRendererError().empty());
+        }
     }
 
     TEST(FxRenderTargets, CompactR8MaskCompilesThroughActualFxParser)

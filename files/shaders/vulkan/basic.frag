@@ -1,4 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "heightfog.glsl"
 
 layout(constant_id = 0) const uint materialShader = 0u;
 const bool receivesShadows = materialShader == 7u || materialShader == 8u;
@@ -8,10 +11,13 @@ layout(constant_id = 1) const bool writeNormals = true;
 layout(set = 0, binding = 0) uniform sampler2D diffuseMap;
 layout(set = 1, binding = 0) uniform sampler2D blendMap;
 layout(set = 3, binding = 0) uniform sampler2D opaqueWaterDepth;
-layout(push_constant) uniform FogState
+layout(push_constant) uniform SceneState
 {
     vec4 color;
     vec4 range;
+    vec4 worldUp;
+    vec4 hemisphere;
+    vec4 heightFog;
 }
 fog;
 
@@ -281,7 +287,17 @@ void main()
     {
         float depth = 1.0 / gl_FragCoord.w;
         float factor = clamp((depth - fog.range.x) / (fog.range.y - fog.range.x), 0.0, 1.0);
-        result.rgb = mix(result.rgb, fog.color.rgb, factor);
+        if (fog.heightFog.x > 0.0)
+        {
+            float startHeight = fog.worldUp.w * fog.heightFog.y;
+            float endHeight = startHeight + dot(viewPosition, fog.worldUp.xyz) * fog.heightFog.y;
+            factor = nativeHeightFogAmount(factor, startHeight, endHeight,
+                fog.heightFog.z * fog.heightFog.y, fog.heightFog.w > 0.0, fog.heightFog.x);
+        }
+        // Additive emitters attenuate without injecting fog light. Terrain
+        // retains weighted fog; premultiplied surfaces use alpha coverage.
+        float coverage = fog.range.w > 0.0 ? result.a : 1.0;
+        result.rgb = result.rgb * (1.0 - factor) + fog.color.rgb * (factor * fog.range.z * coverage);
     }
     outColor = result;
     if (writeNormals)

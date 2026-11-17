@@ -1,5 +1,6 @@
 #include "framedriver.hpp"
 #include "../pingpongcanvas.hpp"
+#include "../postprocessor.hpp"
 #include "../renderbin.hpp"
 #include "../vismask.hpp"
 #include "effects.hpp"
@@ -7,10 +8,12 @@
 
 #include <components/debug/debuglog.hpp>
 #include <components/fallback/fallback.hpp>
+#include <components/misc/constants.hpp>
 #include <components/myguiplatform/myguirendermanager.hpp>
 #include <components/nifosg/particle.hpp>
 #include <components/render/cachesweep.hpp>
 #include <components/render/drawranges.hpp>
+#include <components/render/environment.hpp>
 #include <components/render/framecache.hpp>
 #include <components/render/math.hpp>
 #include <components/render/meshindices.hpp>
@@ -19,6 +22,7 @@
 #include <components/render/reserve.hpp>
 #include <components/render/residency.hpp>
 #include <components/render/texture.hpp>
+#include <components/renderassets/imagebinding.hpp>
 #include <components/renderassets/imagevariants.hpp>
 #include <components/renderassets/meshkey.hpp>
 #include <components/renderassets/osgimporter.hpp>
@@ -77,6 +81,11 @@ namespace MWRender
         {
         public:
             std::function<void()> mRender;
+            const Render::DeviceInfo* mDevice = nullptr;
+            const Render::DeviceInfo* nativeDeviceInfo() const override { return mDevice; }
+            void operator()(osg::Object*) override { cull_draw(); }
+            void operator()(osg::GraphicsContext*) override { cull_draw(); }
+            void releaseGLObjects(osg::State* = nullptr) const override {}
             std::function<void(int)> mStats;
             void setStatsLevel(int level) override
             {
@@ -330,6 +339,14 @@ namespace MWRender
     class VulkanFrameDriver::Impl final : public MyGUIPlatform::DrawSink
     {
     public:
+        struct TextureBinding
+        {
+            osg::observer_ptr<const osg::Texture2D> mSource;
+            std::array<std::uint64_t, 2> mFrame{};
+            std::array<Render::TextureHandle, 2> mHandles{};
+            RenderAssets::ImageBinding<GpuTexture> mResident;
+        };
+
         Impl(osgViewer::Viewer& viewer, const Render::BackendOptions& options)
             : mViewer(viewer)
             , mWindow(options.mWindow)
@@ -363,6 +380,7 @@ namespace MWRender
             mSceneView->setCamera(viewer.getCamera(), false);
             mSceneView->setState(viewer.getCamera()->getGraphicsContext()->getState());
             mRenderer = new NativeRenderer(viewer.getCamera());
+            mRenderer->mDevice = &device;
             mRenderer->mRender = [this] { render(); };
             mRenderer->mStats = [this](int level) {
                 if (!mStats)
@@ -394,6 +412,7 @@ namespace MWRender
 
         ~Impl() override
         {
+            mRenderer->mDevice = nullptr;
             mRenderer->mRender = {};
             mRenderer->mStats = {};
             mRenderer->mPresentMode = {};
@@ -451,6 +470,8 @@ namespace MWRender
             if (record.mSource.get() != &source || record.mWidth != width || record.mHeight != height
                 || record.mFormat != format)
             {
+                if (const auto binding = mTextureBindings.find(&source); binding != mTextureBindings.end())
+                    binding->second.mResident = {};
                 PrepareTimer timer{ mPrepare.mTargets };
                 auto replacement = std::make_unique<GpuTexture>(backend());
                 auto sampling = RenderAssets::OsgImporter::importSampler(source);
@@ -483,7 +504,17 @@ namespace MWRender
             const unsigned slot = gui ? 1 : 0;
             if (binding.mFrame[slot] != mSerial)
             {
-                binding.mHandles[slot] = importTexture(source, gui);
+                const auto* image = source->getImage();
+                const auto sampling = RenderAssets::OsgImporter::importSampler(*source);
+                auto resident = image ? binding.mResident.find(*image, sampling) : nullptr;
+                if (resident && resident->mHandle)
+                {
+                    touchTexture(*resident);
+                    ++mPrepare.mTextureBindingHits;
+                    binding.mHandles[slot] = resident->mHandle;
+                }
+                else
+                    binding.mHandles[slot] = importTexture(source, gui, binding);
                 binding.mFrame[slot] = mSerial;
             }
             return binding.mHandles[slot];
@@ -520,6 +551,9 @@ namespace MWRender
             if (!image || !image->data() || !RenderAssets::OsgImporter::canImportImageInParallel(*image))
                 return;
             const auto sampling = RenderAssets::OsgImporter::importSampler(*source);
+            if (const auto binding = mTextureBindings.find(source); binding != mTextureBindings.end())
+                if (binding->second.mResident.find(*image, sampling))
+                    return;
             if (imageStorage(*image, sampling))
                 return;
             try
@@ -566,25 +600,40 @@ namespace MWRender
             mPlannedImageBytes += bytes;
         }
 
-        template <class StateSet>
-        void planMaterialImages(const StateSet& resolved, bool sky)
+        struct MaterialTextures
         {
-            bool water = false;
+            bool mWater = false;
+            std::optional<unsigned> mDiffuse, mMask;
+        };
+
+        template <class StateSet>
+        static MaterialTextures resolveMaterialTextures(const StateSet& resolved)
+        {
+            MaterialTextures result;
             if (const auto* uniform = RenderAssets::nativeUniform(resolved, NativeUniform::WaterSurface))
-                uniform->get(water);
-            const auto plan = [&](const char* name) {
-                if (const auto unit = RenderAssets::textureUnit(resolved, name))
+                uniform->get(result.mWater);
+            result.mDiffuse = RenderAssets::textureUnit(resolved, result.mWater ? "normalMap" : "diffuseMap");
+            result.mMask = RenderAssets::textureUnit(resolved, result.mWater ? "reflectionMap" : "blendMap");
+            return result;
+        }
+
+        template <class StateSet>
+        void planMaterialImages(const StateSet& resolved, bool sky, const MaterialTextures* prepared = nullptr)
+        {
+            const auto textures = prepared ? *prepared : resolveMaterialTextures(resolved);
+            const auto plan = [&](std::optional<unsigned> unit) {
+                if (unit)
                     planTexture(dynamic_cast<const osg::Texture2D*>(
                         resolved.getTextureAttribute(*unit, osg::StateAttribute::TEXTURE)));
             };
-            plan(water ? "normalMap" : "diffuseMap");
-            plan(water ? "reflectionMap" : "blendMap");
+            plan(textures.mDiffuse);
+            plan(textures.mMask);
             int pass = 0;
             if (sky)
                 if (const auto* uniform = RenderAssets::nativeUniform(resolved, NativeUniform::Pass))
                     uniform->get(pass);
             if (pass == 3)
-                plan("maskMap");
+                plan(RenderAssets::textureUnit(resolved, "maskMap"));
         }
 
         ImagePreparation* preparedImage(const osg::Image& source)
@@ -618,7 +667,15 @@ namespace MWRender
             return { image.mFormat, image.mSrgb, image.mGenerateMipmaps && mipmaps, mLevels };
         }
 
-        Render::TextureHandle importTexture(const osg::Texture2D* source, bool gui)
+        void touchTexture(GpuTexture& texture)
+        {
+            texture.mSeen = mSerial;
+            auto& storage = texture.mStorage ? *texture.mStorage : texture;
+            storage.mSeen = mSerial;
+            storage.mResidency.touch();
+        }
+
+        Render::TextureHandle importTexture(const osg::Texture2D* source, bool gui, TextureBinding& binding)
         {
             if (!source)
                 return {};
@@ -691,14 +748,26 @@ namespace MWRender
                     storage->mRevision = sourceImage->getModifiedCount();
                     storage->mFormat = data->mFormat;
                     storage->mSrgb = data->mSrgb;
+                    double createMs = 0;
                     {
                         PrepareTimer creation{ mPrepare.mTextureCreate };
                         storage->mHandle = backend().createTexture(*data, sampling);
+                        createMs
+                            = std::chrono::duration<double, std::milli>(PrepareTimer::Clock::now() - creation.mStart)
+                                  .count();
                     }
                     consumedImage(*sourceImage, sampling.mUseMipmaps);
                     std::uint64_t bytes = 0;
                     for (const auto& level : mLevels)
                         bytes += level.mBytes.size();
+                    mPrepare.mTextureStagedBytes += bytes;
+                    if (createMs > mPrepare.mSlowestTextureMs)
+                    {
+                        mPrepare.mSlowestTextureMs = createMs;
+                        mPrepare.mSlowestTextureBytes = bytes;
+                        mPrepare.mSlowestTextureWidth = data->mLevels.front().mWidth;
+                        mPrepare.mSlowestTextureHeight = data->mLevels.front().mHeight;
+                    }
                     if (data->mGenerateMipmaps && mLevels.size() == 1)
                     {
                         auto width = mLevels.front().mWidth, height = mLevels.front().mHeight;
@@ -717,10 +786,8 @@ namespace MWRender
                 found = mTextures.insert_or_assign(key, std::move(replacement)).first;
             }
             auto& cached = *found->second;
-            cached.mSeen = mSerial;
-            auto& storage = cached.mStorage ? *cached.mStorage : cached;
-            storage.mSeen = mSerial;
-            storage.mResidency.touch();
+            touchTexture(cached);
+            binding.mResident.store(*sourceImage, sampling, found->second);
             return cached.mHandle;
         }
 
@@ -1230,31 +1297,43 @@ namespace MWRender
         {
             RenderAssets::OsgStateView mState;
             Render::Draw mDraw;
+            MaterialTextures mTextures;
             std::shared_ptr<const Render::LightSet> mLights;
             unsigned mUVUnit = 0;
             bool mLightsPrepared = false;
             bool mShadowsPrepared = false;
             std::uint64_t mDrawFrame = 0, mImagesPlannedFrame = 0;
+            std::uint64_t mTexturesFrame = 0;
             std::uint64_t mFrame = 0;
         };
 
+        const MaterialTextures& materialTextures(State& cached)
+        {
+            if (cached.mTexturesFrame != mSerial)
+            {
+                cached.mTextures = resolveMaterialTextures(cached.mState);
+                cached.mTexturesFrame = mSerial;
+            }
+            return cached.mTextures;
+        }
+
         void prepareDraw(State& cached)
         {
+            PrepareTimer timer{ mPrepare.mMaterials };
             const auto& resolved = cached.mState;
+            const auto& textures = materialTextures(cached);
             auto& draw = cached.mDraw;
             applyState(draw, resolved);
             cached.mLightsPrepared = false;
             cached.mShadowsPrepared = false;
             cached.mLights.reset();
             cached.mUVUnit = 0;
-            bool water = false;
-            if (const auto* surface = RenderAssets::nativeUniform(resolved, NativeUniform::WaterSurface))
-                surface->get(water);
+            const bool water = textures.mWater;
             draw.mWater = water;
             if (water)
             {
                 draw.mOpacity = std::clamp(Fallback::Map::getFloat("Water_World_Alpha"), 0.f, 1.f);
-                if (const auto unit = RenderAssets::textureUnit(resolved, "reflectionMap"))
+                if (const auto unit = textures.mMask)
                 {
                     draw.mMaskTexture = texture(dynamic_cast<const osg::Texture2D*>(
                                                     resolved.getTextureAttribute(*unit, osg::StateAttribute::TEXTURE)),
@@ -1262,7 +1341,7 @@ namespace MWRender
                     draw.mReflection = static_cast<bool>(draw.mMaskTexture);
                 }
             }
-            const auto diffuseUnit = RenderAssets::textureUnit(resolved, water ? "normalMap" : "diffuseMap");
+            const auto diffuseUnit = textures.mDiffuse;
             if (diffuseUnit)
             {
                 auto* image = dynamic_cast<const osg::Texture2D*>(
@@ -1287,8 +1366,7 @@ namespace MWRender
                     draw.mAlphaCompare = Render::AlphaCompare::Always;
                 }
             }
-            if (const auto blendUnit
-                = water ? std::optional<unsigned>{} : RenderAssets::textureUnit(resolved, "blendMap"))
+            if (const auto blendUnit = water ? std::optional<unsigned>{} : textures.mMask)
             {
                 auto* mask = dynamic_cast<const osg::Texture2D*>(
                     resolved.getTextureAttribute(*blendUnit, osg::StateAttribute::TEXTURE));
@@ -1347,6 +1425,7 @@ namespace MWRender
                 state.getUniform(NativeUniform::ProjectionMatrix), mShadowCasting });
             if (inserted)
             {
+                PrepareTimer timer{ mPrepare.mTransformWork };
                 ++mPrepare.mTransforms;
                 if (mShadowCasting)
                 {
@@ -1527,7 +1606,8 @@ namespace MWRender
                 return; // GL occlusion-query proxies have no visible output.
             try
             {
-                if (const auto* terrain = dynamic_cast<const Terrain::TerrainDrawable*>(geometry))
+                const auto* terrain = dynamic_cast<const Terrain::TerrainDrawable*>(geometry);
+                if (terrain)
                     bakeComposite(terrain->getCompositeMap());
                 if (cached.mDrawFrame != mSerial)
                 {
@@ -1536,6 +1616,7 @@ namespace MWRender
                     cached.mDrawFrame = mSerial;
                 }
                 Render::Draw draw = cached.mDraw;
+                draw.mTerrainLayer = terrain != nullptr;
                 const unsigned uvUnit = cached.mUVUnit;
                 const bool water = draw.mWater;
                 if (mClipPlane && (resolved.getMode(GL_CLIP_PLANE0) & osg::StateAttribute::ON))
@@ -1692,7 +1773,10 @@ namespace MWRender
             const auto* particle = dynamic_cast<const osgParticle::ParticleSystem*>(leaf.getDrawable());
             if ((!geometry || !geometry->getVertexArray()) && !particle)
                 return;
-            auto& cached = state(leaf._parent);
+            auto& cached = [&]() -> State& {
+                PrepareTimer timer{ mPrepare.mStateResolve };
+                return state(leaf._parent);
+            }();
             const auto& resolved = cached.mState;
             if (const auto* mask
                 = dynamic_cast<const osg::ColorMask*>(resolved.getAttribute(osg::StateAttribute::COLORMASK));
@@ -1703,7 +1787,7 @@ namespace MWRender
             {
                 try
                 {
-                    planMaterialImages(resolved, sky);
+                    planMaterialImages(resolved, sky, &materialTextures(cached));
                 }
                 catch (const std::invalid_argument&)
                 {
@@ -1718,10 +1802,8 @@ namespace MWRender
                 {
                     if (const auto* terrain = dynamic_cast<const Terrain::TerrainDrawable*>(geometry))
                         planComposite(terrain->getCompositeMap());
-                    bool water = false;
-                    if (const auto* uniform = resolved.getUniform(NativeUniform::WaterSurface))
-                        uniform->get(water);
-                    const auto uv = RenderAssets::textureUnit(resolved, water ? "normalMap" : "diffuseMap").value_or(0);
+                    const auto uv = materialTextures(cached).mDiffuse.value_or(0);
+                    PrepareTimer timer{ mPrepare.mGeometryPlan };
                     mesh = &planMesh(*geometry, uv);
                 }
                 catch (const std::invalid_argument&)
@@ -1784,10 +1866,12 @@ namespace MWRender
             std::array<std::uint32_t, 4> mViewport{};
             bool mClear = true;
             bool mReversedDepth = true;
+            Render::SceneEnvironment mEnvironment;
         };
 
         void assemble(DrawPlan& plan, std::vector<Render::Draw>& draws, CapturedView& view)
         {
+            PrepareTimer timer{ mPrepare.mAssembly };
             Render::reserveFor(draws, plan.mLeaves.size());
             plan.mRanges.begin(plan.mLeaves.size(), draws.size());
             for (std::size_t i = 0; i < plan.mLeaves.size(); ++i)
@@ -1886,6 +1970,33 @@ namespace MWRender
                 captureEffects(*child);
         }
 
+        Render::SceneEnvironment prepareEnvironment(osgUtil::RenderStage& stage, bool window, bool shadow) const
+        {
+            // The initial view includes relative reflection transforms.
+            // Inventory/map/composite views retain their own lighting.
+            const auto* camera = stage.getCamera();
+            const bool reflection = camera && camera->getName() == Constants::WaterReflectionCamera;
+            if (shadow || (!window && !reflection))
+                return {};
+            auto* post = dynamic_cast<PostProcessor*>(mViewer.getCamera()->getUserData());
+            if (!post || !post->isExterior() || post->isUnderwater())
+                return {};
+            const float hemisphere = Settings::shaders().mNativeHemisphereLightingStrength;
+            const float heightFog = Settings::fog().mNativeHeightFogStrength;
+            if (hemisphere <= 0 && heightFog <= 0)
+                return {};
+            const auto* viewMatrix = stage.getInitialViewMatrix();
+            osg::Matrixd inverse;
+            if (!viewMatrix || !inverse.invert(*viewMatrix))
+                return {};
+            const auto updater = post->getStateUpdater();
+            const auto& sky = updater->getSkyColor();
+            return Render::makeOutdoorEnvironment({ inverse(0, 2), inverse(1, 2), inverse(2, 2), inverse(3, 2) },
+                { sky.r(), sky.g(), sky.b() }, hemisphere, heightFog, Settings::fog().mNativeHeightFogHalfHeight,
+                Settings::fog().mNativeHeightFogBaseHeight,
+                reflection ? std::optional<double>(updater->getWaterHeight()) : std::nullopt);
+        }
+
         void captureStage(osgUtil::RenderStage& stage, bool window = false)
         {
             // OSG also guards RenderStage::draw against repeated references.
@@ -1954,6 +2065,7 @@ namespace MWRender
                         mClipPlane = value;
                     }
                 view.mClip = mClipPlane;
+                view.mEnvironment = prepareEnvironment(stage, window, shadow);
                 view.mScenePlan.clear();
                 view.mDistortionPlan.clear();
                 view.mDistortion.clear();
@@ -2014,11 +2126,29 @@ namespace MWRender
                                     << "ms target=" << mPrepare.mTargets << "ms; texture CPU=" << mPrepare.mTextureCpu
                                     << "ms create/stage=" << mPrepare.mTextureCreate
                                     << "ms conversions=" << mPrepare.mImageConversions
+                                    << " staged=" << mPrepare.mTextureStagedBytes / 1048576.0
+                                    << "MiB, resident bindings=" << mPrepare.mTextureBindingHits
+                                    << ", slowest texture=" << mPrepare.mSlowestTextureMs << "ms ("
+                                    << mPrepare.mSlowestTextureWidth << "x" << mPrepare.mSlowestTextureHeight << ", "
+                                    << mPrepare.mSlowestTextureBytes / 1048576.0 << "MiB)"
                                     << "), mesh builds=" << mPrepare.mMeshBuilds
                                     << ", stream updates=" << mPrepare.mMeshUpdates
                                     << ", particles=" << mPrepare.mParticles << "ms (lock=" << mPrepare.mParticleWait
                                     << "ms), native states=" << mPrepare.mStateBindings
                                     << ", transforms=" << mPrepare.mTransforms;
+                Log(Debug::Warning) << "Vulkan scene CPU detail (nested): plan=" << mPrepare.mPlan
+                                    << "ms state=" << mPrepare.mStateResolve
+                                    << "ms geometry plan=" << mPrepare.mGeometryPlan
+                                    << "ms assembly=" << mPrepare.mAssembly << "ms material=" << mPrepare.mMaterials
+                                    << "ms transform=" << mPrepare.mTransformWork << "ms";
+                const auto diagnostics = backend().effectDiagnostics();
+                if (diagnostics.mGpuAvailable)
+                {
+                    Log gpu(Debug::Warning);
+                    gpu << "Vulkan completed GPU timings (delayed): ";
+                    for (const auto& region : diagnostics.mGpu)
+                        gpu << region.mName << "=" << region.mMilliseconds << "ms ";
+                }
             }
             mLastFrameEnd = FrameTiming::Clock::now();
         }
@@ -2091,7 +2221,10 @@ namespace MWRender
             mPrepare = {};
             {
                 PrepareTimer timer{ mPrepare.mScene };
-                captureStage(*stage, true);
+                {
+                    PrepareTimer planning{ mPrepare.mPlan };
+                    captureStage(*stage, true);
+                }
                 prepareViews();
                 Render::reserveFor(mPasses, mCompositeViewCount + mViewCount);
                 for (std::size_t i = 0; i < mCompositeViewCount; ++i)
@@ -2104,6 +2237,7 @@ namespace MWRender
                     const auto& view = mViews[i];
                     mPasses.push_back({ view.mDraws, view.mTarget, view.mColor, view.mClear, view.mViewport });
                     mPasses.back().mReversedDepth = view.mReversedDepth;
+                    mPasses.back().mEnvironment = view.mEnvironment;
                 }
             }
             if (mEffectCanvas.valid())
@@ -2127,6 +2261,7 @@ namespace MWRender
                     }
                 mEffects->append(
                     mPasses, *mEffectCanvas, mEffectState, projection, camera->getViewMatrix(), distortion);
+                mPrepare.mShaderCompilations = mEffects->shaderCompilations();
             }
             // Interface colors and text remain outside the scene effects.
             {
@@ -2319,12 +2454,6 @@ namespace MWRender
         const osgUtil::RenderStage* mCurrentStage = nullptr;
         std::map<std::tuple<std::uintptr_t, Render::SamplerState>, std::shared_ptr<GpuTexture>> mTextures;
         RenderAssets::ImageVariants<GpuTexture> mImageVariants;
-        struct TextureBinding
-        {
-            osg::observer_ptr<const osg::Texture2D> mSource;
-            std::array<std::uint64_t, 2> mFrame{};
-            std::array<Render::TextureHandle, 2> mHandles{};
-        };
         std::unordered_map<const osg::Texture2D*, TextureBinding> mTextureBindings;
         std::unordered_map<osgUtil::StateGraph*, State> mStates;
         Render::FrameCache<TransformKey, Transform, TransformHash> mTransforms;

@@ -1,6 +1,7 @@
 #include "effectshader.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -19,8 +20,13 @@
 #include <csignal>
 #include <fcntl.h>
 #include <poll.h>
+#include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
+
+#if defined(__linux__)
+extern char** environ;
 #endif
 
 namespace RenderAssets
@@ -76,6 +82,183 @@ namespace RenderAssets
         return !fragment;
     }
 
+    namespace
+    {
+        struct SourceToken
+        {
+            std::string_view mText;
+            std::size_t mBegin, mEnd;
+        };
+        std::vector<SourceToken> sourceTokens(std::string_view source)
+        {
+            std::vector<SourceToken> tokens;
+            const auto identifier = [](unsigned char c) { return std::isalnum(c) || c == '_'; };
+            for (std::size_t p = 0; p < source.size();)
+            {
+                const auto c = static_cast<unsigned char>(source[p]);
+                if (std::isspace(c))
+                {
+                    ++p;
+                    continue;
+                }
+                if (source.substr(p, 2) == "//")
+                {
+                    const auto end = source.find('\n', p);
+                    p = end == source.npos ? source.size() : end + 1;
+                    continue;
+                }
+                if (source.substr(p, 2) == "/*")
+                {
+                    const auto end = source.find("*/", p + 2);
+                    p = end == source.npos ? source.size() : end + 2;
+                    continue;
+                }
+                if (c == '#')
+                {
+                    do
+                    {
+                        const auto end = source.find('\n', p);
+                        if (end == source.npos)
+                        {
+                            p = source.size();
+                            break;
+                        }
+                        const bool continued = end && source[end - 1] == '\\';
+                        p = end + 1;
+                        if (!continued)
+                            break;
+                    } while (p < source.size());
+                    continue;
+                }
+                const auto begin = p++;
+                if (c == '"' || c == '\'')
+                {
+                    while (p < source.size())
+                    {
+                        if (source[p++] == c)
+                            break;
+                        if (source[p - 1] == '\\' && p < source.size())
+                            ++p;
+                    }
+                }
+                else if (identifier(c))
+                    while (p < source.size() && identifier(static_cast<unsigned char>(source[p])))
+                        ++p;
+                tokens.push_back({ source.substr(begin, p - begin), begin, p });
+            }
+            return tokens;
+        }
+        struct SamplerDeclaration
+        {
+            std::size_t mBegin;
+            std::string_view mName;
+        };
+        std::vector<SamplerDeclaration> samplerDeclarations(std::string_view source)
+        {
+            const auto tokens = sourceTokens(source);
+            std::vector<SamplerDeclaration> result;
+            for (std::size_t i = 0; i + 2 < tokens.size(); ++i)
+            {
+                if (tokens[i].mText != "uniform")
+                    continue;
+                for (auto t = i + 1; t + 1 < tokens.size() && tokens[t].mText != ";" && tokens[t].mText != "{"; ++t)
+                    if (tokens[t].mText.starts_with("sampler") || tokens[t].mText.starts_with("isampler")
+                        || tokens[t].mText.starts_with("usampler"))
+                    {
+                        result.push_back({ tokens[i].mBegin, tokens[t + 1].mText });
+                        break;
+                    }
+            }
+            return result;
+        }
+        std::string explicitConditions(std::string_view source)
+        {
+            const auto tokens = sourceTokens(source);
+            std::vector<std::pair<std::size_t, std::string_view>> insertions;
+            for (std::size_t i = 0; i + 1 < tokens.size(); ++i)
+            {
+                const bool loop = tokens[i].mText == "for";
+                if ((!loop && tokens[i].mText != "if" && tokens[i].mText != "while") || tokens[i + 1].mText != "(")
+                    continue;
+                unsigned nesting = 0;
+                std::size_t begin = i + 2, end = begin;
+                for (; end < tokens.size(); ++end)
+                {
+                    const auto text = tokens[end].mText;
+                    if (text == "(")
+                        ++nesting;
+                    else if (text == ")")
+                    {
+                        if (!nesting)
+                            break;
+                        --nesting;
+                    }
+                }
+                if (end == tokens.size())
+                    continue; // Let the compiler diagnose malformed source.
+                if (loop)
+                {
+                    std::size_t first = end, second = end;
+                    nesting = 0;
+                    for (auto t = begin; t < end; ++t)
+                    {
+                        if (tokens[t].mText == "(")
+                            ++nesting;
+                        else if (tokens[t].mText == ")")
+                            --nesting;
+                        else if (!nesting && tokens[t].mText == ";")
+                        {
+                            if (first == end)
+                                first = t;
+                            else
+                            {
+                                second = t;
+                                break;
+                            }
+                        }
+                    }
+                    if (first == end || second == end)
+                        continue;
+                    begin = first + 1;
+                    end = second;
+                }
+                if (begin == end)
+                    continue;
+                // Preserve GLSL condition-declarations; their declared type is
+                // checked by the compiler. Ordinary scalar predicates can use
+                // an explicit conversion in every GLSL version.
+                if (begin + 2 < end && tokens[begin + 2].mText == "=")
+                    continue;
+                insertions.emplace_back(tokens[begin].mBegin, "bool(");
+                insertions.emplace_back(tokens[end - 1].mEnd, ")");
+            }
+            std::stable_sort(
+                insertions.begin(), insertions.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+            std::string result;
+            result.reserve(source.size() + insertions.size() * 3);
+            std::size_t last = 0;
+            for (const auto& [at, text] : insertions)
+            {
+                result.append(source.substr(last, at - last));
+                result += text;
+                last = at;
+            }
+            result.append(source.substr(last));
+            return result;
+        }
+    }
+
+    std::vector<std::string> effectSamplerNames(std::string_view vertex, std::string_view fragment)
+    {
+        std::vector<std::string> names;
+        for (const auto stage : { vertex, fragment })
+            for (const auto& declaration : samplerDeclarations(stage))
+                names.emplace_back(declaration.mName);
+        std::sort(names.begin(), names.end());
+        names.erase(std::unique(names.begin(), names.end()), names.end());
+        return names;
+    }
+
     std::string translateEffectShader(std::string_view source, bool fragment, std::span<const std::string> samplers)
     {
         const std::map<std::string, std::string> macros{ { "OMW_REVERSE_Z", "1" }, { "OMW_NATIVE_DEPTH", "1" },
@@ -123,20 +306,16 @@ namespace RenderAssets
         // Assign descriptor layouts in the shader itself. CLI overrides use
         // resource names that can differ for anonymous blocks between stages.
         // Every linked stage must use exactly the same namespace and bindings.
-        const std::regex declaration(R"(uniform\s+[iu]?sampler\w*\s+(\w+))");
         std::string bound;
         std::size_t offset = 0;
-        for (std::sregex_iterator match(result.begin(), result.end(), declaration), end; match != end; ++match)
+        for (const auto& declaration : samplerDeclarations(result))
         {
-            const auto name = (*match)[1].str();
-            const auto found = std::find(samplers.begin(), samplers.end(), name);
+            const auto found = std::find(samplers.begin(), samplers.end(), declaration.mName);
             if (found == samplers.end())
-                throw std::invalid_argument("Unmapped effect sampler: " + name);
-            const auto position = static_cast<std::size_t>(match->position());
-            bound.append(result, offset, position - offset);
+                throw std::invalid_argument("Unmapped effect sampler: " + std::string(declaration.mName));
+            bound.append(result, offset, declaration.mBegin - offset);
             bound += "layout(set=0,binding=" + std::to_string(found - samplers.begin()) + ") ";
-            bound += match->str();
-            offset = position + match->length();
+            offset = declaration.mBegin;
         }
         bound.append(result, offset, std::string::npos);
         const std::string engineBlock = "layout(std140) uniform _data";
@@ -147,7 +326,7 @@ namespace RenderAssets
             bound.replace(pos, engineBlock.size(), nativeBlock);
         if (fragment)
             bound = std::regex_replace(bound, std::regex(R"(\bgl_FragColor\b)"), "_omw_FragColor");
-        return bound;
+        return explicitConditions(bound);
     }
 
     namespace
@@ -261,6 +440,7 @@ namespace RenderAssets
     {
         if (words.size() < 5 || words[0] != 0x07230203 || !words[3] || words[3] > 1024 * 1024)
             throw std::invalid_argument("Invalid effect SPIR-V header");
+        std::uint8_t stages = 0;
         std::map<unsigned, Type> types;
         std::map<unsigned, std::uint32_t> constants;
         std::map<unsigned, std::string> names;
@@ -279,7 +459,12 @@ namespace RenderAssets
                 if (args.size() < count)
                     throw std::invalid_argument("Invalid effect instruction");
             };
-            if (op == 5)
+            if (op == 15)
+            {
+                need(3);
+                stages |= args[0] == 0 ? 1 : args[0] == 4 ? 2 : 3;
+            }
+            else if (op == 5)
             {
                 need(2);
                 names[args[0]] = spirvString(args.subspan(1));
@@ -443,6 +628,7 @@ namespace RenderAssets
             const auto& resource = type(pointer.args[1]);
             EffectResource output;
             output.mBinding.mBinding = *dec.binding;
+            output.mBinding.mStages = stages ? stages : 3;
             output.mName = names[id];
             if (storage == 0)
             {
@@ -536,7 +722,33 @@ namespace RenderAssets
         int pipefd[2];
         if (pipe2(pipefd, O_CLOEXEC))
             throw std::runtime_error("Cannot create shader compiler pipe");
-        const auto child = fork();
+        pid_t child = -1;
+#if defined(__linux__)
+        posix_spawn_file_actions_t actions;
+        int spawnError = posix_spawn_file_actions_init(&actions);
+        if (!spawnError)
+        {
+            const auto action = [&](int result) {
+                if (!spawnError)
+                    spawnError = result;
+            };
+            action(posix_spawn_file_actions_addchdir_np(&actions, pattern.c_str()));
+            action(posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO));
+            action(posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDERR_FILENO));
+            action(posix_spawn_file_actions_addclose(&actions, pipefd[0]));
+            action(posix_spawn_file_actions_addclose(&actions, pipefd[1]));
+            if (!spawnError)
+                spawnError = posix_spawn(&child, argv[0], &actions, nullptr, argv.data(), environ);
+            posix_spawn_file_actions_destroy(&actions);
+        }
+        if (spawnError)
+        {
+            close(pipefd[0]);
+            close(pipefd[1]);
+            throw std::runtime_error("Cannot launch effect compiler: " + std::string(std::strerror(spawnError)));
+        }
+#else
+        child = fork();
         if (child == 0)
         {
             if (chdir(pattern.c_str()) || dup2(pipefd[1], STDOUT_FILENO) < 0 || dup2(pipefd[1], STDERR_FILENO) < 0)
@@ -546,6 +758,7 @@ namespace RenderAssets
             execv(argv[0], argv.data());
             _exit(127);
         }
+#endif
         close(pipefd[1]);
         if (child < 0)
         {
@@ -604,9 +817,11 @@ namespace RenderAssets
         result.mFragment = readShader(directory.path / "frag.spv");
         result.mMayDiscard = effectMayDiscard(result.mFragment);
         result.mRequiresOffscreen = effectRequiresOffscreen(result.mFragment);
-        const auto reflect = [&](const auto& code) {
+        const auto reflect = [&](const auto& code, std::uint8_t stages) {
             auto resources = reflectEffectShader(code);
             for (auto& resource : resources)
+            {
+                resource.mBinding.mStages = stages;
                 if (resource.mBinding.mKind == Render::EffectBindingKind::UniformBuffer)
                 {
                     if (resource.mBinding.mBinding == samplers.size())
@@ -616,12 +831,13 @@ namespace RenderAssets
                     else
                         throw std::invalid_argument("Unexpected effect uniform buffer binding");
                 }
+            }
             return resources;
         };
-        result.mResources = reflect(result.mVertex);
+        result.mResources = reflect(result.mVertex, 1);
         result.mVertexTextureReads = std::any_of(result.mResources.begin(), result.mResources.end(),
             [](const auto& resource) { return resource.mBinding.mKind == Render::EffectBindingKind::Texture; });
-        for (auto& resource : reflect(result.mFragment))
+        for (auto& resource : reflect(result.mFragment, 2))
         {
             const auto existing = std::find_if(result.mResources.begin(), result.mResources.end(),
                 [&](const auto& r) { return r.mBinding.mBinding == resource.mBinding.mBinding; });
@@ -631,6 +847,7 @@ namespace RenderAssets
             {
                 if (existing->mBinding.mKind != resource.mBinding.mKind || existing->mName != resource.mName)
                     throw std::runtime_error("Linked effect stages disagree on a descriptor");
+                existing->mBinding.mStages |= resource.mBinding.mStages;
                 existing->mBinding.mSize = std::max(existing->mBinding.mSize, resource.mBinding.mSize);
                 for (auto& member : resource.mMembers)
                 {

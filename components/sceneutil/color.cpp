@@ -204,9 +204,9 @@ namespace SceneUtil
             context->setUserValue(NormalFormatKey, format);
         }
 
-        GLenum sColorInternalFormat;
-        GLenum sColorSourceFormat;
-        GLenum sColorSourceType;
+        GLenum sColorInternalFormat = GL_RGB;
+        GLenum sColorSourceFormat = GL_RGB;
+        GLenum sColorSourceType = GL_UNSIGNED_BYTE;
 
         GLenum colorInternalFormat()
         {

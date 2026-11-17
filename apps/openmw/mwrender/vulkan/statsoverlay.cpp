@@ -76,6 +76,7 @@ namespace MWRender::Vulkan
     StatsOverlay::~StatsOverlay() = default;
     void StatsOverlay::setLevel(int level)
     {
+        mImpl->backend.setEffectDiagnostics(level >= 2);
         mImpl->peakPrepareMs = mImpl->lastPrepareMs;
         mImpl->peakPrepare = mImpl->prepare;
         mImpl->level = level;
@@ -85,6 +86,7 @@ namespace MWRender::Vulkan
     }
     void StatsOverlay::shutdown()
     {
+        mImpl->backend.setEffectDiagnostics(false);
         mImpl->shutdown();
     }
     void StatsOverlay::prepared(double ms, const PrepareStats& prepare)
@@ -167,6 +169,16 @@ namespace MWRender::Vulkan
                 << " ms, included in scene)";
             out << "\nDraw items " << s.drawCount << "  mesh uploads " << s.meshUploads << "  image uploads "
                 << s.imageUploads;
+            const auto diagnostics = s.backend.effectDiagnostics();
+            if (!diagnostics.mGpuAvailable)
+                out << "\nGPU timings unavailable / pending";
+            else
+                for (const auto& timing : diagnostics.mGpu)
+                    out << "\nGPU " << timing.mName << "  " << timing.mMilliseconds << " ms";
+            out << "\nShader compilations " << s.prepare.mShaderCompilations << "  pipeline misses "
+                << diagnostics.mPipelineMisses;
+            out << "\nEffect targets " << diagnostics.mTargetCreations << "  descriptor updates "
+                << diagnostics.mDescriptorUpdates << " (cumulative)";
             out << "\nPeak mesh builds " << s.peakPrepare.mMeshBuilds << "  stream updates "
                 << s.peakPrepare.mMeshUpdates;
         }

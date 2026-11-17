@@ -6,6 +6,21 @@
 
 namespace
 {
+    TEST(ColorTargetFormat, NativeStartupCanSelectCpuMetadataWithoutAContext)
+    {
+        SceneUtil::Color::SelectColorFormatOperation operation;
+        operation.setSupportedFormats({ GL_RGBA16F });
+        operation(nullptr);
+        EXPECT_EQ(SceneUtil::Color::colorInternalFormat(), GL_RGBA16F);
+        EXPECT_EQ(SceneUtil::Color::colorSourceFormat(), GL_RGBA);
+        EXPECT_EQ(SceneUtil::Color::colorSourceType(), GL_FLOAT);
+        operation.setSupportedFormats({});
+        operation(nullptr);
+        EXPECT_EQ(SceneUtil::Color::colorInternalFormat(), GL_RGB);
+        EXPECT_EQ(SceneUtil::Color::colorSourceFormat(), GL_RGB);
+        EXPECT_EQ(SceneUtil::Color::colorSourceType(), GL_UNSIGNED_BYTE);
+    }
+
     class MetadataContext : public osg::GraphicsContext
     {
     public:

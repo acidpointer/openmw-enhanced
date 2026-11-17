@@ -197,6 +197,12 @@ namespace Fx
         RenderTargetMap& getRenderTargetsMap() { return mRenderTargets; }
 
         std::string getLastError() const { return mLastError; }
+        const std::string& getRendererError() const { return mRendererError; }
+        void setRendererError(std::string_view error)
+        {
+            if (mRendererError != error)
+                mRendererError.assign(error);
+        }
 
         UniformMap::iterator findUniform(std::string_view name);
 
@@ -300,6 +306,7 @@ namespace Fx
         FlagsType mFlags;
 
         Status mStatus;
+        std::string mRendererError;
 
         bool mEnabled;
 

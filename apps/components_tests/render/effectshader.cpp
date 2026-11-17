@@ -7,6 +7,48 @@
 
 namespace
 {
+    TEST(NativeEffectShader, NumericLegacyConditionsUseGenericScalarConversions)
+    {
+        const auto result = RenderAssets::translateEffectShader(R"(#version 120
+#define omw_FragColor gl_FragColor
+#if FEATURE
+#endif
+void main() {
+    vec4 edge = vec4(0.0);
+    if (edge.g) { edge.r = 1.0; }
+    if ((edge.r > 0.0) && true) { edge.g = 0.0; }
+    while (edge.r) { edge.r -= 1.0; }
+    for (int i = 0; edge.b; ++i) { edge.b = 0.0; }
+    for (;;) { break; }
+    // if (commented) must stay untouched
+    omw_FragColor = edge;
+}
+)",
+            true);
+        EXPECT_NE(result.find("if (bool(edge.g))"), std::string::npos);
+        EXPECT_NE(result.find("if (bool((edge.r > 0.0) && true))"), std::string::npos);
+        EXPECT_NE(result.find("while (bool(edge.r))"), std::string::npos);
+        EXPECT_NE(result.find("for (int i = 0; bool(edge.b); ++i)"), std::string::npos);
+        EXPECT_NE(result.find("for (;;)"), std::string::npos);
+        EXPECT_NE(result.find("// if (commented) must stay untouched"), std::string::npos);
+        EXPECT_NE(result.find("#if FEATURE"), std::string::npos);
+    }
+
+    TEST(NativeEffectShader, SamplerBindingsIgnoreCommentsAndRetainPrecisionQualifiers)
+    {
+        const std::string source = R"(#version 120
+// uniform sampler2D phantom;
+/* uniform sampler3D unused; */
+uniform highp sampler2D scene;
+uniform sampler3D noise;
+)";
+        const auto names = RenderAssets::effectSamplerNames(source, source);
+        EXPECT_EQ(names, (std::vector<std::string>{ "noise", "scene" }));
+        const auto result = RenderAssets::translateEffectShader(source, false, names);
+        EXPECT_NE(result.find("layout(set=0,binding=1) uniform highp sampler2D scene;"), std::string::npos);
+        EXPECT_NE(result.find("// uniform sampler2D phantom;"), std::string::npos);
+    }
+
     TEST(NativeEffectShader, CancelledJobsDoNotLaunchACompiler)
     {
         std::stop_source stop;
@@ -211,6 +253,7 @@ void main() { omw_FragColor = texture2D(omw_SamplerLastShader, omw_TexCoord); }
         const auto resources = RenderAssets::reflectEffectShader(m.words);
         ASSERT_EQ(resources.size(), 1u);
         EXPECT_EQ(resources[0].mName, "scene");
+        EXPECT_EQ(resources[0].mBinding.mStages, 2u);
         // Incomplete library metadata must retain resources conservatively.
         m.name(15, { 4, 31 }, "unknown");
         EXPECT_EQ(RenderAssets::reflectEffectShader(m.words).size(), 3u);

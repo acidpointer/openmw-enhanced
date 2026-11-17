@@ -15,13 +15,14 @@ namespace Fx
         std::vector<std::size_t> mNodes;
     };
 
-    inline ExecutionPlan makeExecutionPlan(const DispatchArray& nodes, FlagsType mask, bool enabled)
+    inline void updateExecutionPlan(ExecutionPlan& result, const DispatchArray& nodes, FlagsType mask, bool enabled)
     {
-        ExecutionPlan result;
+        result.mNodes.clear();
+        result.mHDR = result.mNormals = result.mLights = false;
         result.mMask = mask;
         result.mEnabled = enabled;
         if (!enabled)
-            return result;
+            return;
         result.mNodes.reserve(nodes.size());
         for (std::size_t i = 0; i < nodes.size(); ++i)
         {
@@ -33,6 +34,12 @@ namespace Fx
             result.mNormals |= node.mNormals;
             result.mLights |= node.mLights;
         }
+    }
+
+    inline ExecutionPlan makeExecutionPlan(const DispatchArray& nodes, FlagsType mask, bool enabled)
+    {
+        ExecutionPlan result;
+        updateExecutionPlan(result, nodes, mask, enabled);
         return result;
     }
 }

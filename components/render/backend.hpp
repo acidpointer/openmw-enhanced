@@ -17,6 +17,15 @@ struct SDL_Window;
 
 namespace Render
 {
+    // OSG texture units are dense indices in per-state arrays, not Vulkan
+    // descriptor capacities. Keep the scene bridge's address space compact;
+    // effect descriptor limits are checked separately by the native backend.
+    constexpr std::uint32_t sceneTextureUnitCount(std::uint32_t descriptorLimit)
+    {
+        constexpr std::uint32_t SceneTextureUnits = 32;
+        return descriptorLimit < SceneTextureUnits ? descriptorLimit : SceneTextureUnits;
+    }
+
     inline constexpr std::array<float, 16> IdentityTransform{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
     enum class Api
     {
@@ -95,6 +104,8 @@ namespace Render
         std::uint32_t mBinding = 0;
         EffectBindingKind mKind = EffectBindingKind::Texture;
         std::uint32_t mSize = 0;
+        // Bit 0: vertex, bit 1: fragment. Defaults preserve older callers.
+        std::uint8_t mStages = 3;
     };
     struct EffectProgram
     {
@@ -109,6 +120,21 @@ namespace Render
         std::uint32_t mBinding = 0;
         TextureHandle mTexture;
         std::span<const std::byte> mData{};
+    };
+
+    struct GpuTiming
+    {
+        std::string mName;
+        double mMilliseconds = 0;
+    };
+
+    struct EffectDiagnostics
+    {
+        std::span<const GpuTiming> mGpu;
+        std::uint64_t mPipelineMisses = 0;
+        std::uint64_t mTargetCreations = 0;
+        std::uint64_t mDescriptorUpdates = 0;
+        bool mGpuAvailable = false;
     };
 
     enum class TextureFormat : std::uint8_t
@@ -280,6 +306,9 @@ namespace Render
         bool mDistortion = false;
         float mDistortionStrength = 1;
         bool mWater = false;
+        // Additive terrain layers contribute weighted fog color; additive
+        // light/particle surfaces only attenuate their emitted contribution.
+        bool mTerrainLayer = false;
         // Rational depth coefficients for the water draw's zero-to-one projection.
         std::array<float, 4> mWaterProjection{};
         bool mSky = false;
@@ -356,6 +385,21 @@ namespace Render
         auto operator<=>(const EffectBlend&) const = default;
     };
 
+    struct SceneEnvironment
+    {
+        // View-space position dotted with xyz gives a world-Z displacement.
+        // w is eye height relative to the configured fog base, in world units.
+        std::array<float, 4> mWorldUp{};
+        // RGB is the signed hemisphere modulation; w normalizes mWorldUp.xyz.
+        std::array<float, 4> mHemisphere{};
+        // Strength, inverse half-height, mirror plane relative to fog base,
+        // and a reflection flag. Zero strength preserves ordinary distance fog.
+        std::array<float, 4> mHeightFog{};
+    };
+    static_assert(sizeof(SceneEnvironment) == 48);
+    static_assert(offsetof(SceneEnvironment, mHemisphere) == 16);
+    static_assert(offsetof(SceneEnvironment, mHeightFog) == 32);
+
     struct Pass
     {
         std::span<const Draw> mDraws;
@@ -375,7 +419,8 @@ namespace Render
         // Draw clip matrices and sampled depth follow this pass convention.
         // Comparison functions retain their logical forward-depth meaning.
         bool mReversedDepth = false;
-        // Rebuild a color target's lower levels after this pass writes level zero.
+        // Refresh lower levels following this level-zero write. The backend may
+        // defer until sampling, or until a base-only write needs the old pyramid.
         bool mGenerateMipmaps = false;
         EffectBlend mEffectBlend{};
         // No later consumer needs this pass's depth contents. The backend
@@ -384,6 +429,8 @@ namespace Render
         // Save thumbnails read scene color before these overlay passes, while
         // presentation still draws the interface and fade-to-black normally.
         bool mGui = false;
+        std::string_view mLabel{};
+        SceneEnvironment mEnvironment{};
     };
 
     struct DeviceInfo
@@ -396,6 +443,8 @@ namespace Render
         std::uint64_t mLocalMemoryBytes = 0;
         std::uint64_t mLocalMemoryBudgetBytes = 0;
         bool mFloatNormals = false;
+        // Hardware descriptor capacity, distinct from OSG texture-unit indices.
+        std::uint32_t mMaxSampledImageDescriptors = 0;
     };
 
     enum class PresentMode
@@ -484,6 +533,11 @@ namespace Render
         {
             throw std::runtime_error("Native effects are unavailable");
         }
+        // Queue output-specific pipeline preparation without blocking rendering.
+        // Call before publishing a technique; false means it is still preparing.
+        virtual bool prepareEffect(EffectHandle, TextureHandle, const EffectBlend&) { return true; }
+        virtual void setEffectDiagnostics(bool) {}
+        virtual EffectDiagnostics effectDiagnostics() const { return {}; }
         virtual void releaseEffect(EffectHandle) { throw std::runtime_error("Native effects are unavailable"); }
         TextureHandle createTexture(
             std::uint32_t width, std::uint32_t height, std::span<const std::byte> rgba, bool srgb, bool mipmaps = true)
@@ -508,7 +562,7 @@ namespace Render
     // Private, same-build module ABI. Creation and destruction stay paired in
     // the module; errors are copied into caller-owned memory, never thrown
     // through the exported entry point. No graphics API types cross it.
-    inline constexpr std::uint32_t BackendAbi = 17;
+    inline constexpr std::uint32_t BackendAbi = 20;
     using CreateBackend = Backend* (*)(std::uint32_t abi, const BackendOptions*, char* error, std::size_t errorSize);
     using DestroyBackend = void (*)(Backend*);
 }

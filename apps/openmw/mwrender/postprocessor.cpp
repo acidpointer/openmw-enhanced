@@ -16,6 +16,7 @@
 #include <components/misc/pathhelpers.hpp>
 #include <components/misc/strings/algorithm.hpp>
 #include <components/misc/strings/lower.hpp>
+#include <components/render/presentation.hpp>
 #include <components/resource/scenemanager.hpp>
 #include <components/sceneutil/color.hpp>
 #include <components/sceneutil/depth.hpp>
@@ -140,7 +141,11 @@ namespace MWRender
 
         // Capabilities are cached while the context is current during realize.
         // Establish the target format before constructing either frame's FBOs.
-        mNormalInternalFormat = SceneUtil::Color::normalInternalFormat(gc, mSamples);
+        const auto* presentation = dynamic_cast<const Render::Presentation*>(viewer->getCamera()->getRenderer());
+        const auto* native = presentation ? presentation->nativeDeviceInfo() : nullptr;
+        if (native)
+            mSamples = 0;
+        mNormalInternalFormat = native ? GL_RGBA16F : SceneUtil::Color::normalInternalFormat(gc, mSamples);
 
         std::shared_ptr<LuminanceCalculator> luminanceCalculator = std::make_shared<LuminanceCalculator>(shaderManager);
 
@@ -213,28 +218,29 @@ namespace MWRender
         distortion->setLocked(true);
         mInternalTechniques.push_back(std::move(distortion));
 
-        osg::GLExtensions* ext = gc->getState()->get<osg::GLExtensions>();
-
-        if (!ext->glDisablei && ext->glDisableIndexedEXT)
-            ext->glDisablei = ext->glDisableIndexedEXT;
-
-#ifdef ANDROID
-        ext->glDisablei = nullptr;
-#endif
-
-        if (ext->glDisablei)
-            mNormalsSupported = true;
+        if (native)
+        {
+            mNormalsSupported = native->mFloatNormals;
+            mGLSLVersion = 450;
+            mUBO = true;
+        }
         else
-            Log(Debug::Error) << "'glDisablei' unsupported, pass normals will not be available to shaders.";
-
-        // Output variants are scoped to cameras. Keep the global capability
-        // constant rather than rewriting every scene shader on each toggle.
+        {
+            osg::GLExtensions* ext = gc->getState()->get<osg::GLExtensions>();
+            if (!ext->glDisablei && ext->glDisableIndexedEXT)
+                ext->glDisablei = ext->glDisableIndexedEXT;
+#ifdef ANDROID
+            ext->glDisablei = nullptr;
+#endif
+            mNormalsSupported = ext->glDisablei != nullptr;
+            if (!mNormalsSupported)
+                Log(Debug::Error) << "'glDisablei' unsupported, pass normals will not be available to shaders.";
+            mGLSLVersion = static_cast<int>(ext->glslLanguageVersion * 100);
+            mUBO = ext->isUniformBufferObjectSupported && mGLSLVersion >= 330;
+        }
         defines["disableNormals"] = mNormalsSupported ? "0" : "1";
         shaderManager.setGlobalDefines(defines);
         mViewer->getCamera()->getOrCreateStateSet()->setDefine("OMW_WRITE_NORMALS", "0");
-
-        mGLSLVersion = static_cast<int>(ext->glslLanguageVersion * 100);
-        mUBO = ext->isUniformBufferObjectSupported && mGLSLVersion >= 330;
         mStateUpdater = new Fx::StateUpdater(mUBO);
 
         addChild(mHUDCamera);

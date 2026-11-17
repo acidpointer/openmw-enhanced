@@ -378,6 +378,11 @@ namespace MWGui
                 break;
         }
 
+        if (!technique->getRendererError().empty())
+            ss << endl
+               << endl
+               << "#{fontcolourhtml=negative}Renderer error: #{fontcolourhtml=normal}"
+               << technique->getRendererError().substr(0, 2048);
         mShaderInfo->setCaptionWithReplacing(ss.str());
 
         if (Settings::ShaderManager::get().getMode() == Settings::ShaderManager::Mode::Debug)

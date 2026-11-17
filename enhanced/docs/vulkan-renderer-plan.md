@@ -94,7 +94,95 @@ or filtering combination. A full mip chain also serves base-level-only sampler
 views. Source revisions invalidate the image registry, while already recorded
 views retain the old allocation through their GPU frame. Pending uploads remain
 valid when a source handle is released while sampler views survive. The private
-backend ABI is 17; engine and renderer module must be rebuilt together.
+backend ABI is 20; engine and renderer module must be rebuilt together.
+
+The latest playtest log captured warm frames with 12.5, 17.4 and 17.9 ms in
+texture creation/staging, plus a 91.4 ms CPU effects-preparation spike. A cold
+area upload took 237.9 ms of texture work. These are selected slow-frame CPU
+samples, not average frame times or GPU measurements. Completed frame leases
+now release in `ready()` before preparation requests writable geometry and
+staging slices. The upload idle budget scales from 36 to 132 MiB, enough for
+two preferred texture pages alongside the ordinary 4 MiB page, with bounded
+idle retention. Previously a preferred 64 MiB page exceeded the fixed 32 MiB
+budget and was discarded immediately even during the retention grace period.
+
+Common material pipelines for supported scene target formats warm during native
+startup, rather than during the first effect-target allocation. Shadow-only
+targets warm their caster pipeline instead of unused water/sky/surface variants.
+Shadow receiving variants also warm early. The Vulkan 1.1 baked-raster fallback
+retains demand compilation to avoid creating its much larger variant space.
+Resident image bindings have a weak per-texture cache guarded by source image
+identity, dirty count and sampler state; it bypasses repeated image-map lookups
+and format validation while preserving residency touches and eviction. Changing
+a texture into a framebuffer target invalidates this fast path.
+
+Slow-frame diagnostics now report staged bytes, maximum single-texture creation
+time and dimensions, and resident binding hits. Completed GPU region timings
+are logged separately when the existing F3 GPU diagnostics are enabled; they
+are delayed measurements, not timings for the current CPU frame. Regression
+fixtures cover upload-budget reuse and image-binding invalidation/weak ownership.
+Only static checks have been performed; runtime results remain unverified.
+
+The following playtest (20:04–20:06) still records 10–15 ms scene preparation
+and 7–12 ms culling on many warm slow frames, despite essentially zero texture
+conversion/upload work on those frames. Delayed GPU samples put the main scene
+around 3–5 ms and the enabled effects around 4–5 ms combined. These selected
+samples identify substantial CPU overhead; they are not whole-run averages.
+New high-resolution uploads still produce 12–13 ms single-texture CPU stalls.
+
+Native state now caches texture semantic labels through unit 31. Previously,
+missing material samplers scanned higher reserved texture units by walking the
+state hierarchy again for each query, because only units 0–7 were memoized.
+Material texture-unit selection is shared by image planning, mesh UV selection
+and draw preparation for the current frame. Rebinding resets the selection;
+uniform and attribute binding inheritance retains OSG OVERRIDE/PROTECTED rules.
+Frame-cache hashes now mix aligned addresses before applying their power-of-two
+mask, avoiding long probe runs for texture pointers and aligned effect slices.
+Compile-time regression checks bound comparisons for deliberately aligned hashes;
+state fixtures cover high texture slots, overrides, rebinds and borrowed ownership.
+
+Slow-frame CPU diagnostics separate planning, state resolution, geometry planning,
+assembly, materials and transforms (nested timings, not additive phases),
+alongside the existing per-texture upload dimensions/bytes/maximum duration.
+These changes have static validation only; the remaining CPU/GPU costs and actual
+frame-time improvement must be measured in a rebuilt playtest.
+
+Outdoor hemisphere ambient lighting and analytical height fog share a 48-byte
+environment block pushed once per world view. Together with the existing 32-byte
+fog state this stays within Vulkan's guaranteed 128-byte push-constant budget.
+No new render passes, descriptor sets, texture samples or asset processing are
+introduced. Hemisphere modulation runs per vertex, uses the weather sky tint,
+and preserves the mean authored ambient independently in each RGB channel.
+Height fog scales the existing weather fog's optical depth with integrated
+exponential height density, retaining its start and fully fogged end boundaries.
+The near-horizontal limit uses a stable polynomial.
+High-altitude clearing fades back to weather fog near the far endpoint to keep
+the geometric clipping edge hidden. Planar reflections integrate
+the folded physical ray at the water surface. Additive emitters attenuate without
+adding fog color; additive terrain layers retain their weighted fog contributions.
+Premultiplied surfaces scale the fog contribution by alpha coverage.
+
+Main world and explicitly identified water-reflection views opt in. Interiors,
+underwater views, inventory, maps, composite baking, shadows and GUI use disabled
+environment data. Exterior-like interiors follow the existing exterior flag.
+The four native settings are documented under Shaders and Fog. The scalar GLSL
+is shared with regression fixtures comparing it against numerical quadrature;
+additional fixtures cover ambient energy, camera orientation, disabled features,
+extreme heights and far-distance closure. Validation is static only; visual
+quality, FPS and executed regression results still require user verification.
+
+Native startup keeps Vulkan descriptor capacities separate from the scene's
+OSG texture-unit namespace. The loading-freeze log reserved shadow units
+1048572..1048575 after a hardware descriptor limit of 1048576 was passed to
+ShaderManager. OSG indexes dense StateSet arrays with those units, causing
+large allocations and state traversals. The scene bridge now uses at most 32
+logical units (or the smaller hardware limit), while postprocessing descriptor
+validation continues to use the actual Vulkan limits. Compile-time checks cover
+large and small device limits; a regression fixture reserves the actual scene
+slots and checks that OSG arrays remain bounded. Native startup also runs the
+CPU-only color-format selection that was previously supplied by GL realization,
+so RTT nodes no longer inherit zero format metadata. These changes have only
+been checked statically; save loading still needs a rebuilt-game playtest.
 
 Tightly packed byte textures retain their original RGBA, BGRA, RGB, BGR, red,
 red/green, luminance, luminance/alpha or alpha storage through preparation. Vulkan
@@ -176,6 +264,59 @@ visibility are not reduced. Static assertions and regression fixture sources cov
 capture boundaries, fade endpoints, heap-size limits, float samples, compressed
 storage and staging fallback. Runtime and FPS verification remain user-operated.
 
+Native post-processing now retains completed shader content across OSG wrapper
+rebuilds, with bounded LRU retirement of unused programs. Prepared pass recipes
+cache output routing, coverage, blending and target lifetimes; current uniforms,
+textures, camera state and exposure history are updated independently. Source
+changes (including in-place shader edits) invalidate the corresponding recipe.
+Effect source rewriting by name or fingerprint has been removed. The parser
+uses authored sources unchanged. Renderer failures are exposed in the effect's
+HUD description without changing its authored passes. The native translator handles shared GLSL
+language differences (including explicit scalar condition conversions). Sampler
+binding discovery uses tokens, ignoring comments and retaining precision
+qualifiers. The public FOV/near/far fields retain the engine API values; camera
+matrix corrections no longer replace the vertical FOV with a horizontal value.
+The inverse projection is computed once per preparation. Diagnostic labels own
+their technique name instead of viewing a temporary returned string.
+
+GPU shader modules/layouts and output-specific effect pipelines are prepared on a single worker with a private
+Vulkan pipeline cache, seeded from the persistent cache. Ready techniques keep
+running while missing variants prepare. Publication never waits on compilation;
+swapchain format changes drain the worker before destroying render passes.
+Shutdown cancels queued work, joins the active call and merges its cache before
+device teardown. Shader/layout and pipeline ownership survive discarded jobs.
+Per-frame-slot mapped uniform pages and persistent descriptors are reused only
+after that slot's fence completes. Uniform contents update each frame; unchanged
+resource bindings do not issue descriptor updates. Inactive bindings release
+retained images and shader layouts.
+
+Reflected descriptor stage usage drives image-specific visibility and reuse
+barriers. Custom vertex texture reads no longer require an ALL_COMMANDS barrier.
+Mip generation is deferred until a mipmapped sampler consumes dirty target
+levels. A base-only write first completes any requested prior pyramid, retaining
+its lower levels; such preserved-history levels exclude transient aliasing.
+Depth that has no consumer avoids its shader-read transition as well as
+its attachment store. Compatible named intermediates share storage only after
+a full first write, before any reads, and with disjoint pass lifetimes; temporal,
+blended and partial-coverage targets keep their contents and dedicated storage.
+Existing scene/scratch routing continues to render the world once.
+
+F3 level two and above enables completed-frame GPU timestamp queries for scene,
+effects, exposure, depth conversion and mip generation, alongside cumulative
+shader compilation, pipeline miss, target and descriptor counters. Query reads
+never request WAIT or introduce submissions. Devices without timestamp support
+show unavailable timing; CPU submission time is not reported as GPU duration.
+Static assertions cover feedback/history exclusion and aliasing boundaries;
+regression fixtures cover retained plan storage, requirement invalidation and
+shader stage metadata, authored pass preservation and generic legacy GLSL
+conditions. Sampler enumeration moved off the rendering owner, and Linux compiler
+launch uses posix_spawn with file actions instead of copying the live game's page
+tables with fork. The unused-code LRU budget no longer counts pinned active
+programs. Queue logs include a source identity: multiple passes of a technique
+must not be mistaken for recompilation of the same source. Builds, GPU validation,
+visual correctness and FPS improvements remain user-operated. In particular,
+SSAO visual parity is not established by source checks.
+
 Mesh and image residency budgets include the union of assets seen over the last
 256 prepared frames, with the existing device ceiling and warm-cache allowance.
 Intrusive bucket links update once per touched resource without per-frame node
@@ -206,10 +347,16 @@ Vulkan; startup logs report the actual Vulkan device. The existing launcher GPU
 selection is matched by PCI address when requested. Resize, high-DPI input and
 VSync changes route to the selected backend.
 
-This is an experimental visible integration, not feature parity. A hidden
-16-by-16 GL compatibility context initializes capability-dependent legacy scene
-services. It neither presents nor draws the visible game scene, but Vulkan
-startup still requires that context until those services are migrated. Native
+This is an experimental integration, not feature parity. Vulkan startup now
+creates one Vulkan SDL window and a CPU OSG window/state adapter; it does not
+create or realize an OpenGL context. The adapter never claims a current GL
+context and dispatches native presentation only. GL realization, extension
+queries, GL draw callbacks and GL deletion flushing are bypassed on that window.
+Post-processing capabilities and texture-unit limits come from the Vulkan device;
+legacy shader/ripple/shadow capability readers tolerate the absent GL registry.
+The source follows OSG's lifecycle in
+[GraphicsContext](https://github.com/openscenegraph/OpenSceneGraph/blob/OpenSceneGraph-3.6.5/src/osg/GraphicsContext.cpp).
+Native
 offscreen color cameras now submit pre-render and post-render stages in dependency
 order. Inventory portraits and local maps use persistent native target images;
 target contents survive camera inactivity until their source texture expires.
@@ -967,7 +1114,8 @@ resource ownership, static model loading, persistent render scene, module
 loading, and packaging source changes are present. Remaining immediate work includes advanced multi-texture materials, groundcover
 instancing/wind/stomping, weather-specific drawables, shadows, complete water and
 depth-target paths, remaining OMWFX inputs/pass types, stereo/debug/service compatibility, and
-removal of the hidden GL capability context. The current color-target, lighting,
+remaining native service compatibility. The hidden GL capability context has been
+removed from the startup source path. The current color-target, lighting,
 sky and particle paths are implemented source changes, not verified parity.
 The user confirmed the corrected image in playtesting; the persistent performance
 collapse is now traced to cache retirement in the supplied game log. Source

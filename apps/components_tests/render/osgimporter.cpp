@@ -117,8 +117,15 @@ namespace
                         states[i]->addUniform(new osg::Uniform("shadowSpaceMatrix0", osg::Matrixf{}), flags[i]);
                         states[i]->setMode(GL_BLEND, flags[i] | (i == 1 ? A::OFF : A::ON));
                         states[i]->setAttribute(new osg::ColorMask(i == 0, i == 1, i == 2, true), flags[i]);
-                        for (unsigned unit : { 0u, 7u, 9u })
+                        for (unsigned unit : { 0u, 7u, 8u, 9u, 16u, 31u, 32u })
+                        {
                             states[i]->setTextureAttribute(unit, new osg::Texture2D, flags[i]);
+                            states[i]->setTextureAttribute(unit,
+                                new SceneUtil::TextureType(i == 0 ? "diffuseMap"
+                                        : i == 1                  ? "blendMap"
+                                                                  : "normalMap"),
+                                flags[i]);
+                        }
                     }
                     RenderAssets::OsgStateView a(nullptr, states[0]), b(&a, states[1]), lazy(&b, states[2]);
                     RenderAssets::OsgStateView x(nullptr, states[0]), y(&x, states[1]), eager(&y, states[2]);
@@ -135,10 +142,43 @@ namespace
                     EXPECT_EQ(eager.getAttribute(A::COLORMASK), lazy.getAttribute(A::COLORMASK));
                     EXPECT_EQ(eager.getAttribute(A::MATERIAL), nullptr);
                     EXPECT_EQ(eager.textureUnits(), lazy.textureUnits());
-                    for (unsigned unit : { 0u, 2u, 7u, 9u })
+                    for (unsigned unit : { 0u, 2u, 7u, 8u, 9u, 16u, 31u, 32u })
+                    {
                         EXPECT_EQ(
                             eager.getTextureAttribute(unit, A::TEXTURE), lazy.getTextureAttribute(unit, A::TEXTURE));
+                        EXPECT_EQ(eager.getTextureAttribute(unit, SceneUtil::TextureType::AttributeType),
+                            lazy.getTextureAttribute(unit, SceneUtil::TextureType::AttributeType));
+                    }
+                    for (const auto name : { "diffuseMap", "blendMap", "normalMap", "reflectionMap", "maskMap" })
+                        EXPECT_EQ(RenderAssets::textureUnit(eager, name), RenderAssets::textureUnit(lazy, name));
                 }
+    }
+
+    TEST(RenderStateView, HighTextureLabelsRespectOverridesAndRebindWithoutPinningTheirSources)
+    {
+        using A = osg::StateAttribute;
+        osg::ref_ptr<osg::StateSet> root = new osg::StateSet, child = new osg::StateSet;
+        osg::ref_ptr<SceneUtil::TextureType> inherited = new SceneUtil::TextureType("blendMap");
+        osg::ref_ptr<SceneUtil::TextureType> local = new SceneUtil::TextureType("normalMap");
+        root->setTextureAttribute(31, inherited, A::OVERRIDE);
+        child->setTextureAttribute(31, local);
+        const auto references = inherited->referenceCount();
+        RenderAssets::OsgStateView a(nullptr, root), b(&a, child);
+        b.prepareNativeState();
+        EXPECT_EQ(RenderAssets::textureUnit(b, "blendMap"), 31u);
+        EXPECT_FALSE(RenderAssets::textureUnit(b, "normalMap"));
+        EXPECT_EQ(inherited->referenceCount(), references);
+
+        child->setTextureAttribute(31, local, A::PROTECTED);
+        b.bind(&a, child);
+        b.prepareNativeState();
+        EXPECT_FALSE(RenderAssets::textureUnit(b, "blendMap"));
+        EXPECT_EQ(RenderAssets::textureUnit(b, "normalMap"), 31u);
+
+        b.bind(nullptr, nullptr);
+        b.prepareNativeState();
+        EXPECT_FALSE(RenderAssets::textureUnit(b, "normalMap"));
+        EXPECT_FALSE(b.getTextureAttribute(31, SceneUtil::TextureType::AttributeType));
     }
 
     TEST(RenderStateView, EagerBindingsKeepValuesLiveAndRebindRemovesOldEntries)
