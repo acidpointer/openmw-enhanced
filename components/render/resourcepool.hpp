@@ -38,11 +38,11 @@ namespace Render
             return { index, slot.mGeneration };
         }
 
-        const std::shared_ptr<T>& get(Id id) const
+        const std::shared_ptr<T>& get(Id id, const char* error = "Invalid or expired rendering resource handle") const
         {
             if (id.mIndex >= mSlots.size() || id.mGeneration != mSlots[id.mIndex].mGeneration
                 || !mSlots[id.mIndex].mValue)
-                throw std::invalid_argument("Invalid or expired rendering resource handle");
+                throw std::invalid_argument(error);
             return mSlots[id.mIndex].mValue;
         }
 

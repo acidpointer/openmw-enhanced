@@ -181,6 +181,44 @@ namespace
         EXPECT_FALSE(b.getTextureAttribute(31, SceneUtil::TextureType::AttributeType));
     }
 
+    TEST(RenderStateView, SparseTextureLabelsPreserveInheritedAndHighUnitLookups)
+    {
+        osg::ref_ptr<osg::StateSet> parent = new osg::StateSet, child = new osg::StateSet;
+        parent->setTextureAttribute(17, new SceneUtil::TextureType("normalMap"));
+        parent->setTextureAttribute(31, new osg::Texture2D);
+        child->setTextureAttribute(34, new SceneUtil::TextureType("emissiveMap"));
+        RenderAssets::OsgStateView root(nullptr, parent), leaf(&root, child);
+        leaf.prepareNativeState();
+        EXPECT_EQ(leaf.nextTextureLabelUnit(0, leaf.textureUnits()), 17u);
+        EXPECT_EQ(leaf.nextTextureLabelUnit(18, leaf.textureUnits()), 32u);
+        EXPECT_EQ(RenderAssets::textureUnit(leaf, "normalMap"), 17u);
+        EXPECT_EQ(RenderAssets::textureUnit(leaf, "emissiveMap"), 34u);
+        EXPECT_FALSE(RenderAssets::textureUnit(leaf, "specularMap"));
+
+        leaf.bind(nullptr, child);
+        leaf.prepareNativeState();
+        EXPECT_FALSE(RenderAssets::textureUnit(leaf, "normalMap"));
+        EXPECT_EQ(RenderAssets::textureUnit(leaf, "emissiveMap"), 34u);
+    }
+
+    TEST(RenderStateView, NativeBindingRevisionsDistinguishOverridesFromValueUpdates)
+    {
+        osg::ref_ptr<osg::StateSet> state = new osg::StateSet;
+        osg::ref_ptr<osg::Uniform> alpha = new osg::Uniform("alpha", .5f);
+        state->addUniform(alpha);
+        RenderAssets::NativeBindings original, current;
+        RenderAssets::collectNativeBindings(*state, original);
+        alpha->set(.25f);
+        RenderAssets::collectNativeBindings(*state, current);
+        EXPECT_EQ(original, current);
+        state->addUniform(alpha, osg::StateAttribute::OVERRIDE);
+        RenderAssets::collectNativeBindings(*state, current);
+        EXPECT_NE(original, current);
+        state->removeUniform("alpha");
+        RenderAssets::collectNativeBindings(*state, current);
+        EXPECT_NE(original, current);
+    }
+
     TEST(RenderStateView, EagerBindingsKeepValuesLiveAndRebindRemovesOldEntries)
     {
         osg::ref_ptr<osg::StateSet> source = new osg::StateSet;

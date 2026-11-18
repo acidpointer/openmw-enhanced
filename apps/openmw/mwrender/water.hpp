@@ -31,6 +31,11 @@ namespace Resource
     class ResourceSystem;
 }
 
+namespace Terrain
+{
+    class HeightCullCallback;
+}
+
 namespace MWWorld
 {
     class CellStore;
@@ -73,7 +78,7 @@ namespace MWRender
         bool mInterior;
         bool mShowWorld;
 
-        osg::Callback* mCullCallback;
+        osg::ref_ptr<Terrain::HeightCullCallback> mCullCallback;
         osg::ref_ptr<osg::Callback> mShaderWaterStateSetUpdater;
 
         osg::Vec3f getSceneNodeCoordinates(int gridX, int gridY);
@@ -90,7 +95,7 @@ namespace MWRender
             osgUtil::IncrementalCompileOperation* ico);
         ~Water();
 
-        void setCullCallback(osg::Callback* callback);
+        void setCullCallback(Terrain::HeightCullCallback* callback);
 
         void listAssetsToPreload(std::vector<VFS::Path::Normalized>& textures);
 

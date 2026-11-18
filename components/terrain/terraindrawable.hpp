@@ -58,15 +58,12 @@ namespace Terrain
 
         void compileGLObjects(osg::RenderInfo& renderInfo) const override;
 
-        void setupWaterBoundingBox(float waterheight, float margin);
-        const osg::BoundingBox& getWaterBoundingBox() const { return mWaterBoundingBox; }
 
         void setCompositeMap(const std::shared_ptr<CompositeMap>& map) { mCompositeMap = map; }
         const std::shared_ptr<CompositeMap>& getCompositeMap() const { return mCompositeMap; }
         void setCompositeMapRenderer(CompositeMapRenderer* renderer) { mCompositeMapRenderer = renderer; }
 
     private:
-        osg::BoundingBox mWaterBoundingBox;
         PassVector mPasses;
 
         osg::ref_ptr<osg::ClusterCullingCallback> mClusterCullingCallback;

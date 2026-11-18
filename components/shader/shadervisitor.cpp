@@ -20,6 +20,7 @@
 #include <components/debug/debuglog.hpp>
 #include <components/misc/osguservalues.hpp>
 #include <components/misc/strings/algorithm.hpp>
+#include <components/renderassets/pbrmaterial.hpp>
 #include <components/resource/imagemanager.hpp>
 #include <components/sceneutil/glextensions.hpp>
 #include <components/sceneutil/material.hpp>
@@ -423,6 +424,13 @@ namespace Shader
                     mRequirements.back().mTextures[unit] = "specularMap";
                 }
             }
+            if (mPbrMaterials && diffuseMap)
+                if (auto material = mPbrMaterials->get(*diffuseMap, mImageManager))
+                {
+                    if (!writableStateSet)
+                        writableStateSet = getWritableStateSet(node);
+                    writableStateSet->setAttribute(material);
+                }
         }
 
         const osg::StateSet::AttributeList& attributes = stateset->getAttributeList();

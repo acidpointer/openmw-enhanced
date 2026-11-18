@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 #include <osg/Matrixd>
 #include <osg/StateSet>
@@ -34,6 +35,7 @@ namespace RenderAssets
         DiffuseColor,
         DiffuseMap,
         DistortionStrength,
+        EmissiveMap,
         FogColor,
         FogEnd,
         FogStart,
@@ -55,10 +57,12 @@ namespace RenderAssets
         ProjectionMatrix,
         ReflectionMap,
         ShadowSpaceMatrix0,
+        SpecularMap,
         SunAmbient,
         SunDiffuse,
         SunPosition,
         SunSpecular,
+        TerrainSpecularAlpha,
         TexMat0,
         TexMat1,
         TexMat2,
@@ -135,6 +139,7 @@ namespace RenderAssets
         const osg::StateAttribute* getTextureAttribute(unsigned unit, osg::StateAttribute::Type type) const;
         osg::StateAttribute::GLModeValue getMode(osg::StateAttribute::GLMode mode) const;
         unsigned textureUnits() const;
+        unsigned nextTextureLabelUnit(unsigned start, unsigned end) const;
         OsgState snapshot() const;
 
     private:
@@ -151,16 +156,19 @@ namespace RenderAssets
         // Ordinary texture/matrix slots 0..7 plus semantic labels through
         // unit 31. Reserved shadow/scene units must not force repeated walks
         // of the inherited chain when a material has no blend/normal map.
-        mutable std::array<const osg::StateSet::RefAttributePair*, 56> mAttributeCache{};
+        mutable std::array<const osg::StateSet::RefAttributePair*, 57> mAttributeCache{};
         mutable std::array<const osg::StateAttribute::GLModeValue*, 5> mModeCache{};
         mutable std::uint64_t mUniformSeen = 0;
         mutable std::uint64_t mAttributeSeen = 0;
         mutable unsigned mModeSeen = 0;
         mutable unsigned mTextureUnits = 0;
+        mutable std::uint32_t mTextureLabels = 0;
         mutable bool mNativeStatePrepared = false;
     };
 
     const osg::Uniform* nativeUniform(const osg::StateSet& state, NativeUniform name);
+    using NativeBindings = std::vector<std::array<std::uintptr_t, 4>>;
+    void collectNativeBindings(const osg::StateSet& state, NativeBindings& result);
     inline const osg::Uniform* nativeUniform(const OsgStateView& state, NativeUniform name)
     {
         return state.getUniform(name);

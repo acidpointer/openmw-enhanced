@@ -1,3 +1,4 @@
+#include <components/render/colorspace.hpp>
 #include <components/render/environment.hpp>
 
 #include <gtest/gtest.h>
@@ -18,10 +19,68 @@ namespace FogShader
 #include <files/shaders/vulkan/heightfog.glsl>
 }
 
+namespace PbrShader
+{
+    using std::exp2;
+    using std::min;
+
+#include <files/shaders/vulkan/pbrenvironment.glsl>
+}
+
 namespace
 {
     constexpr std::array<double, 4> EyeHeight{ 0, 0, 1, 4096 };
     constexpr std::array<float, 3> Sky{ .25f, .5f, 1.f };
+
+    float environmentReflectance(float roughness, float ndotv, float f0, float f90)
+    {
+        const auto dfg = PbrShader::pbrEnvironmentBrdf(roughness, ndotv);
+        return std::clamp(f0 * dfg.scale + f90 * dfg.bias, 0.f, 1.f);
+    }
+
+    TEST(PbrEnvironmentShader, MatteDielectricRetainsDiffuseColorAtGrazingAngles)
+    {
+        // Compare the same F0 at different view angles. The old mirror
+        // Fresnel approached one at the horizon regardless of roughness.
+        for (const float ndotv : { 0.f, .001f, .02f, .1f, .5f, 1.f })
+            EXPECT_LT(environmentReflectance(1.f, ndotv, .04f, 1.f), .05f);
+    }
+
+    TEST(PbrEnvironmentShader, SmoothMaterialsKeepHighlightsAndSpecularMasksKeepTheirStrength)
+    {
+        const auto polished = environmentReflectance(.18f, .02f, .04f, 1.f);
+        EXPECT_GT(polished, .25f);
+        EXPECT_LT(environmentReflectance(.8f, .02f, .04f, 1.f), polished);
+        EXPECT_FLOAT_EQ(environmentReflectance(.18f, .02f, .01f, .25f), .25f * polished);
+        EXPECT_FLOAT_EQ(environmentReflectance(.18f, .02f, 0.f, 0.f), 0.f);
+        EXPECT_GT(environmentReflectance(.18f, 1.f, .8f, 1.f), .5f);
+    }
+
+    TEST(PbrEnvironmentShader, LegacyMaterialsWithoutSpecularRemainDiffuse)
+    {
+        const float weight = PbrShader::pbrDefaultDielectricWeight(-1.f, 0.f, false);
+        EXPECT_FLOAT_EQ(environmentReflectance(1.f, 0.f, .04f * weight, weight), 0.f);
+        EXPECT_FLOAT_EQ(environmentReflectance(.18f, 0.f, .04f * weight, weight), 0.f);
+        EXPECT_FLOAT_EQ(PbrShader::pbrDefaultDielectricWeight(.18f, 0.f, false), 1.f);
+        EXPECT_FLOAT_EQ(PbrShader::pbrDefaultDielectricWeight(-1.f, .7f, false), 1.f);
+    }
+
+    TEST(PbrEnvironmentShader, TerrainCompositeKeepsWeightsOfMatteAndGlossyLayers)
+    {
+        const float defaultWeight = PbrShader::pbrDefaultDielectricWeight(-1.f, 0.f, true);
+        EXPECT_FLOAT_EQ(PbrShader::pbrTerrainDielectricWeight(defaultWeight, -1.f), 1.f);
+        EXPECT_FLOAT_EQ(PbrShader::pbrTerrainDielectricWeight(defaultWeight, 0.f), 0.f);
+        EXPECT_FLOAT_EQ(PbrShader::pbrTerrainDielectricWeight(defaultWeight, .25f), .25f);
+    }
+
+    TEST(PbrLighting, LegacyLightColorsDecodeBeforeShading)
+    {
+        const auto color = Render::linearRgbFromSrgb({ .2f, .5f, -.2f, .6f });
+        EXPECT_NEAR(color[0], .03310477f, 1e-6f);
+        EXPECT_NEAR(color[1], .21404114f, 1e-6f);
+        EXPECT_FLOAT_EQ(color[2], -color[0]);
+        EXPECT_FLOAT_EQ(color[3], .6f);
+    }
 
     TEST(SceneEnvironment, HemispherePreservesMeanAuthoredAmbientAndNormalizesTheViewAxis)
     {

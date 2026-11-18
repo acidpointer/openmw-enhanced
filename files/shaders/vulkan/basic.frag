@@ -4,13 +4,22 @@
 #include "heightfog.glsl"
 
 layout(constant_id = 0) const uint materialShader = 0u;
+#ifdef NATIVE_PBR
+const bool receivesShadows = materialShader == 11u || materialShader == 12u;
+const uint surfaceShader = materialShader == 10u || materialShader == 12u || materialShader == 13u ? 5u : 0u;
+#else
 const bool receivesShadows = materialShader == 7u || materialShader == 8u;
 const uint surfaceShader = materialShader == 7u ? 0u : materialShader == 8u ? 5u : materialShader;
+#endif
 layout(constant_id = 1) const bool writeNormals = true;
 
 layout(set = 0, binding = 0) uniform sampler2D diffuseMap;
 layout(set = 1, binding = 0) uniform sampler2D blendMap;
+#ifdef NATIVE_PBR
+#include "sceneinstance.glsl"
+#else
 layout(set = 3, binding = 0) uniform sampler2D opaqueWaterDepth;
+#endif
 layout(push_constant) uniform SceneState
 {
     vec4 color;
@@ -37,6 +46,9 @@ layout(location = 12) in vec3 viewNormal;
 layout(location = 13) in float clipDistance;
 layout(location = 14) in vec3 sunDiffuseColor;
 layout(location = 15) in vec3 sunSpecularColor;
+#ifdef NATIVE_PBR
+layout(location = 16) flat in uint pbrInstance;
+#endif
 layout(location = 0) out vec4 outColor;
 layout(location = 1) out vec4 outNormals;
 
@@ -135,8 +147,43 @@ float sunVisibility()
     return mix(result, 1.0, fade);
 }
 
+#ifdef NATIVE_PBR
+#include "pbr.glsl"
+#endif
+
 void main()
 {
+#ifdef NATIVE_PBR
+    if (materialShader == 13u)
+    {
+        outColor = bakePbrTerrain();
+        return;
+    }
+    // Gradients must be evaluated before clip/alpha rejection. The geometric
+    // frame and all maps share this derivative footprint.
+    mat2 primary = mat2(0.0), secondary = mat2(0.0);
+    vec3 dx = vec3(0.0), dy = vec3(0.0);
+    uint flags = uint(alphaPolicy.z);
+    if ((flags & 480u) != 0u)
+    {
+        primary = mat2(dFdx(uv), dFdy(uv));
+    }
+    if ((flags >> 19u) != 0u)
+        secondary = mat2(dFdx(maskUV), dFdy(maskUV));
+    if ((flags & 32u) != 0u)
+    {
+        dx = dFdx(viewPosition);
+        dy = dFdy(viewPosition);
+    }
+    vec4 sampled = texture(diffuseMap, uv);
+    float maskAlpha = materialKind > 0.5 && materialKind < 1.5 ? texture(blendMap, maskUV).a : sampled.a;
+    if (surfaceShader != 5u && clipDistance < 0.0)
+        discard;
+    vec4 result = sampled * color;
+    result.a = color.a * maskAlpha;
+    vec3 surfaceNormal = pbrUnit(viewNormal);
+    surfaceNormal = gl_FrontFacing ? surfaceNormal : -surfaceNormal;
+#else
     bool reversedDepth = (uint(alphaPolicy.z) & 8u) != 0u;
     // Solid surfaces have no alpha test or clipping. Specializing away every
     // discard lets the driver reject hidden fragments before running this
@@ -247,6 +294,7 @@ void main()
     }
     if (surfaceShader != 4u)
         result.rgb += specularColor;
+#endif
     bool accepted = true;
     switch (surfaceShader == 4u || surfaceShader == 5u ? 0 : int(alphaPolicy.y))
     {
@@ -274,6 +322,9 @@ void main()
     }
     if (!accepted)
         discard;
+#ifdef NATIVE_PBR
+    result.rgb = shadePbr(sampled, surfaceNormal, primary, secondary, dx, dy);
+#else
     if (surfaceShader == 6u)
     {
         if ((uint(alphaPolicy.z) & 16u) != 0u && result.a <= .5)
@@ -283,6 +334,7 @@ void main()
     }
     if (receivesShadows && shadows.flags.x > 0u)
         result.rgb = max(result.rgb - (sampled.rgb * sunDiffuseColor + sunSpecularColor) * (1.0 - sunVisibility()), vec3(0.0));
+#endif
     if (surfaceShader != 4u && fog.range.y > fog.range.x && fog.range.y > 0.0)
     {
         float depth = 1.0 / gl_FragCoord.w;

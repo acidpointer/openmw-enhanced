@@ -1,10 +1,16 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // Surface, water, sky, distortion, overlay, solid surface. Fixed when creating a pipeline,
 // allowing the driver to eliminate unrelated work and varyings.
 layout(constant_id = 0) const uint materialShader = 0u;
+#ifdef NATIVE_PBR
+const bool receivesShadows = materialShader == 11u || materialShader == 12u;
+const uint surfaceShader = materialShader == 10u || materialShader == 12u || materialShader == 13u ? 5u : 0u;
+#else
 const bool receivesShadows = materialShader == 7u || materialShader == 8u;
 const uint surfaceShader = materialShader == 7u ? 0u : materialShader == 8u ? 5u : materialShader;
+#endif
 layout(constant_id = 1) const bool writeNormals = true;
 layout(constant_id = 2) const bool hardwareDepthClamp = true;
 
@@ -24,44 +30,10 @@ layout(location = 3) in float inAlpha;
 layout(location = 4) in vec2 inMaskUV;
 layout(location = 5) in vec3 inNormal;
 
-struct InstanceData
-{
-    mat4 clipFromModel;
-    vec4 tint;
-    vec4 parameters;
-    vec4 uvRow0;
-    vec4 uvRow1;
-    vec4 maskRow0;
-    vec4 maskRow1;
-    mat4 viewFromModel;
-    mat4 normalFromModel;
-    vec4 diffuse;
-    vec4 ambient;
-    vec4 emission;
-    vec4 specular;
-    vec4 sunPosition;
-    vec4 sunAmbient;
-    vec4 sunDiffuse;
-    vec4 sunSpecular;
-    uvec4 lighting;
-    vec4 clipPlane;
-};
-struct PointLight
-{
-    vec4 position;
-    vec4 ambient;
-    vec4 diffuse;
-    vec4 specular;
-    vec4 attenuation;
-};
-layout(std430, set = 2, binding = 0) readonly buffer InstanceBuffer
-{
-    InstanceData instances[];
-};
-layout(std430, set = 2, binding = 1) readonly buffer LightBuffer
-{
-    PointLight lights[];
-};
+#include "sceneinstance.glsl"
+#ifdef NATIVE_PBR
+#include "srgb.glsl"
+#endif
 
 layout(std140, set = 2, binding = 2) uniform ShadowState
 {
@@ -87,6 +59,9 @@ layout(location = 12) out vec3 viewNormal;
 layout(location = 13) out float clipDistance;
 layout(location = 14) out vec3 sunDiffuseColor;
 layout(location = 15) out vec3 sunSpecularColor;
+#ifdef NATIVE_PBR
+layout(location = 16) flat out uint pbrInstance;
+#endif
 
 vec3 safeNormal(vec3 value)
 {
@@ -119,9 +94,14 @@ void main()
 
     vec4 vertexColor = vec4(inColor.rgb, inAlpha < 0.0 ? inColor.a : inAlpha);
     uint mode = data.lighting.w;
-    vec4 diffuse = (mode == 2u || mode == 4u) ? vertexColor : data.diffuse;
-    vec3 ambient = (mode == 2u || mode == 3u) ? vertexColor.rgb : data.ambient.rgb;
-    vec3 emission = (mode == 1u ? vertexColor.rgb : data.emission.rgb) * data.emission.a;
+    vec4 lightingColor = vertexColor;
+#ifdef NATIVE_PBR
+    if (mode >= 1u && mode <= 4u)
+        lightingColor.rgb = decodeSrgb(lightingColor.rgb);
+#endif
+    vec4 diffuse = (mode == 2u || mode == 4u) ? lightingColor : data.diffuse;
+    vec3 ambient = (mode == 2u || mode == 3u) ? lightingColor.rgb : data.ambient.rgb;
+    vec3 emission = (mode == 1u ? lightingColor.rgb : data.emission.rgb) * data.emission.a;
     vec3 specular = (mode == 5u ? vertexColor.rgb : data.specular.rgb) * data.ambient.a;
     skyDiffuse = data.diffuse;
     skyMoon = data.emission;
@@ -168,6 +148,12 @@ void main()
         screenPosition = shadows.flags.x > 3u ? shadows.matrices[3] * receiver : vec4(0.0);
     }
     clipDistance = clipping ? dot(vec4(viewPosition, 1.0), data.clipPlane) : 1.0;
+#ifdef NATIVE_PBR
+    pbrInstance = uint(gl_InstanceIndex);
+    sunDiffuseColor = ambient;
+    sunSpecularColor = emission;
+    specularColor = specular;
+#else
     if (surfaceShader == 1u || surfaceShader == 2u || (data.lighting.z & 1u) == 0u)
         return;
 
@@ -222,4 +208,5 @@ void main()
     }
     color.rgb = max(lit, vec3(0.0)) * data.tint.rgb;
     specularColor = max(highlights, vec3(0.0)) * data.tint.rgb;
+#endif
 }

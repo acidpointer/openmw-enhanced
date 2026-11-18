@@ -94,7 +94,7 @@ or filtering combination. A full mip chain also serves base-level-only sampler
 views. Source revisions invalidate the image registry, while already recorded
 views retain the old allocation through their GPU frame. Pending uploads remain
 valid when a source handle is released while sampler views survive. The private
-backend ABI is 20; engine and renderer module must be rebuilt together.
+backend ABI is 21. Rebuild the engine and renderer module together.
 
 The latest playtest log captured warm frames with 12.5, 17.4 and 17.9 ms in
 texture creation/staging, plus a 91.4 ms CPU effects-preparation spike. A cold
@@ -146,6 +146,39 @@ assembly, materials and transforms (nested timings, not additive phases),
 alongside the existing per-texture upload dimensions/bytes/maximum duration.
 These changes have static validation only; the remaining CPU/GPU costs and actual
 frame-time improvement must be measured in a rebuilt playtest.
+
+Vulkan uses PBR by default for lit objects and terrain with material maps or
+authored PBR properties. Sunlight and local lights use the same GGX response.
+Legacy materials with only albedo use the existing vertex-lit pipeline.
+PBR decodes authored material and light colors to linear RGB before shading.
+The object light list, falloff and signed contributions carry over from the
+native scene bridge. Environment shading uses analytical roughness filtering of
+the weather hemisphere outdoors and cell ambient inside. Output follows the
+existing scene color interface to reflections and OMWFX.
+
+Environment reflections use an analytic fit to the integrated GGX response.
+This preserves diffuse color on rough surfaces at grazing angles and retains
+stronger reflection on smooth materials. Legacy specular weights apply to both
+Fresnel endpoints. The integration reuses the existing pass and texture
+bindings. The regression fixture includes the production scalar GLSL and
+covers rough stone, smooth surfaces, and zero or partial masks.
+
+Optional normal, legacy specular, packed material and emissive textures use
+cached descriptor combinations. Base textures and handles use the existing
+residency manager. Map UVs can follow the base transform or share the spare
+UV0 stream when a blend mask is absent. Materials requiring more UV streams
+or transforms use the available maps and scalar shading. Distant terrain
+bakes data for chunks that need it. Its two optional half-size composites use
+the same layer weights as the color bake and are mipmapped on first sampling.
+The frame retains the descriptors and source images until GPU completion.
+Material bakes appear separately in GPU timings.
+
+Compare PBR on and off for sunlit and torchlit surfaces, skinned actors,
+cutout foliage, first-person equipment, terrain LOD transitions, water
+reflections, and OMWFX. Measure the same dense Balmora, indoor and long view
+routes with the same effects and resolution. The target is up to 0.24 ms
+added frame time at 65 FPS. Static validation covers shader interfaces and C++
+syntax. The package, visual quality, and frame time require a playtest.
 
 Outdoor hemisphere ambient lighting and analytical height fog share a 48-byte
 environment block pushed once per world view. Together with the existing 32-byte

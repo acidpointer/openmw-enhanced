@@ -410,7 +410,15 @@ bool OMW::Engine::frame(unsigned frameNumber, float frametime)
 
     {
         Debug::Trace::Scope trace("Rendering traversal and synchronization", frameNumber);
-        mFrameDriver->renderFrame();
+        try
+        {
+            mFrameDriver->renderFrame();
+        }
+        catch (const std::exception& error)
+        {
+            Log(Debug::Error) << "Rendering traversal failed: " << error.what();
+            throw;
+        }
     }
 
     {
@@ -463,6 +471,11 @@ OMW::Engine::Engine(Files::ConfigurationManager& configurationManager)
 
 OMW::Engine::~Engine()
 {
+    // An exception from rendering can leave a Lua update in flight. Its
+    // callbacks access game services until the worker has finished.
+    if (mLuaWorker)
+        mLuaWorker->join();
+
     // Cull/draw callbacks retain world resources. Join graphics threads before
     // destroying the world, occlusion workers, and resource managers below.
     if (mFrameDriver)
@@ -634,6 +647,7 @@ void OMW::Engine::createWindow()
         options.mWindow = mWindow;
         options.mShaderPath = mResDir / "shaders" / "vulkan";
         options.mPipelineCachePath = mCfgMgr.getCachePath() / "vulkan-pipelines.bin";
+        options.mPbr = Settings::shaders().mNativePbr;
         if (const char* selectedGpu = std::getenv("OPENMW_RENDER_GPU"))
             options.mDevicePciAddress = selectedGpu;
         options.mPresentMode = vsync == SDLUtil::VSyncMode::Disabled ? Render::PresentMode::Immediate
@@ -649,6 +663,7 @@ void OMW::Engine::createWindow()
             throw std::runtime_error("Native renderer reported no scene texture units");
         Log(Debug::Info) << "Vulkan scene texture units: " << mMaxTextureImageUnits
                          << " (hardware descriptor limit: " << descriptorLimit << ")";
+        Log(Debug::Info) << "Vulkan native PBR: " << (options.mPbr ? "enabled" : "disabled");
         Log(Debug::Info) << "Vulkan startup: native window and device capabilities; no OpenGL context";
         return;
     }

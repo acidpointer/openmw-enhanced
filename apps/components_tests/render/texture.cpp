@@ -7,6 +7,26 @@
 
 namespace
 {
+    TEST(RenderTexture, DeferredUploadPublishesOnlyAfterEveryMipWasCopied)
+    {
+        std::array<std::byte, 4> base{ std::byte{ 1 }, std::byte{ 2 }, std::byte{ 3 }, std::byte{ 4 } };
+        std::array<std::byte, 1> mip{ std::byte{ 5 } };
+        const std::array<Render::TextureLevel, 2> levels{ { { 2, 2, base }, { 1, 1, mip } } };
+        std::array<std::byte, 5> result{};
+        const auto write = [&](std::size_t index, std::size_t offset, std::span<const std::byte> bytes) {
+            std::copy(bytes.begin(), bytes.end(), result.begin() + (index ? base.size() : 0) + offset);
+        };
+        Render::TextureStagingProgress progress;
+        std::size_t budget = 3;
+        EXPECT_FALSE(progress.copy(levels, budget, write));
+        EXPECT_EQ(budget, 0u);
+        EXPECT_EQ(result[3], std::byte{});
+        budget = 3;
+        EXPECT_TRUE(progress.copy(levels, budget, write));
+        EXPECT_EQ(budget, 1u);
+        EXPECT_EQ(result, (std::array<std::byte, 5>{ base[0], base[1], base[2], base[3], mip[0] }));
+    }
+
     static_assert(Render::textureLevelSize(Render::TextureFormat::BC7RGBA, 5, 3) == 32);
     static_assert(Render::textureLevelSize(Render::TextureFormat::BC6Signed, 1, 1) == 16);
     static_assert(Render::compressedTexture(Render::TextureFormat::BC6Unsigned));

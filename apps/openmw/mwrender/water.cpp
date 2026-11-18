@@ -37,6 +37,7 @@
 #include <components/fallback/fallback.hpp>
 
 #include <components/settings/values.hpp>
+#include <components/terrain/heightcull.hpp>
 
 #include "../mwworld/cellstore.hpp"
 
@@ -301,7 +302,14 @@ namespace MWRender
                 mNodeMask = calcNodeMask() & ~sToggleWorldMask;
         }
 
+        void setWaterVisibility(Terrain::HeightCullCallback* visibility) { mVisibility = visibility; }
+
     private:
+        bool needsRender(osgUtil::CullVisitor& view) const override
+        {
+            return !mVisibility || mVisibility->isVisible(view);
+        }
+
         unsigned int calcNodeMask()
         {
             int reflectionDetail = Settings::water().mReflectionDetail;
@@ -321,6 +329,7 @@ namespace MWRender
         }
 
         osg::ref_ptr<ClipCullNode> mClipCullNode;
+        osg::ref_ptr<Terrain::HeightCullCallback> mVisibility;
         osg::ref_ptr<osg::Node> mScene;
         osg::Node::NodeMask mNodeMask;
         osg::Matrix mViewMatrix{ osg::Matrix::identity() };
@@ -394,23 +403,17 @@ namespace MWRender
             ico->add(mWaterNode);
     }
 
-    void Water::setCullCallback(osg::Callback* callback)
+    void Water::setCullCallback(Terrain::HeightCullCallback* callback)
     {
         if (mCullCallback)
-        {
-            mWaterNode->removeCullCallback(mCullCallback);
-            if (mReflection)
-                mReflection->removeCullCallback(mCullCallback);
-        }
+            mWaterNode->removeCullCallback(mCullCallback.get());
 
         mCullCallback = callback;
 
         if (callback)
-        {
             mWaterNode->addCullCallback(callback);
-            if (mReflection)
-                mReflection->addCullCallback(callback);
-        }
+        if (mReflection)
+            mReflection->setWaterVisibility(callback);
     }
 
     void Water::updateWaterMaterial()
@@ -443,8 +446,7 @@ namespace MWRender
             mReflection = new Reflection(rttSize, mInterior);
             mReflection->setWaterLevel(mTop);
             mReflection->setScene(mSceneRoot);
-            if (mCullCallback)
-                mReflection->addCullCallback(mCullCallback);
+            mReflection->setWaterVisibility(mCullCallback.get());
             mParent->addChild(mReflection);
 
             mRipples = new Ripples(mResourceSystem);

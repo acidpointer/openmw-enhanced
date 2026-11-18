@@ -3,6 +3,7 @@
 add_library(openmw-render-core STATIC
     scene.cpp scene.hpp
     texture.cpp texture.hpp
+    colorspace.hpp
     backend.hpp environment.hpp presentation.hpp resourcepool.hpp allocationranges.hpp math.hpp raster.hpp reserve.hpp uploadpages.hpp cachesweep.hpp residency.hpp pipelinecache.hpp
     ../renderassets/model.hpp
 )

@@ -6,7 +6,9 @@
 
 #include <components/render/bufferarena.hpp>
 #include <components/render/bufferversions.hpp>
+#include <components/render/cachesweep.hpp>
 #include <components/render/capture.hpp>
+#include <components/render/colorspace.hpp>
 #include <components/render/framecache.hpp>
 #include <components/render/memorypolicy.hpp>
 #include <components/render/meshindices.hpp>
@@ -377,8 +379,19 @@ namespace MWRender::Vulkan
             Shadow,
             SurfaceShadowed,
             SolidSurfaceShadowed,
+            PbrSurface,
+            PbrSolidSurface,
+            PbrSurfaceShadowed,
+            PbrSolidSurfaceShadowed,
+            PbrBake,
             Count
         };
+        constexpr bool isPbr(MaterialShader shader)
+        {
+            return shader >= MaterialShader::PbrSurface;
+        }
+        static_assert(static_cast<unsigned>(MaterialShader::PbrSurface) == 9
+            && static_cast<unsigned>(MaterialShader::PbrBake) == 13);
         constexpr std::size_t PipelinesPerTarget = RasterKeys * static_cast<std::size_t>(MaterialShader::Count);
 
         struct PreparedDraw
@@ -395,6 +408,38 @@ namespace MWRender::Vulkan
             VkDescriptorSet mDataDescriptor = VK_NULL_HANDLE;
             bool mReversedDepth = false;
             std::array<float, 2> mDepthBias{};
+            VkDescriptorSet mPbrDescriptor = VK_NULL_HANDLE;
+            std::uint32_t mPbrFlags = 0;
+            std::array<Image*, 2> mPbrTargets{};
+        };
+
+        struct PbrDescriptor
+        {
+            std::shared_ptr<DescriptorPage> mPage;
+            VkDescriptorSet mSet = VK_NULL_HANDLE;
+            std::uint64_t mSubmission = 0;
+            std::array<Image*, 2> mTargets{};
+            std::uint32_t mMapFlags = 0;
+            ~PbrDescriptor()
+            {
+                if (mSet)
+                {
+                    if (!mPage->mShuttingDown)
+                        vkFreeDescriptorSets(mPage->mDevice, mPage->mPool, 1, &mSet);
+                    --mPage->mLive;
+                }
+            }
+        };
+        using PbrDescriptorKey = std::array<std::uint64_t, 4>;
+        struct PbrDescriptorHash
+        {
+            std::size_t operator()(const PbrDescriptorKey& key) const
+            {
+                std::uint64_t hash = 0;
+                for (auto handle : key)
+                    hash = std::rotl(hash, 17) ^ handle;
+                return static_cast<std::size_t>(hash ^ (hash >> 32));
+            }
         };
 
         struct PreparedPass
@@ -540,6 +585,9 @@ namespace MWRender::Vulkan
             bool supportsTexture(const Render::TextureData& data, const Render::SamplerState& state) const override;
             Render::TextureHandle createTexture(
                 const Render::TextureData& data, const Render::SamplerState& sampler = {}) override;
+            Render::TextureHandle createDeferredTexture(
+                const Render::TextureData& data, const Render::SamplerState& sampler) override;
+            bool stageTexture(Render::TextureHandle texture, const Render::TextureData& data, std::size_t& bytes) override;
             Render::TextureHandle createRenderTarget(std::uint32_t width, std::uint32_t height,
                 const Render::SamplerState& sampler, Render::TargetFormat format, bool mipmaps) override;
             Render::TextureHandle createVolume(std::uint32_t width, std::uint32_t height, std::uint32_t depth,
@@ -609,6 +657,11 @@ namespace MWRender::Vulkan
             Staging stage(std::span<const std::byte> bytes);
             std::shared_ptr<GeometryBuffer> allocateGeometry(VkDeviceSize size, VkDeviceSize alignment);
             void allocateDescriptor(Image& image);
+            Render::TextureHandle createTexture(const Render::TextureData&, const Render::SamplerState&, bool deferred);
+            std::pair<std::shared_ptr<DescriptorPage>, VkDescriptorSet> allocateMaterialSet(
+                VkDescriptorSetLayout layout, std::uint32_t bindings,
+                std::vector<std::shared_ptr<DescriptorPage>>& pages);
+            const PbrDescriptor& pbrDescriptor(Frame& frame, const Render::Draw& draw);
             VkSampler sampler(Render::SamplerState state);
 
             Render::BackendOptions mOptions;
@@ -635,6 +688,8 @@ namespace MWRender::Vulkan
             std::unique_ptr<MemoryAllocator> mAllocator;
             VkDescriptorSetLayout mDescriptorLayout = VK_NULL_HANDLE;
             VkPipelineLayout mPipelineLayout = VK_NULL_HANDLE;
+            VkPipelineLayout mPbrPipelineLayout = VK_NULL_HANDLE;
+            VkDescriptorSetLayout mPbrLayout = VK_NULL_HANDLE;
             VkDescriptorSetLayout mDataLayout = VK_NULL_HANDLE;
             VkDescriptorPool mDataPool = VK_NULL_HANDLE;
             std::vector<Render::PointLight> mLightData;
@@ -642,6 +697,7 @@ namespace MWRender::Vulkan
             {
                 const Render::LightSet* mSet = nullptr;
                 std::uint32_t mOffset = 0;
+                bool mLinear = false;
             };
             std::vector<LightOffset> mLightOffsets;
             std::vector<std::uint32_t> mDrawLightOffsets;
@@ -652,8 +708,13 @@ namespace MWRender::Vulkan
             unsigned mTimestampBits = 0;
             std::vector<Render::GpuTiming> mGpuTimings;
             std::array<VkShaderModule, 2> mShaderModules{};
+            std::array<VkShaderModule, 2> mPbrShaderModules{};
             std::vector<std::unique_ptr<Sampler>> mSamplers;
             std::vector<std::shared_ptr<DescriptorPage>> mDescriptorPools;
+            std::vector<std::shared_ptr<DescriptorPage>> mPbrPools;
+            std::map<PbrDescriptorKey, std::shared_ptr<PbrDescriptor>> mPbrDescriptors;
+            Render::CacheSweep<decltype(mPbrDescriptors)> mPbrDescriptorSweep;
+            Render::FrameCache<PbrDescriptorKey, const PbrDescriptor*, PbrDescriptorHash> mFramePbrDescriptors;
             std::array<Frame, FramesInFlight> mFrames;
             std::size_t mFrameIndex = 0;
             std::uint64_t mSubmission = 0;
@@ -688,6 +749,13 @@ namespace MWRender::Vulkan
             Render::MeshHandle mFullscreenMesh;
             Render::ResourcePool<Effect, Render::EffectTag> mEffects;
             std::vector<Upload> mPendingUploads;
+            struct DeferredTexture
+            {
+                Render::TextureHandle mHandle;
+                Upload mUpload;
+                Render::TextureStagingProgress mProgress;
+            };
+            std::optional<DeferredTexture> mDeferredTexture;
             Render::UploadPages<Buffer> mStagingPages{ MemoryAllocator::blockSize(MemoryKind::Upload) };
             Render::BufferArena<Buffer> mGeometryPages{ MemoryAllocator::blockSize(MemoryKind::Geometry) };
             std::vector<PreparedDraw> mPrepared;
@@ -738,6 +806,8 @@ namespace MWRender::Vulkan
                 mGeometryPages.beginShutdown();
                 for (const auto& page : mDescriptorPools)
                     page->mShuttingDown = true;
+                for (const auto& page : mPbrPools)
+                    page->mShuttingDown = true;
                 for (auto& frame : mFrames)
                 {
                     frame.mResources.clear();
@@ -759,6 +829,7 @@ namespace MWRender::Vulkan
                     vkDestroyCommandPool(mDevice, frame.mPool, nullptr);
                 }
                 mPendingUploads.clear();
+                mDeferredTexture.reset();
                 mStagingPages.clear();
                 mPreparedPasses.clear();
                 mReadback.reset();
@@ -780,11 +851,17 @@ namespace MWRender::Vulkan
                     vkDestroyRenderPass(mDevice, passes.mDiscardDepthLoad, nullptr);
                 }
                 mDescriptorPools.clear();
+                mPbrDescriptors.clear();
+                mPbrPools.clear();
                 mSamplers.clear();
                 for (const auto shader : mShaderModules)
                     vkDestroyShaderModule(mDevice, shader, nullptr);
+                for (const auto shader : mPbrShaderModules)
+                    vkDestroyShaderModule(mDevice, shader, nullptr);
                 vkDestroyPipelineCache(mDevice, mPipelineCache, nullptr);
                 vkDestroyPipelineLayout(mDevice, mPipelineLayout, nullptr);
+                vkDestroyPipelineLayout(mDevice, mPbrPipelineLayout, nullptr);
+                vkDestroyDescriptorSetLayout(mDevice, mPbrLayout, nullptr);
                 vkDestroyDescriptorSetLayout(mDevice, mDescriptorLayout, nullptr);
                 vkDestroyDescriptorPool(mDevice, mDataPool, nullptr);
                 vkDestroyDescriptorSetLayout(mDevice, mDataLayout, nullptr);
@@ -829,7 +906,10 @@ namespace MWRender::Vulkan
             // Attachment formats are known at startup. First-use compilation
             // during an effect change would stall the preparation phase.
             for (std::size_t slot = 0; slot < TargetFormats; ++slot)
-                if (mTargetPasses[slot].mClear && Render::targetHasDepth(static_cast<Render::TargetFormat>(slot)))
+                if (mTargetPasses[slot].mClear
+                    && (Render::targetHasDepth(static_cast<Render::TargetFormat>(slot))
+                        || (mOptions.mPbr
+                            && static_cast<Render::TargetFormat>(slot) == Render::TargetFormat::ColorRGBA8)))
                     warmPipelines(slot + 1);
             createFrames();
             const std::array<std::byte, 4> white{ std::byte{ 255 }, std::byte{ 255 }, std::byte{ 255 },
@@ -1131,9 +1211,9 @@ namespace MWRender::Vulkan
                     : i == 2                           ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
                                                        : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                 dataBindings[i].descriptorCount = 1;
-                dataBindings[i].stageFlags = i < 2 ? VK_SHADER_STAGE_VERTEX_BIT
-                    : i == 2                       ? VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
-                                                   : VK_SHADER_STAGE_FRAGMENT_BIT;
+                dataBindings[i].stageFlags = i < 2 && !mOptions.mPbr ? VK_SHADER_STAGE_VERTEX_BIT
+                    : i <= 2 ? VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
+                             : VK_SHADER_STAGE_FRAGMENT_BIT;
             }
             descriptor.bindingCount = dataBindings.size();
             descriptor.pBindings = dataBindings.data();
@@ -1146,7 +1226,7 @@ namespace MWRender::Vulkan
             pool.poolSizeCount = dataSizes.size();
             pool.pPoolSizes = dataSizes.data();
             check(vkCreateDescriptorPool(mDevice, &pool, nullptr, &mDataPool), "Create frame data descriptor pool");
-            const std::array materialLayouts{ mDescriptorLayout, mDescriptorLayout, mDataLayout, mDescriptorLayout };
+            std::array materialLayouts{ mDescriptorLayout, mDescriptorLayout, mDataLayout, mDescriptorLayout };
             layout.setLayoutCount = materialLayouts.size();
             layout.pSetLayouts = materialLayouts.data();
             const VkPushConstantRange sceneConstants{ VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -1155,6 +1235,22 @@ namespace MWRender::Vulkan
             layout.pushConstantRangeCount = 1;
             layout.pPushConstantRanges = &sceneConstants;
             check(vkCreatePipelineLayout(mDevice, &layout, nullptr, &mPipelineLayout), "Create Vulkan pipeline layout");
+            if (mOptions.mPbr)
+            {
+                std::array<VkDescriptorSetLayoutBinding, 4> maps{};
+                for (std::uint32_t i = 0; i < maps.size(); ++i)
+                {
+                    maps[i] = binding;
+                    maps[i].binding = i;
+                }
+                descriptor.bindingCount = maps.size();
+                descriptor.pBindings = maps.data();
+                check(vkCreateDescriptorSetLayout(mDevice, &descriptor, nullptr, &mPbrLayout),
+                    "Create Vulkan PBR texture layout");
+                materialLayouts[3] = mPbrLayout;
+                check(vkCreatePipelineLayout(mDevice, &layout, nullptr, &mPbrPipelineLayout),
+                    "Create Vulkan PBR pipeline layout");
+            }
             loadPipelineCache();
             // Cache seeding and worker initialization belong to startup, not
             // the first in-game effect whose shader compilation completes.
@@ -1505,15 +1601,16 @@ namespace MWRender::Vulkan
             }
         }
 
-        void VulkanBackend::allocateDescriptor(Image& image)
+        std::pair<std::shared_ptr<DescriptorPage>, VkDescriptorSet> VulkanBackend::allocateMaterialSet(
+            VkDescriptorSetLayout layout, std::uint32_t bindings, std::vector<std::shared_ptr<DescriptorPage>>& pages)
         {
             auto info = vkInfo<VkDescriptorSetAllocateInfo>(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO);
             info.descriptorSetCount = 1;
-            info.pSetLayouts = &mDescriptorLayout;
+            info.pSetLayouts = &layout;
             VkResult result = VK_ERROR_OUT_OF_POOL_MEMORY;
             VkDescriptorSet descriptor = VK_NULL_HANDLE;
             std::shared_ptr<DescriptorPage> selected;
-            for (const auto& page : mDescriptorPools)
+            for (const auto& page : pages)
             {
                 if (page->mLive >= 1024)
                     continue;
@@ -1529,10 +1626,10 @@ namespace MWRender::Vulkan
             }
             if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL)
             {
-                VkDescriptorPoolSize size{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024 };
+                VkDescriptorPoolSize size{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024 * bindings };
                 auto pool = vkInfo<VkDescriptorPoolCreateInfo>(VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO);
                 pool.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-                pool.maxSets = size.descriptorCount;
+                pool.maxSets = 1024;
                 pool.poolSizeCount = 1;
                 pool.pPoolSizes = &size;
                 selected = std::make_shared<DescriptorPage>(mDevice);
@@ -1540,14 +1637,20 @@ namespace MWRender::Vulkan
                     "Create material descriptor pool");
                 // Register the page before allocating a set so exceptions do
                 // not strand an allocated set outside its page owner.
-                mDescriptorPools.push_back(selected);
+                pages.push_back(selected);
                 info.descriptorPool = selected->mPool;
                 result = vkAllocateDescriptorSets(mDevice, &info, &descriptor);
             }
             check(result, "Allocate texture descriptor");
-            image.mPool = std::move(selected);
+            ++selected->mLive;
+            return { std::move(selected), descriptor };
+        }
+
+        void VulkanBackend::allocateDescriptor(Image& image)
+        {
+            auto [page, descriptor] = allocateMaterialSet(mDescriptorLayout, 1, mDescriptorPools);
+            image.mPool = std::move(page);
             image.mDescriptor = descriptor;
-            ++image.mPool->mLive;
             VkDescriptorImageInfo binding{ image.mSampler, image.mView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
             auto write = vkInfo<VkWriteDescriptorSet>(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
             write.dstSet = image.mDescriptor;
@@ -1556,6 +1659,69 @@ namespace MWRender::Vulkan
             write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             write.pImageInfo = &binding;
             vkUpdateDescriptorSets(mDevice, 1, &write, 0, nullptr);
+        }
+
+        const PbrDescriptor& VulkanBackend::pbrDescriptor(Frame& frame, const Render::Draw& draw)
+        {
+            PbrDescriptorKey key{};
+            for (std::size_t i = 0; i < key.size(); ++i)
+                if (const auto handle = draw.mPbrMaps[i])
+                    key[i] = (std::uint64_t{ handle.mGeneration } << 32) | handle.mIndex;
+            auto [prepared, inserted] = mFramePbrDescriptors.getOrCreate(key);
+            if (!inserted)
+                return *prepared;
+            auto& entry = mPbrDescriptors[key];
+            std::array<VkDescriptorImageInfo, 4> images{};
+            std::array<Image*, 2> targets{};
+            std::uint32_t flags = 0;
+            for (std::size_t i = 0; i < images.size(); ++i)
+            {
+                const auto& image = mTextures.get(draw.mPbrMaps[i] ? draw.mPbrMaps[i] : mWhiteTexture,
+                    "Invalid or expired Vulkan PBR texture handle");
+                if (image->mAspect != VK_IMAGE_ASPECT_COLOR_BIT || (image->mTarget && i != 0 && i != 2))
+                    throw std::invalid_argument("Invalid PBR color texture binding");
+                if (image->mTarget)
+                    targets[i / 2] = image.get();
+                if (key[i])
+                {
+                    flags |= 32u << i;
+                    if (image->mSrgb)
+                        flags |= i == 3 ? 8192u : 32768u << i;
+                }
+                if (!entry)
+                    images[i] = { image->mSampler, image->mView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                if (image->mLastSubmission != mSubmission)
+                {
+                    frame.mResources.push_back(image);
+                    image->mLastSubmission = mSubmission;
+                }
+            }
+            if (!entry)
+            {
+                auto descriptor = std::make_shared<PbrDescriptor>();
+                auto [page, set] = allocateMaterialSet(mPbrLayout, images.size(), mPbrPools);
+                descriptor->mPage = std::move(page);
+                descriptor->mSet = set;
+                std::array<VkWriteDescriptorSet, 4> writes{};
+                for (std::uint32_t i = 0; i < writes.size(); ++i)
+                {
+                    auto& write = writes[i];
+                    write = vkInfo<VkWriteDescriptorSet>(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
+                    write.dstSet = set;
+                    write.dstBinding = i;
+                    write.descriptorCount = 1;
+                    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    write.pImageInfo = &images[i];
+                }
+                vkUpdateDescriptorSets(mDevice, writes.size(), writes.data(), 0, nullptr);
+                entry = std::move(descriptor);
+            }
+            frame.mResources.push_back(entry);
+            entry->mSubmission = mSubmission;
+            entry->mMapFlags = flags;
+            entry->mTargets = targets;
+            prepared = entry.get();
+            return *prepared;
         }
 
         bool VulkanBackend::supportsTextureFormat(Render::TextureFormat format, bool srgb) const
@@ -1596,6 +1762,20 @@ namespace MWRender::Vulkan
         Render::TextureHandle VulkanBackend::createTexture(
             const Render::TextureData& data, const Render::SamplerState& state)
         {
+            return createTexture(data, state, false);
+        }
+
+        Render::TextureHandle VulkanBackend::createDeferredTexture(
+            const Render::TextureData& data, const Render::SamplerState& state)
+        {
+            if (mDeferredTexture)
+                throw std::logic_error("A Vulkan texture upload is already being staged");
+            return createTexture(data, state, true);
+        }
+
+        Render::TextureHandle VulkanBackend::createTexture(
+            const Render::TextureData& data, const Render::SamplerState& state, bool deferred)
+        {
             Render::validateTexture(data);
             const auto width = data.mLevels.front().mWidth;
             const auto height = data.mLevels.front().mHeight;
@@ -1632,8 +1812,9 @@ namespace MWRender::Vulkan
             {
                 offset = Render::textureUploadOffset(offset, data.mFormat);
                 const auto& level = data.mLevels[i];
-                std::memcpy(upload.mStaging.mPage->mMemory.mapped() + upload.mStaging.mOffset + offset,
-                    level.mBytes.data(), level.mBytes.size());
+                if (!deferred)
+                    std::memcpy(upload.mStaging.mPage->mMemory.mapped() + upload.mStaging.mOffset + offset,
+                        level.mBytes.data(), level.mBytes.size());
                 VkBufferImageCopy copy{};
                 copy.bufferOffset = upload.mStaging.mOffset + offset;
                 copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, static_cast<std::uint32_t>(i), 0, 1 };
@@ -1641,11 +1822,46 @@ namespace MWRender::Vulkan
                 upload.mImageCopies.push_back(copy);
                 offset += level.mBytes.size();
             }
-            Render::reserveFor(mPendingUploads, mPendingUploads.size() + 1);
+            if (!deferred)
+                Render::reserveFor(mPendingUploads, mPendingUploads.size() + 1);
             const auto handle = mTextures.insert(image);
-            image->mUpload = mPendingUploads.size();
-            mPendingUploads.push_back(std::move(upload));
+            if (deferred)
+                mDeferredTexture.emplace(DeferredTexture{ handle, std::move(upload), {} });
+            else
+            {
+                image->mUpload = mPendingUploads.size();
+                mPendingUploads.push_back(std::move(upload));
+            }
             return handle;
+        }
+
+        bool VulkanBackend::stageTexture(
+            Render::TextureHandle texture, const Render::TextureData& data, std::size_t& bytes)
+        {
+            if (!mDeferredTexture || mDeferredTexture->mHandle != texture)
+                throw std::invalid_argument("Vulkan texture does not have a deferred upload");
+            auto& pending = *mDeferredTexture;
+            const auto& copies = pending.mUpload.mImageCopies;
+            const auto& image = *pending.mUpload.mImage;
+            if (data.mFormat != image.mTextureFormat || data.mSrgb != image.mSrgb || data.mLevels.size() != copies.size())
+                throw std::invalid_argument("Vulkan texture upload source changed");
+            auto* mapped = pending.mUpload.mStaging.mPage->mMemory.mapped();
+            const bool complete = pending.mProgress.copy(data.mLevels, bytes,
+                [&](std::size_t index, std::size_t offset, std::span<const std::byte> chunk) {
+                const auto& copy = copies[index];
+                const auto& level = data.mLevels[index];
+                if (level.mWidth != copy.imageExtent.width || level.mHeight != copy.imageExtent.height
+                    || level.mBytes.size() != Render::textureLevelSize(data.mFormat, level.mWidth, level.mHeight))
+                    throw std::invalid_argument("Vulkan texture mip changed during upload");
+                std::memcpy(mapped + copy.bufferOffset + offset, chunk.data(), chunk.size());
+            });
+            if (!complete)
+                return false;
+            Render::reserveFor(mPendingUploads, mPendingUploads.size() + 1);
+            pending.mUpload.mImage->mUpload = mPendingUploads.size();
+            mPendingUploads.push_back(std::move(pending.mUpload));
+            mDeferredTexture.reset();
+            return true;
         }
 
         Render::TextureHandle VulkanBackend::createTextureSamplerView(
@@ -2499,6 +2715,8 @@ namespace MWRender::Vulkan
                 throw std::invalid_argument("Cannot release the backend's default texture");
             const auto resource = mTextures.get(texture);
             mTextures.erase(texture);
+            if (mDeferredTexture && mDeferredTexture->mHandle == texture)
+                mDeferredTexture.reset();
             if (resource->mSamplerViews == 0)
                 cancelUpload(resource->mUpload);
         }
@@ -2855,6 +3073,10 @@ namespace MWRender::Vulkan
             {
                 warm(MaterialShader::Distortion, Render::BlendMode::Alpha);
                 warm(MaterialShader::Distortion, Render::BlendMode::Additive);
+                if (mOptions.mPbr && static_cast<Render::TargetFormat>(target - 1) == Render::TargetFormat::ColorRGBA8)
+                    for (const auto blend : { Render::BlendMode::Opaque, Render::BlendMode::Alpha,
+                             Render::BlendMode::Additive, Render::BlendMode::WeightedReplace })
+                        warm(MaterialShader::PbrBake, blend);
                 return;
             }
             for (const auto blend : { Render::BlendMode::Opaque, Render::BlendMode::Alpha, Render::BlendMode::Additive,
@@ -2869,6 +3091,15 @@ namespace MWRender::Vulkan
                 warm(MaterialShader::SurfaceShadowed, blend);
                 warm(MaterialShader::SolidSurfaceShadowed, blend);
             }
+            if (mOptions.mPbr)
+                for (const auto blend : { Render::BlendMode::Opaque, Render::BlendMode::Alpha,
+                         Render::BlendMode::Additive, Render::BlendMode::WeightedReplace })
+                {
+                    warm(MaterialShader::PbrSurface, blend);
+                    warm(MaterialShader::PbrSolidSurface, blend);
+                    warm(MaterialShader::PbrSurfaceShadowed, blend);
+                    warm(MaterialShader::PbrSolidSurfaceShadowed, blend);
+                }
             warm(MaterialShader::Sky, Render::BlendMode::Opaque);
             warm(MaterialShader::Sky, Render::BlendMode::Alpha);
             warm(MaterialShader::Sky, Render::BlendMode::Additive);
@@ -2895,9 +3126,11 @@ namespace MWRender::Vulkan
             } };
             const VkSpecializationInfo specialization{ static_cast<std::uint32_t>(entries.size()), entries.data(),
                 sizeof(constants), constants.data() };
-            auto& modules = mShaderModules;
+            const bool pbr = isPbr(static_cast<MaterialShader>(material));
+            auto& modules = pbr ? mPbrShaderModules : mShaderModules;
             std::array<VkPipelineShaderStageCreateInfo, 2> shaders{};
-            const std::array<const char*, 2> names{ "basic.vert.spv", "basic.frag.spv" };
+            const auto names
+                = pbr ? std::array{ "pbr.vert.spv", "pbr.frag.spv" } : std::array{ "basic.vert.spv", "basic.frag.spv" };
             for (std::size_t i = 0; i < modules.size(); ++i)
             {
                 if (!modules[i])
@@ -2982,7 +3215,7 @@ namespace MWRender::Vulkan
             pipeline.pDepthStencilState = &depth;
             pipeline.pColorBlendState = &blending;
             pipeline.pDynamicState = &dynamic;
-            pipeline.layout = mPipelineLayout;
+            pipeline.layout = pbr ? mPbrPipelineLayout : mPipelineLayout;
             pipeline.renderPass = pipelineIndex >= PipelinesPerTarget
                 ? mTargetPasses[pipelineIndex / PipelinesPerTarget - 1].mClear
                 : mRenderPass;
@@ -3176,8 +3409,9 @@ namespace MWRender::Vulkan
                 barrier.dstAccessMask
                     = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
                 vkCmdPipelineBarrier(frame.mCommands, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 1, &barrier, 0,
-                    nullptr, 0, nullptr);
+                    VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT
+                        | (mOptions.mPbr ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : 0),
+                    0, 1, &barrier, 0, nullptr, 0, nullptr);
             }
         }
 
@@ -3266,13 +3500,14 @@ namespace MWRender::Vulkan
         {
             mFrameDraws.clear();
             mShadowDescriptors.beginFrame();
+            mFramePbrDescriptors.beginFrame();
             mPreparedPasses.clear();
             for (const auto& pass : passes)
             {
                 std::shared_ptr<Image> target;
                 if (pass.mTarget)
                 {
-                    target = mTextures.get(pass.mTarget);
+                    target = mTextures.get(pass.mTarget, "Invalid or expired Vulkan render target handle");
                     if (!target->mTarget)
                         throw std::invalid_argument("Render pass texture is not a framebuffer target");
                 }
@@ -3350,6 +3585,14 @@ namespace MWRender::Vulkan
                 mStagingPages.trim(Render::uploadMemoryRetentionBytes(mInfo.mLocalMemoryBytes), 32);
                 mGeometryPages.trim(32 * 1024 * 1024, 8);
                 mAllocator->trim();
+                if (!mPbrDescriptors.empty())
+                {
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(100);
+                    mPbrDescriptorSweep.sweep(
+                        mPbrDescriptors,
+                        [&](const auto& item) { return !item.second || item.second->mSubmission + 300 < mSubmission; },
+                        [&] { return std::chrono::steady_clock::now() >= deadline; });
+                }
             }
             Render::reserveFor(mPrepared, draws.size());
             Render::reserveFor(frame.mResources, draws.size() * 5 + mPendingUploads.size() * 3 + passes.size() * 4);
@@ -3427,9 +3670,11 @@ namespace MWRender::Vulkan
             for (const auto* source : draws)
             {
                 const auto& draw = *source;
-                const auto& mesh = mMeshes.get(draw.mMesh);
-                const auto& texture = mTextures.get(draw.mTexture ? draw.mTexture : mWhiteTexture);
-                const auto& mask = mTextures.get(draw.mMaskTexture ? draw.mMaskTexture : mWhiteTexture);
+                const auto& mesh = mMeshes.get(draw.mMesh, "Invalid or expired Vulkan draw mesh handle");
+                const auto& texture = mTextures.get(draw.mTexture ? draw.mTexture : mWhiteTexture,
+                    "Invalid or expired Vulkan draw texture handle");
+                const auto& mask = mTextures.get(draw.mMaskTexture ? draw.mMaskTexture : mWhiteTexture,
+                    "Invalid or expired Vulkan blend or reflection texture handle");
                 while (drawPass < mPreparedPasses.size()
                     && drawNumber >= mPreparedPasses[drawPass].mFirst + mPreparedPasses[drawPass].mCount)
                     ++drawPass;
@@ -3455,7 +3700,17 @@ namespace MWRender::Vulkan
                     ? MaterialShader::Overlay
                     : draw.mAlphaCompare == Render::AlphaCompare::Always && !draw.mClip ? MaterialShader::SolidSurface
                                                                                         : MaterialShader::Surface;
-                if (draw.mShadows && material == MaterialShader::Surface)
+                if (mOptions.mPbr && draw.mPbrBake != Render::Draw::PbrBake::None)
+                    material = MaterialShader::PbrBake;
+                else if (mOptions.mPbr && draw.mPbr
+                    && (material == MaterialShader::Surface || material == MaterialShader::SolidSurface))
+                {
+                    const bool solid = material == MaterialShader::SolidSurface;
+                    material = draw.mShadows
+                        ? (solid ? MaterialShader::PbrSolidSurfaceShadowed : MaterialShader::PbrSurfaceShadowed)
+                        : (solid ? MaterialShader::PbrSolidSurface : MaterialShader::PbrSurface);
+                }
+                else if (draw.mShadows && material == MaterialShader::Surface)
                     material = MaterialShader::SurfaceShadowed;
                 else if (draw.mShadows && material == MaterialShader::SolidSurface)
                     material = MaterialShader::SolidSurfaceShadowed;
@@ -3498,6 +3753,32 @@ namespace MWRender::Vulkan
                     draw.mWater });
                 mPrepared.back().mReversedDepth = reversedDepth;
                 mPrepared.back().mDepthBias = { draw.mDepthBiasConstant, draw.mDepthBiasSlope };
+                if (isPbr(material))
+                {
+                    auto& prepared = mPrepared.back();
+                    const auto& binding = pbrDescriptor(frame, draw);
+                    prepared.mPbrDescriptor = binding.mSet;
+                    prepared.mPbrTargets = binding.mTargets;
+                    if (destination
+                        && (binding.mTargets[0] == destination.get() || binding.mTargets[1] == destination.get()))
+                        throw std::invalid_argument("PBR material cannot sample its own render target");
+                    auto flags = binding.mMapFlags;
+                    if (draw.mNormalXY)
+                        flags |= 512u;
+                    if (draw.mTerrainSpecularAlpha)
+                        flags |= 1024u;
+                    if (!texture->mSrgb)
+                        flags |= 2048u;
+                    if (offscreen
+                        || (mColorFormat != VK_FORMAT_B8G8R8A8_SRGB && mColorFormat != VK_FORMAT_R8G8B8A8_SRGB))
+                        flags |= 4096u;
+                    if (draw.mPbrBake == Render::Draw::PbrBake::Normal)
+                        flags |= 16384u;
+                    if (draw.mPbrBakedTerrain)
+                        flags |= 262144u;
+                    flags |= (std::uint32_t{ draw.mPbrAlternateUV } & 15u) << 19;
+                    prepared.mPbrFlags = flags;
+                }
             }
             if (draws.size() > frame.mInstanceCapacity)
             {
@@ -3528,23 +3809,32 @@ namespace MWRender::Vulkan
                     mDrawLightOffsets[i] = 0;
                     continue;
                 }
-                auto slot = reinterpret_cast<std::uintptr_t>(set.get()) >> 4;
+                const bool linear = mPrepared[i].mPbrDescriptor != VK_NULL_HANDLE;
+                auto slot = (reinterpret_cast<std::uintptr_t>(set.get()) >> 3) ^ static_cast<unsigned>(linear);
                 slot ^= slot >> 17;
                 slot *= 0xed5ad4bbu;
                 slot ^= slot >> 11;
                 const auto mask = mLightOffsets.size() - 1;
                 slot &= mask;
-                while (mLightOffsets[slot].mSet && mLightOffsets[slot].mSet != set.get())
+                while (mLightOffsets[slot].mSet
+                    && (mLightOffsets[slot].mSet != set.get() || mLightOffsets[slot].mLinear != linear))
                     slot = (slot + 1) & mask;
                 auto& entry = mLightOffsets[slot];
                 if (!entry.mSet)
                 {
-                    if (set->mPoints.size() > 40
-                        || (mLightData.size() + set->mPoints.size()) * sizeof(Render::PointLight)
-                            > mProperties.limits.maxStorageBufferRange)
+                    if ((mLightData.size() + set->mPoints.size()) * sizeof(Render::PointLight)
+                        > mProperties.limits.maxStorageBufferRange)
                         throw std::length_error("Vulkan point light data exceeds the device buffer limit");
-                    entry = { set.get(), static_cast<std::uint32_t>(mLightData.size()) };
+                    entry = { set.get(), static_cast<std::uint32_t>(mLightData.size()), linear };
                     mLightData.insert(mLightData.end(), set->mPoints.begin(), set->mPoints.end());
+                    if (linear)
+                        for (std::size_t index = entry.mOffset; index < mLightData.size(); ++index)
+                        {
+                            auto& light = mLightData[index];
+                            light.mAmbient = Render::linearRgbFromSrgb(light.mAmbient);
+                            light.mDiffuse = Render::linearRgbFromSrgb(light.mDiffuse);
+                            light.mSpecular = Render::linearRgbFromSrgb(light.mSpecular);
+                        }
                 }
                 mDrawLightOffsets[i] = entry.mOffset;
             }
@@ -3583,7 +3873,9 @@ namespace MWRender::Vulkan
                 if (draw.mWater)
                     ambient = draw.mWaterProjection;
                 specular[3] = draw.mShininess;
-                const InstanceData instance{ draw.mClipFromModel, draw.mTint,
+                const bool linear = draw.mLighting && mPrepared[i].mPbrDescriptor != VK_NULL_HANDLE;
+                const InstanceData instance{ draw.mClipFromModel,
+                    linear ? Render::linearRgbFromSrgb(draw.mTint) : draw.mTint,
                     { draw.mAlphaCutoff, static_cast<float>(draw.mAlphaCompare),
                         draw.mDistortion ? draw.mDistortionStrength : draw.mOpacity,
                         draw.mDistortion        ? 3.f
@@ -3591,19 +3883,24 @@ namespace MWRender::Vulkan
                             : draw.mWater       ? (draw.mReflection ? 2.25f : 2.f)
                             : draw.mMaskTexture ? 1.f
                                                 : 0.f },
-                    { draw.mUVTransform[0], draw.mUVTransform[1], draw.mUVTransform[2], 0 },
-                    { draw.mUVTransform[3], draw.mUVTransform[4], draw.mUVTransform[5], 0 },
+                    { draw.mUVTransform[0], draw.mUVTransform[1], draw.mUVTransform[2], draw.mRoughness },
+                    { draw.mUVTransform[3], draw.mUVTransform[4], draw.mUVTransform[5], draw.mMetalness },
                     { draw.mMaskUVTransform[0], draw.mMaskUVTransform[1], draw.mMaskUVTransform[2], 0 },
                     { draw.mMaskUVTransform[3], draw.mMaskUVTransform[4], draw.mMaskUVTransform[5], 0 },
-                    draw.mViewFromModel, draw.mNormalFromModel, draw.mDiffuse, ambient, emission, specular,
-                    draw.mSunPosition, draw.mSunAmbient, draw.mSunDiffuse, draw.mSunSpecular,
+                    draw.mViewFromModel, draw.mNormalFromModel,
+                    linear ? Render::linearRgbFromSrgb(draw.mDiffuse) : draw.mDiffuse,
+                    linear ? Render::linearRgbFromSrgb(ambient) : ambient,
+                    linear ? Render::linearRgbFromSrgb(emission) : emission, specular, draw.mSunPosition,
+                    linear ? Render::linearRgbFromSrgb(draw.mSunAmbient) : draw.mSunAmbient,
+                    linear ? Render::linearRgbFromSrgb(draw.mSunDiffuse) : draw.mSunDiffuse,
+                    linear ? Render::linearRgbFromSrgb(draw.mSunSpecular) : draw.mSunSpecular,
                     { mDrawLightOffsets[i],
                         draw.mLighting && !draw.mSky && !draw.mWater && !draw.mDistortion && draw.mLights
                             ? static_cast<std::uint32_t>(draw.mLights->mPoints.size())
                             : 0,
                         (draw.mLighting && !draw.mWater && !draw.mSky ? 1u : 0u) | (draw.mClassicFalloff ? 2u : 0u)
                             | (draw.mClip ? 4u : 0u) | (mPrepared[i].mReversedDepth ? 8u : 0u)
-                            | (draw.mShadowAlphaTest ? 16u : 0u),
+                            | (draw.mShadowAlphaTest ? 16u : 0u) | mPrepared[i].mPbrFlags,
                         draw.mUseVertexColor ? draw.mVertexColorMode : 0u },
                     draw.mClipPlane };
                 std::memcpy(
@@ -3649,6 +3946,9 @@ namespace MWRender::Vulkan
                 {
                     sampleImage(frame, *mPrepared[drawIndex].mTexture, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
                     sampleImage(frame, *mPrepared[drawIndex].mMask, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                    for (auto* map : mPrepared[drawIndex].mPbrTargets)
+                        if (map)
+                            sampleImage(frame, *map, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
                 }
                 const auto timing = beginTiming(frame,
                     !view.mLabel.empty() ? view.mLabel
@@ -3774,11 +4074,13 @@ namespace MWRender::Vulkan
                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 32, sizeof(Render::SceneEnvironment),
                     &view.mEnvironment);
                 std::optional<std::array<float, 2>> boundDepthBias;
+                const auto emptyDepth = mTextures.get(mWhiteTexture)->mDescriptor;
+                VkDescriptorSet boundExtra = VK_NULL_HANDLE;
                 if (!mPrepared.empty())
                 {
-                    const auto emptyDepth = mTextures.get(mWhiteTexture)->mDescriptor;
                     vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, mPipelineLayout, 3, 1,
                         &emptyDepth, 0, nullptr);
+                    boundExtra = emptyDepth;
                 }
                 bool savedWorldDepth = false;
                 bool savedWaterDepth = false;
@@ -3833,9 +4135,6 @@ namespace MWRender::Vulkan
                         // LOAD both color and depth. Clearing depth here would
                         // let later transparent draws show through the terrain.
                         resume(view.mTarget ? mTargetPasses[targetSlot].mResume : mMainResumePass);
-                        const auto descriptor = view.mWaterDepth->mDescriptor;
-                        vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, mPipelineLayout, 3, 1,
-                            &descriptor, 0, nullptr);
                         savedWaterDepth = true;
                     }
                     std::size_t end = first + 1;
@@ -3844,7 +4143,8 @@ namespace MWRender::Vulkan
                         && mPrepared[end].mRasterKey == draw.mRasterKey && mPrepared[end].mMask == draw.mMask
                         && mPrepared[end].mIndexCount == draw.mIndexCount && mPrepared[end].mFog == draw.mFog
                         && mPrepared[end].mDepthBias == draw.mDepthBias
-                        && mPrepared[end].mDataDescriptor == draw.mDataDescriptor && !mPrepared[end].mClearDepthBefore)
+                        && mPrepared[end].mDataDescriptor == draw.mDataDescriptor
+                        && mPrepared[end].mPbrDescriptor == draw.mPbrDescriptor && !mPrepared[end].mClearDepthBefore)
                         ++end;
                     if (boundPipeline != mPipelines[draw.mPipeline])
                     {
@@ -3893,6 +4193,15 @@ namespace MWRender::Vulkan
                         const std::array descriptors{ boundTexture, boundMask };
                         vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS, mPipelineLayout, 0, 2,
                             descriptors.data(), 0, nullptr);
+                    }
+                    const auto extra = draw.mPbrDescriptor ? draw.mPbrDescriptor
+                        : savedWaterDepth                  ? view.mWaterDepth->mDescriptor
+                                                           : emptyDepth;
+                    if (boundExtra != extra)
+                    {
+                        boundExtra = extra;
+                        vkCmdBindDescriptorSets(frame.mCommands, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            draw.mPbrDescriptor ? mPbrPipelineLayout : mPipelineLayout, 3, 1, &boundExtra, 0, nullptr);
                     }
                     const auto& vertices = draw.mMesh->mVertices.current()->mRange;
                     const auto vertexNumber = vertices.offset() / sizeof(Render::Vertex);

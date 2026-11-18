@@ -9,6 +9,7 @@
 #include <components/resource/scenemanager.hpp>
 #include <components/sceneutil/lightmanager.hpp>
 #include <components/sceneutil/material.hpp>
+#include <components/settings/values.hpp>
 
 #include "compositemaprenderer.hpp"
 #include "material.hpp"
@@ -178,7 +179,8 @@ namespace Terrain
 
                 textureLayer.mDiffuseMap = mTextureManager->getTexture(it->mDiffuseMap);
 
-                if (!forCompositeMap && !it->mNormalMap.empty())
+                if ((!forCompositeMap || (mSceneManager->usesNativeRendering() && Settings::shaders().mNativePbr))
+                    && !it->mNormalMap.empty())
                     textureLayer.mNormalMap = mTextureManager->getTexture(it->mNormalMap);
 
                 layers.push_back(textureLayer);
@@ -306,7 +308,6 @@ namespace Terrain
             }
         }
 
-        geometry->setupWaterBoundingBox(-1, chunkSize * mStorage->getCellWorldSize(mWorldspace) / numVerts);
 
         if (!templateGeometry && compile && mSceneManager->getIncrementalCompileOperation())
         {

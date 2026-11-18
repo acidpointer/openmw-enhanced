@@ -347,6 +347,22 @@ namespace Render
         // Preserve projection coefficients before model/view multiplication;
         // post-processing must not recover them from rounded world matrices.
         std::array<float, 4> mDepthProjection{};
+        // Normal, legacy specular, packed occlusion/roughness/metalness, emission.
+        std::array<TextureHandle, 4> mPbrMaps{};
+        float mRoughness = -1;
+        float mMetalness = 0;
+        std::uint8_t mPbrAlternateUV = 0;
+        bool mPbr = false;
+        bool mNormalXY = false;
+        bool mTerrainSpecularAlpha = false;
+        bool mPbrBakedTerrain = false;
+        enum class PbrBake : std::uint8_t
+        {
+            None,
+            Properties,
+            Normal
+        };
+        PbrBake mPbrBake = PbrBake::None;
     };
 
     enum class EffectBlendFactor : std::uint8_t
@@ -464,6 +480,7 @@ namespace Render
         // Optional launcher-selected PCI address (dddd:bb:dd.f).
         std::string mDevicePciAddress;
         PresentMode mPresentMode = PresentMode::Fifo;
+        bool mPbr = false;
     };
 
     // Single producer contract: resource changes and rendering are called on
@@ -504,6 +521,10 @@ namespace Render
             return supportsTextureFormat(data.mFormat, data.mSrgb);
         }
         virtual TextureHandle createTexture(const TextureData& data, const SamplerState& sampler = {}) = 0;
+        // Deferred handles remain private until stageTexture reports completion.
+        // The caller owns the source levels and can cancel via releaseTexture.
+        virtual TextureHandle createDeferredTexture(const TextureData&, const SamplerState&) { return {}; }
+        virtual bool stageTexture(TextureHandle, const TextureData&, std::size_t&) { return false; }
         // Share immutable 2D image storage with another sampler. Releasing the
         // original handle does not invalidate a view or cancel its upload.
         virtual TextureHandle createTextureSamplerView(TextureHandle, const SamplerState&)
@@ -562,7 +583,7 @@ namespace Render
     // Private, same-build module ABI. Creation and destruction stay paired in
     // the module; errors are copied into caller-owned memory, never thrown
     // through the exported entry point. No graphics API types cross it.
-    inline constexpr std::uint32_t BackendAbi = 20;
+    inline constexpr std::uint32_t BackendAbi = 22;
     using CreateBackend = Backend* (*)(std::uint32_t abi, const BackendOptions*, char* error, std::size_t errorSize);
     using DestroyBackend = void (*)(Backend*);
 }

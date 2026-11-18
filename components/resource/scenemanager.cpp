@@ -32,6 +32,7 @@
 #include <components/nifosg/nifloader.hpp>
 
 #include <components/nif/niffile.hpp>
+#include <components/renderassets/pbrmaterial.hpp>
 
 #include <components/misc/algorithm.hpp>
 #include <components/misc/osguservalues.hpp>
@@ -52,6 +53,7 @@
 #include <components/sceneutil/util.hpp>
 #include <components/sceneutil/visitor.hpp>
 
+#include <components/settings/values.hpp>
 #include <components/shader/shadermanager.hpp>
 #include <components/shader/shadervisitor.hpp>
 
@@ -495,6 +497,7 @@ namespace Resource
         , mShaderManager(new Shader::ShaderManager)
         , mSharedStateManager(new SharedStateManager)
         , mImageManager(imageManager)
+        , mPbrMaterials(std::make_unique<RenderAssets::PbrMaterialCache>())
         , mNifFileManager(nifFileManager)
         , mBgsmFileManager(bgsmFileManager)
         , mMinFilter(osg::Texture::LINEAR_MIPMAP_LINEAR)
@@ -1249,6 +1252,7 @@ namespace Resource
     void SceneManager::clearCache()
     {
         NodeResourceManager<std::string>::clearCache();
+        mPbrMaterials->clear();
 
         std::lock_guard<std::mutex> lock(mSharedStateMutex);
         mSharedStateManager->clearCache();
@@ -1291,6 +1295,8 @@ namespace Resource
         shaderVisitor->setAdjustCoverageForAlphaTest(mAdjustCoverageForAlphaTest);
         shaderVisitor->setSupportsNormalsRT(mSupportsNormalsRT);
         shaderVisitor->setWeatherParticleOcclusion(mWeatherParticleOcclusion);
+        if (mNativeRendering && Settings::shaders().mNativePbr)
+            shaderVisitor->setPbrMaterialCache(mPbrMaterials.get());
         return shaderVisitor;
     }
 }

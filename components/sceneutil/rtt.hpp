@@ -96,6 +96,7 @@ namespace SceneUtil
         const ViewDependentDataMap& getViewDependentDataMap() const { return mViewDependentDataMap; }
 
     protected:
+        virtual bool needsRender(osgUtil::CullVisitor&) const { return true; }
         bool shouldDoPerViewMapping();
         bool shouldDoTextureArray();
         bool shouldDoTextureView();

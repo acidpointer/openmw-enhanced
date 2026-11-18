@@ -144,7 +144,7 @@ add_component_dir (render
 list(APPEND COMPONENT_FILES render/bufferarena.hpp render/bufferversions.hpp render/drawranges.hpp render/effectlifetime.hpp render/framecache.hpp render/meshindices.hpp)
 
 add_component_dir (renderassets
-    model osgimporter osgstate particles effectshader
+    model osgimporter osgstate particles effectshader pbrmaterial
     )
 list(APPEND COMPONENT_FILES renderassets/imagevariants.hpp renderassets/imagebinding.hpp)
 list(APPEND COMPONENT_FILES renderassets/meshkey.hpp)

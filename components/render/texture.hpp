@@ -3,6 +3,7 @@
 
 #include "backend.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 
@@ -131,6 +132,34 @@ namespace Render
     }
 
     void validateTexture(const TextureData& data);
+
+    struct TextureStagingProgress
+    {
+        template <class Write>
+        bool copy(std::span<const TextureLevel> levels, std::size_t& budget, Write&& write)
+        {
+            while (budget && mLevel < levels.size())
+            {
+                const auto data = levels[mLevel].mBytes;
+                if (mOffset > data.size())
+                    throw std::invalid_argument("Texture staging source shrank");
+                const auto amount = std::min(budget, data.size() - mOffset);
+                write(mLevel, mOffset, data.subspan(mOffset, amount));
+                mOffset += amount;
+                budget -= amount;
+                if (mOffset == data.size())
+                {
+                    mOffset = 0;
+                    ++mLevel;
+                }
+            }
+            return mLevel == levels.size();
+        }
+
+    private:
+        std::size_t mLevel = 0;
+        std::size_t mOffset = 0;
+    };
     bool validSampler(const SamplerState& state) noexcept;
     void validateSampler(const SamplerState& state);
 }

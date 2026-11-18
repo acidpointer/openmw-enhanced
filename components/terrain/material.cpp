@@ -6,11 +6,13 @@
 #include <osg/Fog>
 #include <osg/Texture2D>
 
+#include <components/renderassets/pbrmaterial.hpp>
 #include <components/resource/scenemanager.hpp>
 #include <components/sceneutil/depth.hpp>
 #include <components/sceneutil/enhancedsettings.hpp>
 #include <components/sceneutil/texmat.hpp>
 #include <components/sceneutil/util.hpp>
+#include <components/settings/values.hpp>
 #include <components/shader/shadermanager.hpp>
 #include <components/stereo/stereomanager.hpp>
 
@@ -244,8 +246,23 @@ namespace Terrain
                 stateset->setAttributeAndModes(
                     new osg::BlendFunc(osg::BlendFunc::ONE, firstLayer ? osg::BlendFunc::ZERO : osg::BlendFunc::ONE));
             }
+            const bool pbr = sceneManager->usesNativeRendering() && Settings::shaders().mNativePbr;
+            if (pbr)
+            {
+                if (it->mSpecular)
+                    stateset->addUniform(new osg::Uniform("terrainSpecularAlpha", true));
+                if (it->mDiffuseMap)
+                    if (auto material
+                        = sceneManager->getPbrMaterials().get(*it->mDiffuseMap, *sceneManager->getImageManager()))
+                        stateset->setAttribute(material);
+            }
             if (isComposite)
             {
+                if (pbr && it->mNormalMap)
+                {
+                    stateset->setTextureAttribute(2, it->mNormalMap);
+                    stateset->addUniform(UniformCollection::value().mNormalMap);
+                }
                 stateset->setAttributeAndModes(
                     shaderManager.getProgram("terrain_composite", { { "blendMap", !blendmaps.empty() ? "1" : "0" } }));
             }

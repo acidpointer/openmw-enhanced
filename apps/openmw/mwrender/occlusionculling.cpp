@@ -64,7 +64,8 @@ namespace MWRender
     }
 
     void PagedOccluderData::collectNearbyOccluders(const osg::Vec3f& eye, float maxDistanceSq,
-        std::vector<std::shared_ptr<const OccluderMesh>>& out, std::vector<std::size_t>& candidates) const
+        std::vector<std::shared_ptr<const OccluderMesh>>& out, std::vector<std::size_t>& candidates,
+        const SceneUtil::OcclusionPlan* plan) const
     {
         const auto append = [&](const auto& mesh) {
             if (mesh->aabb.valid() && SceneUtil::occlusionDistanceSquared(mesh->aabb, eye) <= maxDistanceSq)
@@ -72,12 +73,29 @@ namespace MWRender
         };
         // The existing BVH is a conservative broad phase. The final predicate
         // uses distance to the full mesh bounds, not its centroid.
-        if (mIndexed && mIndex.queryCandidates(osg::BoundingSphere(eye, std::sqrt(maxDistanceSq)), candidates))
-            for (const auto index : candidates)
-                append(mOccluderMeshes[index]);
-        else
-            for (const auto& mesh : mOccluderMeshes)
-                append(mesh);
+        if (mIndexed)
+        {
+            const bool limited = plan && plan->limitsGathering();
+            const auto limit = limited ? std::size_t{ 256 } : std::numeric_limits<std::size_t>::max();
+            const bool complete
+                = mIndex.queryCandidates(osg::BoundingSphere(eye, std::sqrt(maxDistanceSq)), candidates, limit);
+            if (complete || limited)
+            {
+                for (const auto index : candidates)
+                {
+                    if (plan && !plan->canGather())
+                        break;
+                    append(mOccluderMeshes[index]);
+                }
+                return;
+            }
+        }
+        for (const auto& mesh : mOccluderMeshes)
+        {
+            if (plan && !plan->canGather())
+                break;
+            append(mesh);
+        }
     }
 
     SceneOcclusionCallback::SceneOcclusionCallback(SceneUtil::OcclusionCuller* culler,
@@ -245,8 +263,9 @@ namespace MWRender
 
         mCuller->setStaticOccludersEnabled(staticOccludersEnabled);
         mCuller->setSmallObjectTestingEnabled(smallObjectTestingEnabled);
-        mCuller->setStaticRasterBudgetMs(
-            SceneUtil::adaptiveOcclusionBudget(SceneUtil::Enhanced::occlusionStaticRasterTimeBudgetMs(), throttled));
+        const double staticBudget = SceneUtil::adaptiveOcclusionBudget(
+            SceneUtil::Enhanced::occlusionStaticRasterTimeBudgetMs(), throttled);
+        mCuller->setStaticRasterBudgetMs(staticBudget);
         mCuller->setMinOccluderScreenRatio(SceneUtil::Enhanced::occlusionMinOccluderScreenRatio());
         mCuller->setMinOccludeeScreenRatio(SceneUtil::Enhanced::occlusionMinOccludeeScreenRatio());
 
@@ -267,7 +286,7 @@ namespace MWRender
         {
             // Prepare the exact view selected by terrain/paging without a cull
             // traversal. No render leaves, light lists or skinning run here.
-            mPlan.start();
+            mPlan.start(staticBudget);
             if (staticOccludersEnabled)
             {
                 StaticCandidateTimer timer(*mCuller);
@@ -522,9 +541,13 @@ namespace MWRender
                 if (const auto* paged = dynamic_cast<const PagedOccluderData*>(data->getUserObject(i)))
                 {
                     auto& nearby = plan.nearbyScratch();
-                    paged->collectNearbyOccluders(cv.getEyePoint(), mMaxDistanceSq, nearby, plan.indexScratch());
+                    paged->collectNearbyOccluders(cv.getEyePoint(), mMaxDistanceSq, nearby, plan.indexScratch(), &plan);
                     for (const auto& mesh : nearby)
+                    {
+                        if (!plan.canGather())
+                            break;
                         plan.add(*mCuller, { mesh, {}, mesh->aabb, false });
+                    }
                     break;
                 }
     }
@@ -599,8 +622,20 @@ namespace MWRender
     {
         if (!mEnableStaticOccluders || !mCuller->staticOccludersEnabled())
             return;
+        auto cellBound = cell.getBound();
+        if (cellBound.valid())
+        {
+            SceneUtil::transformBoundingSphere(parentToWorld, cellBound);
+            if (cell.isCullingActive() && !SceneUtil::maySubmitOccluderSphere(cellBound, cv.getCurrentCullingSet()))
+                return;
+            const double reach = std::sqrt(mOccluderMaxDistanceSq) + cellBound.radius();
+            if ((osg::Vec3d(cellBound.center()) - cv.getEyePoint()).length2() > reach * reach)
+                return;
+        }
         for (auto it = mPlacements.begin(); it != mPlacements.end();)
         {
+            if (!plan.canGather())
+                break;
             osg::ref_ptr<osg::Node> node;
             bool belongs = false;
             if (it->second.mNode.lock(node))

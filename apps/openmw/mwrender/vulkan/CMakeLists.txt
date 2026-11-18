@@ -27,13 +27,23 @@ if(APPLE)
 else()
     set(vulkan_resource_root "${OPENMW_RESOURCES_ROOT}")
 endif()
-foreach(shader basic.vert basic.frag)
-    set(source "${CMAKE_SOURCE_DIR}/files/shaders/vulkan/${shader}")
+foreach(shader basic.vert basic.frag pbr.vert pbr.frag)
+    if(shader MATCHES "^pbr\\.(vert|frag)$")
+        set(source "${CMAKE_SOURCE_DIR}/files/shaders/vulkan/basic.${CMAKE_MATCH_1}")
+        set(shader_defines -DNATIVE_PBR=1)
+    else()
+        set(source "${CMAKE_SOURCE_DIR}/files/shaders/vulkan/${shader}")
+        set(shader_defines)
+    endif()
     set(output "${vulkan_resource_root}/resources/shaders/vulkan/${shader}.spv")
     add_custom_command(OUTPUT "${output}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${vulkan_resource_root}/resources/shaders/vulkan"
-        COMMAND "${OPENMW_GLSLANG_VALIDATOR}" --target-env vulkan1.1 -V "${source}" -o "${output}"
+        COMMAND "${OPENMW_GLSLANG_VALIDATOR}" --target-env vulkan1.1 -V ${shader_defines} "${source}" -o "${output}"
         DEPENDS "${source}" "${CMAKE_SOURCE_DIR}/files/shaders/vulkan/heightfog.glsl"
+            "${CMAKE_SOURCE_DIR}/files/shaders/vulkan/sceneinstance.glsl"
+            "${CMAKE_SOURCE_DIR}/files/shaders/vulkan/pbr.glsl"
+            "${CMAKE_SOURCE_DIR}/files/shaders/vulkan/pbrenvironment.glsl"
+            "${CMAKE_SOURCE_DIR}/files/shaders/vulkan/srgb.glsl"
         VERBATIM
     )
     list(APPEND vulkan_shader_outputs "${output}")

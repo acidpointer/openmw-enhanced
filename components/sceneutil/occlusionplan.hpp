@@ -5,6 +5,7 @@
 #include <components/occlusionculling/occludermesh.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -64,7 +65,16 @@ namespace SceneUtil
     {
     public:
         void invalidate() { mValid = false; }
-        void start() { mCandidates.clear(); }
+        void start(double budgetMs = 0)
+        {
+            mCandidates.clear();
+            mGatherDeadline = budgetMs > 0
+                ? Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double, std::milli>(
+                    budgetMs * 0.5))
+                : Clock::time_point::max();
+        }
+        bool limitsGathering() const { return mGatherDeadline != Clock::time_point::max(); }
+        bool canGather() const { return !limitsGathering() || Clock::now() < mGatherDeadline; }
         auto& nearbyScratch()
         {
             mNearby.clear();
@@ -141,6 +151,7 @@ namespace SceneUtil
         bool complete() const { return mNext == mPrevious.size(); }
 
     private:
+        using Clock = std::chrono::steady_clock;
         struct Candidate
         {
             OcclusionPlacement mPlacement;
@@ -148,6 +159,7 @@ namespace SceneUtil
             float mNear;
         };
         OcclusionViewKey mKey;
+        Clock::time_point mGatherDeadline = Clock::time_point::max();
         std::vector<Candidate> mCandidates, mPrevious;
         std::vector<std::shared_ptr<const OcclusionCulling::OccluderMesh>> mNearby;
         std::vector<std::size_t> mIndices;

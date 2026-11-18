@@ -83,7 +83,7 @@ namespace MWLua
 
     void Worker::join()
     {
-        if (mThread)
+        if (mThread && mThread->joinable())
         {
             {
                 std::lock_guard<std::mutex> lk(mMutex);

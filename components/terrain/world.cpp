@@ -143,15 +143,15 @@ namespace Terrain
             mChunkManager->clearCache();
     }
 
-    void World::enableHeightCullCallback(bool enable)
+    void World::enableHeightCullCallback(bool enable, bool perView)
     {
         if (enable)
-            mHeightCullCallback = new HeightCullCallback;
+            mHeightCullCallback = new HeightCullCallback(perView);
         else
             mHeightCullCallback = nullptr;
     }
 
-    osg::Callback* World::getHeightCullCallback(float highz, unsigned int mask)
+    HeightCullCallback* World::getHeightCullCallback(float highz, unsigned int mask)
     {
         if (!mHeightCullCallback || mTerrainRoot->getNumChildren() == 0)
             return nullptr;

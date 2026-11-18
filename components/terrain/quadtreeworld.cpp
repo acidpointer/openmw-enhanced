@@ -432,11 +432,12 @@ namespace Terrain
         {
             if (!(cv->getTraversalMask() & callback->getCullMask()))
                 return;
-            float lowZ = std::numeric_limits<float>::max();
-            float highZ = callback->getHighZ();
-            if (cv->getEyePoint().z() <= highZ || outofworld)
+            bool visible = false;
+            const float highZ = callback->getHighZ();
+            if (!(cv->getCurrentCullingSet().getCullingMask() & osg::CullingSet::VIEW_FRUSTUM_CULLING)
+                || cv->getEyePoint().z() <= highZ || outofworld || vd->getNumEntries() == 0)
             {
-                callback->setLowZ(-std::numeric_limits<float>::max());
+                callback->setViewVisible(*cv, true);
                 return;
             }
             cv->pushCurrentMask();
@@ -444,9 +445,19 @@ namespace Terrain
             for (unsigned int i = 0; i < vd->getNumEntries(); ++i)
             {
                 ViewDataEntry& entry = vd->getEntry(i);
-                osg::BoundingBox bb = static_cast<TerrainDrawable*>(entry.mRenderingNode->asGroup()->getChild(0))
-                                          ->getWaterBoundingBox();
+                const auto* group = entry.mRenderingNode ? entry.mRenderingNode->asGroup() : nullptr;
+                const auto* terrain = group && group->getNumChildren() > 0
+                    ? dynamic_cast<const TerrainDrawable*>(group->getChild(0))
+                    : nullptr;
+                osg::BoundingBox bb = terrain ? terrain->getBoundingBox() : osg::BoundingBox{};
                 if (!bb.valid())
+                {
+                    visible = true;
+                    break;
+                }
+                // The entire wet chunk bounds the shoreline even at LOD seams
+                // or when a mod changes the water height.
+                if (bb.zMin() > highZ)
                     continue;
                 osg::Vec3f ofs(
                     entry.mNode->getCenter().x() * cellworldsize, entry.mNode->getCenter().y() * cellworldsize, 0.f);
@@ -454,9 +465,9 @@ namespace Terrain
                 bb._max += ofs;
                 bb._min.z() = highZ;
                 bb._max.z() = highZ;
-                if (cv->isCulled(bb))
+                if (!cv->getCurrentCullingSet().getFrustum().contains(bb))
                     continue;
-                lowZ = bb._min.z();
+                visible = true;
 
                 if (!debug)
                     break;
@@ -467,7 +478,7 @@ namespace Terrain
                 drw->setStateSet(stateset);
                 drw->accept(*cv);
             }
-            callback->setLowZ(lowZ);
+            callback->setViewVisible(*cv, visible);
             cv->popCurrentMask();
         }
     }
@@ -483,8 +494,18 @@ namespace Terrain
             : isCullVisitor    ? static_cast<osgUtil::CullVisitor*>(&nv)
                                : nullptr;
         osg::Object* viewer = cv ? cv->getCurrentCamera() : nullptr;
-        bool needsUpdate = true;
         osg::Vec3f viewPoint = viewer ? nv.getViewPoint() : nv.getEyePoint();
+        if (preparation)
+        {
+            // Realize changed LODs in normal traversal. Optional occluders
+            // must not trigger terrain or object chunk construction here.
+            if (auto* view = mViewDataMap->findPreparedView(viewer, viewPoint, mActiveGrid))
+                for (unsigned int i = 0; i < view->getNumEntries() && preparation->canPrepare(); ++i)
+                    if (const auto& node = view->getEntry(i).mRenderingNode)
+                        node->accept(nv);
+            return;
+        }
+        bool needsUpdate = true;
         ViewData* vd = mViewDataMap->getViewData(viewer, viewPoint, mActiveGrid, needsUpdate);
         if (needsUpdate)
         {
@@ -494,6 +515,7 @@ namespace Terrain
             mRootNode->traverseNodes(vd, viewPoint, &lodCallback);
         }
 
+
         const float cellWorldSize = static_cast<float>(ESM::getCellSize(mWorldspace));
 
         for (unsigned int i = 0; i < vd->getNumEntries(); ++i)
@@ -502,8 +524,6 @@ namespace Terrain
             loadRenderingNode(entry, vd, cellWorldSize, mActiveGrid, false);
         }
 
-        // All selected chunks exist before metadata preparation or submission.
-        // A preparation visitor never invokes cull callbacks or draws geometry.
         for (unsigned int i = 0; i < vd->getNumEntries(); ++i)
             vd->getEntry(i).mRenderingNode->accept(nv);
 

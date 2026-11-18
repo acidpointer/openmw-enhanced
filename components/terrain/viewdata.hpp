@@ -107,6 +107,7 @@ namespace Terrain
 
         ViewData* getViewData(
             osg::Object* viewer, const osg::Vec3f& viewPoint, const osg::Vec4i& activeGrid, bool& needsUpdate);
+        ViewData* findPreparedView(osg::Object* viewer, const osg::Vec3f& viewPoint, const osg::Vec4i& activeGrid) const;
 
         ViewData* createOrReuseView();
         std::unique_ptr<ViewData> createIndependentView() const;

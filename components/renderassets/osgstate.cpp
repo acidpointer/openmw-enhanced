@@ -1,4 +1,7 @@
 #include "osgstate.hpp"
+#include "pbrmaterial.hpp"
+
+#include <bit>
 
 #include <components/render/backend.hpp>
 
@@ -27,12 +30,13 @@ namespace RenderAssets
         // of this table so cache size cannot grow with a mod's uniform count.
         const std::array<std::string, static_cast<unsigned>(NativeUniform::Count)> nativeUniforms{ "LightBuffer",
             "PointLightCount", "actorFade", "alpha", "alphaRef", "atmosphereFade", "blendMap", "diffuseColor",
-            "diffuseMap", "distortionStrength", "fog.color", "fog.end", "fog.start", "maskMap", "material.ambient",
-            "material.diffuse", "material.emission", "material.emissiveMult", "material.shininess",
+            "diffuseMap", "distortionStrength", "emissiveMap", "fog.color", "fog.end", "fog.start", "maskMap",
+            "material.ambient", "material.diffuse", "material.emission", "material.emissiveMult", "material.shininess",
             "material.specStrength", "material.specular", "material.vertexColorMode", "maximumShadowMapDistance",
             "moonBlend", "nodePosition", "normalMap", "opacity", "pass", "projectionMatrix", "reflectionMap",
-            "shadowSpaceMatrix0", "sun.ambient", "sun.diffuse", "sun.position", "sun.specular", "texMat0", "texMat1",
-            "texMat2", "texMat3", "texMat4", "texMat5", "texMat6", "texMat7", "waterSurface", "worldMatrix" };
+            "shadowSpaceMatrix0", "specularMap", "sun.ambient", "sun.diffuse", "sun.position", "sun.specular",
+            "terrainSpecularAlpha", "texMat0", "texMat1", "texMat2", "texMat3", "texMat4", "texMat5", "texMat6",
+            "texMat7", "waterSurface", "worldMatrix" };
 
         constexpr std::array<osg::StateAttribute::GLMode, 5> nativeModes{ GL_BLEND, GL_DEPTH_TEST, GL_ALPHA_TEST,
             GL_CULL_FACE, GL_CLIP_PLANE0 };
@@ -63,6 +67,8 @@ namespace RenderAssets
                                                                       : -1;
                 return kind < 0 ? -1 : 8 + unit * 3 + kind;
             }
+            if (type == PbrMaterial::AttributeType)
+                return 56;
             switch (type)
             {
                 case osg::StateAttribute::MATERIAL:
@@ -172,6 +178,39 @@ namespace RenderAssets
         mUniformSeen = all;
     }
 
+    void collectNativeBindings(const osg::StateSet& state, NativeBindings& result)
+    {
+        result.clear();
+        // Record where each binding lives as well as its override value. The
+        // flattened state borrows these entries and reads their values live.
+        const auto append = [&](std::uintptr_t slot, const auto& binding, const void* object, unsigned flags) {
+            result.push_back(
+                { slot, reinterpret_cast<std::uintptr_t>(&binding), reinterpret_cast<std::uintptr_t>(object), flags });
+        };
+        for (const auto& [name, binding] : state.getUniformList())
+        {
+            const auto found = std::lower_bound(nativeUniforms.begin(), nativeUniforms.end(), name);
+            if (found != nativeUniforms.end() && *found == name)
+                append(100 + (found - nativeUniforms.begin()), binding, binding.first.get(), binding.second);
+        }
+        const auto attributes = [&](int unit, const osg::StateSet::AttributeList& list) {
+            for (const auto& [key, binding] : list)
+                if (const int slot = attributeSlot(unit, key.first, key.second); slot >= 0)
+                    append(slot, binding, binding.first.get(), binding.second);
+        };
+        attributes(-1, state.getAttributeList());
+        const auto& textures = state.getTextureAttributeList();
+        result.push_back({ 200, textures.size(), 0 });
+        for (unsigned unit = 0; unit < std::min<std::size_t>(textures.size(), 32); ++unit)
+            attributes(unit, textures[unit]);
+        for (const auto& [mode, binding] : state.getModeList())
+        {
+            const auto found = std::find(nativeModes.begin(), nativeModes.end(), mode);
+            if (found != nativeModes.end())
+                append(201 + (found - nativeModes.begin()), binding, nullptr, binding);
+        }
+    }
+
     void OsgStateView::prepareNativeState() const
     {
         if (mNativeStatePrepared)
@@ -182,12 +221,14 @@ namespace RenderAssets
             mAttributeCache = mParent->mAttributeCache;
             mModeCache = mParent->mModeCache;
             mTextureUnits = mParent->mTextureUnits;
+            mTextureLabels = mParent->mTextureLabels;
         }
         else
         {
             mAttributeCache.fill(nullptr);
             mModeCache.fill(nullptr);
             mTextureUnits = 0;
+            mTextureLabels = 0;
         }
         prepareNativeUniforms();
         if (mLocal)
@@ -197,8 +238,18 @@ namespace RenderAssets
                 {
                     const int slot = attributeSlot(unit, key.first, key.second);
                     if (slot >= 0)
+                    {
                         mAttributeCache[slot] = selectBinding(
                             mAttributeCache[slot], &binding, [](const auto& value) { return value.second; });
+                        if (unit >= 0 && key.first == SceneUtil::TextureType::AttributeType)
+                        {
+                            const auto bit = std::uint32_t{ 1 } << unit;
+                            if (mAttributeCache[slot] && mAttributeCache[slot]->first)
+                                mTextureLabels |= bit;
+                            else
+                                mTextureLabels &= ~bit;
+                        }
+                    }
                 }
             };
             attributes(-1, mLocal->getAttributeList());
@@ -321,6 +372,14 @@ namespace RenderAssets
             return mTextureUnits;
         return std::max(mParent ? mParent->textureUnits() : 0u,
             mLocal ? static_cast<unsigned>(mLocal->getTextureAttributeList().size()) : 0u);
+    }
+
+    unsigned OsgStateView::nextTextureLabelUnit(unsigned start, unsigned end) const
+    {
+        if (!mNativeStatePrepared || start >= 32)
+            return start;
+        const auto candidates = mTextureLabels & (~std::uint32_t{ 0 } << start);
+        return std::min(static_cast<unsigned>(std::countr_zero(candidates)), end);
     }
     OsgState OsgStateView::snapshot() const
     {
@@ -511,6 +570,10 @@ namespace RenderAssets
                 return nativeUniform(state, NativeUniform::BlendMap);
             if (name == "normalMap")
                 return nativeUniform(state, NativeUniform::NormalMap);
+            if (name == "specularMap")
+                return nativeUniform(state, NativeUniform::SpecularMap);
+            if (name == "emissiveMap")
+                return nativeUniform(state, NativeUniform::EmissiveMap);
             if (name == "reflectionMap")
                 return nativeUniform(state, NativeUniform::ReflectionMap);
             if (name == "maskMap")
@@ -532,7 +595,13 @@ namespace RenderAssets
             else
                 return static_cast<unsigned>(state.getTextureAttributeList().size());
         }();
-        for (unsigned unit = 0; unit < units; ++unit)
+        const auto next = [&](unsigned unit) {
+            if constexpr (std::is_same_v<State, OsgStateView>)
+                return state.nextTextureLabelUnit(unit, units);
+            else
+                return unit;
+        };
+        for (unsigned unit = next(0); unit < units; unit = next(unit + 1))
             if (const auto* type = state.getTextureAttribute(unit, SceneUtil::TextureType::AttributeType);
                 type && type->getName() == name)
                 return unit;

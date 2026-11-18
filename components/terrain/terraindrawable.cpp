@@ -133,25 +133,6 @@ namespace Terrain
         mLightListCallback = lightListCallback;
     }
 
-    void TerrainDrawable::setupWaterBoundingBox(float waterheight, float margin)
-    {
-        osg::Vec3Array* vertices = static_cast<osg::Vec3Array*>(getVertexArray());
-        for (unsigned int i = 0; i < vertices->size(); ++i)
-        {
-            const osg::Vec3f& vertex = (*vertices)[i];
-            if (vertex.z() <= waterheight)
-                mWaterBoundingBox.expandBy(vertex);
-        }
-        if (mWaterBoundingBox.valid())
-        {
-            const osg::BoundingBox& bb = getBoundingBox();
-            mWaterBoundingBox.xMin() = std::max(bb.xMin(), mWaterBoundingBox.xMin() - margin);
-            mWaterBoundingBox.yMin() = std::max(bb.yMin(), mWaterBoundingBox.yMin() - margin);
-            mWaterBoundingBox.xMax() = std::min(bb.xMax(), mWaterBoundingBox.xMax() + margin);
-            mWaterBoundingBox.xMax() = std::min(bb.xMax(), mWaterBoundingBox.xMax() + margin);
-        }
-    }
-
     void TerrainDrawable::compileGLObjects(osg::RenderInfo& renderInfo) const
     {
         for (PassVector::const_iterator it = mPasses.begin(); it != mPasses.end(); ++it)

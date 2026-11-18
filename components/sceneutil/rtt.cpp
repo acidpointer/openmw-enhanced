@@ -50,6 +50,8 @@ namespace SceneUtil
 
     void RTTNode::cull(osgUtil::CullVisitor* cv)
     {
+        if (!needsRender(*cv))
+            return;
         auto frameNumber = cv->getFrameStamp()->getFrameNumber();
         auto* vdd = getViewDependentData(cv);
         if (frameNumber > vdd->mFrameNumber)

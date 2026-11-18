@@ -2,6 +2,40 @@ Shaders Settings
 ################
 
 .. omw-setting::
+   :title: native pbr
+   :type: boolean
+   :range: true, false
+   :default: true
+
+   Select physically based materials for the Vulkan world renderer. Sun and
+   local lights shade eligible objects and terrain per pixel. Existing normal,
+   specular and emissive maps contribute where their UV bindings are supported.
+   To disable it, set ``native pbr = false`` under ``[Shaders]`` in
+   ``settings.cfg`` and restart OpenMW. The existing automatic object and
+   terrain map settings control discovery of loose legacy maps.
+
+   Mod authors can add a version 1 sidecar beside the base texture in the VFS.
+   For ``textures/armor.dds``, use ``textures/armor.dds.pbr.yaml``.
+
+   .. code-block:: yaml
+
+      version: 1
+      roughness: 0.35
+      metalness: 0.65
+      properties: textures/armor_orm.dds
+
+   The optional texture uses the base UVs and linear channels. Red is ambient
+   occlusion, green is perceptual roughness, and blue is metalness. When
+   present, those channels supply the values in place of the scalar defaults.
+   Authored roughness, nonzero metalness, and packed properties enable PBR
+   reflectance. Legacy specular colors, specular maps, and terrain gloss
+   retain their authored weights. Materials with only albedo or normal maps
+   receive diffuse lighting. Environment lighting uses weather and cell
+   ambient data. Roughness is bounded to reduce distant specular shimmer.
+   Vulkan uses the lightweight legacy lighting path for materials with only
+   albedo. Mapped and authored PBR materials use linear-light shading.
+
+.. omw-setting::
    :title: native hemisphere lighting strength
    :type: float
    :range: 0.0 to 1.0

@@ -1,5 +1,6 @@
 #include "terraingrid.hpp"
 
+#include <limits>
 #include <memory>
 
 #include <osg/ComputeBoundsVisitor>
@@ -127,8 +128,8 @@ namespace Terrain
 
         osg::ComputeBoundsVisitor computeBoundsVisitor;
         mTerrainRoot->accept(computeBoundsVisitor);
-        float lowZ = computeBoundsVisitor.getBoundingBox()._min.z();
-        mHeightCullCallback->setLowZ(lowZ);
+        const auto& bounds = computeBoundsVisitor.getBoundingBox();
+        mHeightCullCallback->setLowZ(bounds.valid() ? bounds.zMin() : -std::numeric_limits<float>::max());
     }
 
     std::unique_ptr<View> TerrainGrid::createView()

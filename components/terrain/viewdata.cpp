@@ -126,6 +126,19 @@ namespace Terrain
         }
     }
 
+    ViewData* ViewDataMap::findPreparedView(
+        osg::Object* viewer, const osg::Vec3f& viewPoint, const osg::Vec4i& activeGrid) const
+    {
+        const auto found = mViewers.find(viewer);
+        if (found == mViewers.end())
+            return nullptr;
+        auto* view = found->second;
+        return !view->hasChanged() && view->suitableToUse(activeGrid)
+                && (view->getViewPoint() - viewPoint).length2() < mReuseDistance * mReuseDistance
+                && view->getWorldUpdateRevision() == mWorldUpdateRevision
+            ? view : nullptr;
+    }
+
     ViewData* ViewDataMap::getViewData(
         osg::Object* viewer, const osg::Vec3f& viewPoint, const osg::Vec4i& activeGrid, bool& needsUpdate)
     {

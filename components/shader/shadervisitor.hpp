@@ -9,6 +9,11 @@ namespace Resource
     class ImageManager;
 }
 
+namespace RenderAssets
+{
+    class PbrMaterialCache;
+}
+
 namespace SceneUtil
 {
     class Material;
@@ -51,6 +56,7 @@ namespace Shader
         void setSupportsNormalsRT(bool supports) { mSupportsNormalsRT = supports; }
 
         void setWeatherParticleOcclusion(bool value) { mWeatherParticleOcclusion = value; }
+        void setPbrMaterialCache(RenderAssets::PbrMaterialCache* cache) { mPbrMaterials = cache; }
 
         void apply(osg::Node& node) override;
 
@@ -77,6 +83,7 @@ namespace Shader
 
         bool mSupportsNormalsRT;
         bool mWeatherParticleOcclusion = false;
+        RenderAssets::PbrMaterialCache* mPbrMaterials = nullptr;
 
         ShaderManager& mShaderManager;
         Resource::ImageManager& mImageManager;

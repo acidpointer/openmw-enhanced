@@ -1,9 +1,29 @@
 #include <components/sceneutil/occlusionplan.hpp>
+#include <components/terrain/heightcull.hpp>
 #include <gtest/gtest.h>
+#include <osgUtil/RenderStage>
 
 namespace
 {
     using namespace SceneUtil;
+    TEST(WaterVisibility, AHiddenViewCannotSuppressAnotherStageOrFrame)
+    {
+        osg::ref_ptr<osgUtil::CullVisitor> visitor = new osgUtil::CullVisitor;
+        osg::ref_ptr<osgUtil::RenderStage> main = new osgUtil::RenderStage;
+        osg::ref_ptr<osgUtil::RenderStage> reflection = new osgUtil::RenderStage;
+        osg::ref_ptr<osg::FrameStamp> stamp = new osg::FrameStamp;
+        visitor->setFrameStamp(stamp);
+        visitor->setRenderStage(main);
+        osg::ref_ptr<Terrain::HeightCullCallback> gate = new Terrain::HeightCullCallback(true);
+        gate->setViewVisible(*visitor, false);
+        EXPECT_FALSE(gate->isVisible(*visitor));
+        visitor->setRenderStage(reflection);
+        EXPECT_TRUE(gate->isVisible(*visitor));
+        visitor->setRenderStage(main);
+        stamp->setFrameNumber(1);
+        EXPECT_TRUE(gate->isVisible(*visitor));
+    }
+
     std::shared_ptr<const OcclusionCulling::OccluderMesh> wall(float z)
     {
         auto mesh = std::make_shared<OcclusionCulling::OccluderMesh>();

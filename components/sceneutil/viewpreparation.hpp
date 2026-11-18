@@ -22,6 +22,7 @@ namespace SceneUtil
             setTraversalNumber(visitor.getTraversalNumber());
         }
         osgUtil::CullVisitor& cullVisitor() const { return mVisitor; }
+        virtual bool canPrepare() const { return true; }
         osg::Vec3 getEyePoint() const override { return mVisitor.getEyePoint(); }
         osg::Vec3 getViewPoint() const override { return mVisitor.getViewPoint(); }
         float getDistanceToEyePoint(const osg::Vec3& point, bool scale) const override

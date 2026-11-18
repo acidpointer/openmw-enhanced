@@ -47,7 +47,8 @@ namespace MWRender
 
         void buildSpatialIndex();
         void collectNearbyOccluders(const osg::Vec3f& eyeWorld, float maxDistanceSq,
-            std::vector<std::shared_ptr<const OccluderMesh>>& out, std::vector<std::size_t>& scratch) const;
+            std::vector<std::shared_ptr<const OccluderMesh>>& out, std::vector<std::size_t>& scratch,
+            const SceneUtil::OcclusionPlan* plan = nullptr) const;
 
         std::vector<std::shared_ptr<const OccluderMesh>> mOccluderMeshes;
 

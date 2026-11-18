@@ -28,6 +28,7 @@
 #include <components/renderassets/osgimporter.hpp>
 #include <components/renderassets/osgstate.hpp>
 #include <components/renderassets/particles.hpp>
+#include <components/renderassets/pbrmaterial.hpp>
 #include <components/sceneutil/depth.hpp>
 #include <components/sceneutil/material.hpp>
 #include <components/sceneutil/parallelwork.hpp>
@@ -256,7 +257,9 @@ namespace MWRender
             unsigned mRevision = 0;
             Render::TextureFormat mFormat = Render::TextureFormat::RGBA8;
             bool mSrgb = false;
+            bool mPreview = false;
             std::uint64_t mSeen = 0;
+            std::uint64_t mUpgradeRetry = 0;
             explicit GpuTexture(Render::Backend& backend, Render::Residency* residency = nullptr)
                 : mBackend(backend)
                 , mResidency(residency)
@@ -342,14 +345,15 @@ namespace MWRender
         struct TextureBinding
         {
             osg::observer_ptr<const osg::Texture2D> mSource;
-            std::array<std::uint64_t, 2> mFrame{};
-            std::array<Render::TextureHandle, 2> mHandles{};
+            std::array<std::uint64_t, 3> mFrame{};
+            std::array<Render::TextureHandle, 3> mHandles{};
             RenderAssets::ImageBinding<GpuTexture> mResident;
         };
 
         Impl(osgViewer::Viewer& viewer, const Render::BackendOptions& options)
             : mViewer(viewer)
             , mWindow(options.mWindow)
+            , mPbrEnabled(options.mPbr)
             , mModule(Render::BackendModule::load(modulePath(), options))
             , mAssetWorkers(SceneUtil::ParallelWork::workersFor(std::thread::hardware_concurrency()))
         {
@@ -482,7 +486,12 @@ namespace MWRender
                 }
                 replacement->mHandle = backend().createRenderTarget(width, height, sampling, format);
                 record.mSource = &source;
-                record.mShadowDepth.reset();
+                // Earlier passes can already reference these handles. Keep
+                // ownership through submission, just like replaced textures.
+                if (record.mTexture)
+                    mReplacedTextures.emplace_back(std::move(record.mTexture));
+                if (record.mShadowDepth)
+                    mReplacedTextures.emplace_back(std::move(record.mShadowDepth));
                 record.mTexture = std::move(replacement);
                 record.mWidth = width;
                 record.mHeight = height;
@@ -491,7 +500,7 @@ namespace MWRender
             return record.mTexture->mHandle;
         }
 
-        Render::TextureHandle texture(const osg::Texture2D* source, bool gui)
+        Render::TextureHandle texture(const osg::Texture2D* source, bool gui, bool allowPreview = false)
         {
             if (!source)
                 return {};
@@ -501,20 +510,22 @@ namespace MWRender
                 binding = {};
                 binding.mSource = source;
             }
-            const unsigned slot = gui ? 1 : 0;
+            const unsigned slot = gui ? 1 : allowPreview ? 2 : 0;
             if (binding.mFrame[slot] != mSerial)
             {
                 const auto* image = source->getImage();
                 const auto sampling = RenderAssets::OsgImporter::importSampler(*source);
                 auto resident = image ? binding.mResident.find(*image, sampling) : nullptr;
-                if (resident && resident->mHandle)
+                const bool useResident = resident && resident->mHandle
+                    && (!resident->mPreview || (allowPreview && sampling.mUseMipmaps && !imageStorage(*image, sampling)));
+                if (useResident)
                 {
                     touchTexture(*resident);
                     ++mPrepare.mTextureBindingHits;
                     binding.mHandles[slot] = resident->mHandle;
                 }
                 else
-                    binding.mHandles[slot] = importTexture(source, gui, binding);
+                    binding.mHandles[slot] = importTexture(source, gui, allowPreview, binding);
                 binding.mFrame[slot] = mSerial;
             }
             return binding.mHandles[slot];
@@ -530,31 +541,48 @@ namespace MWRender
             std::exception_ptr mError;
         };
 
-        std::shared_ptr<GpuTexture> imageStorage(const osg::Image& image, const Render::SamplerState& sampling)
+        std::shared_ptr<GpuTexture> imageStorage(
+            const osg::Image& image, const Render::SamplerState& sampling, bool allowPreview = false)
         {
             return mImageVariants.find(image, sampling.mUseMipmaps, [&](const auto& storage) {
+                if (storage.mPreview && !allowPreview)
+                    return false;
                 const Render::TextureLevel level{ static_cast<std::uint32_t>(image.s()),
                     static_cast<std::uint32_t>(image.t()), {} };
                 return backend().supportsTexture({ storage.mFormat, storage.mSrgb, false, { &level, 1 } }, sampling);
             });
         }
 
-        void planTexture(const osg::Texture2D* source)
+        void planTexture(const osg::Texture2D* source, bool allowPreview = false)
         {
             if (!source)
                 return;
-            const auto [planned, inserted] = mPlannedTextures.getOrCreate(source);
-            (void)planned;
-            if (!inserted)
+            auto [planned, inserted] = mPlannedTextures.getOrCreate(source);
+            const unsigned char policy = allowPreview ? 2 : 1;
+            if (inserted)
+                planned = 0;
+            if (planned & policy)
                 return;
+            planned |= policy;
             const auto* image = source->getImage();
             if (!image || !image->data() || !RenderAssets::OsgImporter::canImportImageInParallel(*image))
                 return;
             const auto sampling = RenderAssets::OsgImporter::importSampler(*source);
+            allowPreview = allowPreview && sampling.mUseMipmaps;
             if (const auto binding = mTextureBindings.find(source); binding != mTextureBindings.end())
-                if (binding->second.mResident.find(*image, sampling))
-                    return;
-            if (imageStorage(*image, sampling))
+                if (const auto resident = binding->second.mResident.find(*image, sampling))
+                {
+                    const auto& storage = resident->mStorage ? *resident->mStorage : *resident;
+                    if (allowPreview && storage.mPreview && storage.mUpgradeRetry <= mSerial
+                        && !imageStorage(*image, sampling))
+                    {
+                        if (mTextureUpgrades.getOrCreate(image).second)
+                            mUpgradeRequests.emplace_back(image, sampling);
+                    }
+                    if (!resident->mPreview || allowPreview)
+                        return;
+                }
+            if (imageStorage(*image, sampling, allowPreview))
                 return;
             try
             {
@@ -618,15 +646,16 @@ namespace MWRender
         }
 
         template <class StateSet>
-        void planMaterialImages(const StateSet& resolved, bool sky, const MaterialTextures* prepared = nullptr)
+        void planMaterialImages(const StateSet& resolved, bool sky, const MaterialTextures* prepared = nullptr,
+            bool allowPreview = false)
         {
             const auto textures = prepared ? *prepared : resolveMaterialTextures(resolved);
-            const auto plan = [&](std::optional<unsigned> unit) {
+            const auto plan = [&](std::optional<unsigned> unit, bool preview = false) {
                 if (unit)
                     planTexture(dynamic_cast<const osg::Texture2D*>(
-                        resolved.getTextureAttribute(*unit, osg::StateAttribute::TEXTURE)));
+                        resolved.getTextureAttribute(*unit, osg::StateAttribute::TEXTURE)), preview);
             };
-            plan(textures.mDiffuse);
+            plan(textures.mDiffuse, allowPreview && !sky && !textures.mWater);
             plan(textures.mMask);
             int pass = 0;
             if (sky)
@@ -675,7 +704,73 @@ namespace MWRender
             storage.mResidency.touch();
         }
 
-        Render::TextureHandle importTexture(const osg::Texture2D* source, bool gui, TextureBinding& binding)
+        void stageTextureUpgrades()
+        {
+            osg::ref_ptr<const osg::Image> source;
+            if (mUpgrade.mStorage && (!mUpgrade.mImage.lock(source) || mUpgrade.mSeen + 8 < mSerial
+                    || source->getModifiedCount() != mUpgrade.mStorage->mRevision
+                    || imageStorage(*source, mUpgrade.mSampling)))
+                mUpgrade = {};
+            if (!mUpgrade.mStorage && mUpgradeRequests.empty())
+                return;
+
+            const auto* image = mUpgrade.mStorage ? source.get() : mUpgradeRequests.front().first.get();
+            const auto sampling = mUpgrade.mStorage ? mUpgrade.mSampling : mUpgradeRequests.front().second;
+            try
+            {
+                const auto data = RenderAssets::OsgImporter::borrowTexture(*image, mLevels, true);
+                if (!data || !backend().supportsTexture(*data, sampling))
+                    throw std::invalid_argument("Vulkan texture upgrade lost its source mip chain");
+                if (!mUpgrade.mStorage)
+                {
+                    auto storage = std::make_shared<GpuTexture>(backend(), &mTextureResidency);
+                    storage->mImage = image;
+                    storage->mRevision = image->getModifiedCount();
+                    storage->mFormat = data->mFormat;
+                    storage->mSrgb = data->mSrgb;
+                    storage->mHandle = backend().createDeferredTexture(*data, sampling);
+                    if (!storage->mHandle)
+                        return;
+                    std::size_t bytes = 0;
+                    for (const auto& level : data->mLevels)
+                        bytes += level.mBytes.size();
+                    storage->mResidency.set(bytes);
+                    mUpgrade = { image, sampling, std::move(storage), mSerial };
+                }
+                if (mTextureUpgrades.find(image))
+                    mUpgrade.mSeen = mSerial;
+                auto budget = TextureUploadBytesPerFrame;
+                const bool complete = backend().stageTexture(mUpgrade.mStorage->mHandle, *data, budget);
+                mPrepare.mTextureStagedBytes += TextureUploadBytesPerFrame - budget;
+                if (!complete)
+                    return;
+                const auto key = std::tuple{ reinterpret_cast<std::uintptr_t>(image), sampling };
+                replaceTexture(key, mUpgrade.mStorage);
+                mImageVariants.store(*image, true, mUpgrade.mStorage);
+                ++mImageChanges;
+                mUpgrade = {};
+            }
+            catch (const std::exception& error)
+            {
+                if (mWarnings.insert(error.what()).second)
+                    Log(Debug::Warning) << "Vulkan texture upgrade: " << error.what();
+                mUpgrade = {};
+                if (const auto preview = imageStorage(*image, sampling, true); preview && preview->mPreview)
+                    preview->mUpgradeRetry = mSerial + 120;
+            }
+        }
+
+        using TextureKey = std::tuple<std::uintptr_t, Render::SamplerState>;
+        std::map<TextureKey, std::shared_ptr<GpuTexture>>::iterator replaceTexture(
+            const TextureKey& key, std::shared_ptr<GpuTexture> replacement)
+        {
+            if (const auto found = mTextures.find(key); found != mTextures.end() && found->second)
+                mReplacedTextures.emplace_back(found->second);
+            return mTextures.insert_or_assign(key, std::move(replacement)).first;
+        }
+
+        Render::TextureHandle importTexture(
+            const osg::Texture2D* source, bool gui, bool allowPreview, TextureBinding& binding)
         {
             if (!source)
                 return {};
@@ -688,16 +783,20 @@ namespace MWRender
                     : gui                                                              ? mTransparent
                                                                                        : Render::TextureHandle{};
             const auto sampling = RenderAssets::OsgImporter::importSampler(*source);
+            allowPreview = allowPreview && sampling.mUseMipmaps;
             const auto key = std::tuple{ reinterpret_cast<std::uintptr_t>(sourceImage), sampling };
             auto found = mTextures.find(key);
+            const bool preview = found != mTextures.end() && found->second && found->second->mPreview;
+            auto full = preview ? imageStorage(*sourceImage, sampling) : nullptr;
             if (found == mTextures.end() || !found->second || found->second->mImage.get() != sourceImage
-                || !found->second->mHandle || found->second->mRevision != sourceImage->getModifiedCount())
+                || !found->second->mHandle || found->second->mRevision != sourceImage->getModifiedCount()
+                || (preview && (!allowPreview || full)))
             {
                 PrepareTimer timer{ mPrepare.mTextures };
                 // Publish only a complete upload. A conversion/device failure
                 // must not leave a null cache entry for retirement to dereference.
                 std::shared_ptr<GpuTexture> replacement;
-                if (auto existingStorage = imageStorage(*sourceImage, sampling))
+                if (auto existingStorage = full ? std::move(full) : imageStorage(*sourceImage, sampling, allowPreview))
                 {
                     auto view = std::make_shared<GpuTexture>(backend());
                     view->mImage = sourceImage;
@@ -705,6 +804,7 @@ namespace MWRender
                     view->mStorage = std::move(existingStorage);
                     view->mFormat = view->mStorage->mFormat;
                     view->mSrgb = view->mStorage->mSrgb;
+                    view->mPreview = view->mStorage->mPreview;
                     {
                         PrepareTimer creation{ mPrepare.mTextureCreate };
                         view->mHandle = backend().createTextureSamplerView(view->mStorage->mHandle, sampling);
@@ -736,7 +836,7 @@ namespace MWRender
                             PrepareTimer conversion{ mPrepare.mTextureCpu };
                             converted = converted->mDecode ? converted->mDecode() : converted->mUncompressed;
                             if (!converted)
-                                throw std::runtime_error("Live texture has no supported device format");
+                                throw std::invalid_argument("Live texture has no supported device format");
                             data = convertedData(*converted, sampling.mUseMipmaps);
                         }
                     }
@@ -748,6 +848,17 @@ namespace MWRender
                     storage->mRevision = sourceImage->getModifiedCount();
                     storage->mFormat = data->mFormat;
                     storage->mSrgb = data->mSrgb;
+                    if (allowPreview && !converted && sourceImage->getDataVariance() != osg::Object::DYNAMIC
+                        && !sourceImage->getFileName().empty() && data->mLevels.size() > 1
+                        && data->mLevels.front().mBytes.size() > TextureUploadBytesPerFrame)
+                    {
+                        // A first appearance uses a complete authored mip tail.
+                        // The full image is staged across later frames.
+                        do
+                            data->mLevels = data->mLevels.subspan(1);
+                        while (data->mLevels.size() > 1 && data->mLevels.front().mBytes.size() > 256 * 1024);
+                        storage->mPreview = true;
+                    }
                     double createMs = 0;
                     {
                         PrepareTimer creation{ mPrepare.mTextureCreate };
@@ -758,7 +869,7 @@ namespace MWRender
                     }
                     consumedImage(*sourceImage, sampling.mUseMipmaps);
                     std::uint64_t bytes = 0;
-                    for (const auto& level : mLevels)
+                    for (const auto& level : data->mLevels)
                         bytes += level.mBytes.size();
                     mPrepare.mTextureStagedBytes += bytes;
                     if (createMs > mPrepare.mSlowestTextureMs)
@@ -768,7 +879,7 @@ namespace MWRender
                         mPrepare.mSlowestTextureWidth = data->mLevels.front().mWidth;
                         mPrepare.mSlowestTextureHeight = data->mLevels.front().mHeight;
                     }
-                    if (data->mGenerateMipmaps && mLevels.size() == 1)
+                    if (data->mGenerateMipmaps && data->mLevels.size() == 1)
                     {
                         auto width = mLevels.front().mWidth, height = mLevels.front().mHeight;
                         while (width > 1 || height > 1)
@@ -783,7 +894,7 @@ namespace MWRender
                     replacement = std::move(storage);
                     ++mImageChanges;
                 }
-                found = mTextures.insert_or_assign(key, std::move(replacement)).first;
+                found = replaceTexture(key, std::move(replacement));
             }
             auto& cached = *found->second;
             touchTexture(cached);
@@ -1000,6 +1111,9 @@ namespace MWRender
             mPlannedImageBytes = 0;
             mImagePlanIndices.beginFrame();
             mPlannedTextures.beginFrame();
+            mTextureUpgrades.beginFrame();
+            mUpgradeRequests.clear();
+            mPlannedComposites.clear();
         }
 
         void drawGui(
@@ -1059,7 +1173,9 @@ namespace MWRender
             int count = 0;
             if (!values || !countUniform || !countUniform->get(count) || count <= 0)
                 return {};
-            count = std::min({ count, 40, static_cast<int>(values->getNumElements()) });
+            count = std::min(count, static_cast<int>(values->getNumElements()));
+            if (!mPbrEnabled)
+                count = std::min(count, 40);
             auto& entry = mLightSets[values];
             if (entry.mSource.get() != values || entry.mRevision != values->getModifiedCount() || entry.mCount != count
                 || !entry.mLights)
@@ -1302,9 +1418,27 @@ namespace MWRender
             unsigned mUVUnit = 0;
             bool mLightsPrepared = false;
             bool mShadowsPrepared = false;
-            std::uint64_t mDrawFrame = 0, mImagesPlannedFrame = 0;
+            bool mStreamedDraw = false;
+            std::uint64_t mDrawFrame = 0;
+            std::array<std::uint64_t, 2> mImagesPlannedFrame{};
             std::uint64_t mTexturesFrame = 0;
             std::uint64_t mFrame = 0;
+            std::uint64_t mLocalRevision = 0, mParentRevision = 0, mPathRevision = 0;
+            struct PbrInputs
+            {
+                std::array<const osg::Texture2D*, 4> mMaps{};
+                std::array<std::optional<unsigned>, 4> mUnits{};
+                const RenderAssets::PbrMaterial* mAuthored = nullptr;
+                bool mTerrainSpecularAlpha = false;
+
+                bool hasInputs() const
+                {
+                    return mTerrainSpecularAlpha
+                        || (mAuthored && (mAuthored->mRoughness >= 0 || mAuthored->mMetalness > 0))
+                        || std::any_of(mMaps.begin(), mMaps.end(), [](const auto* map) { return map != nullptr; });
+                }
+            } mPbr;
+            std::uint64_t mPbrFrame = 0;
         };
 
         const MaterialTextures& materialTextures(State& cached)
@@ -1315,6 +1449,98 @@ namespace MWRender
                 cached.mTexturesFrame = mSerial;
             }
             return cached.mTextures;
+        }
+
+        const State::PbrInputs& pbrInputs(State& cached)
+        {
+            if (cached.mPbrFrame != mSerial)
+            {
+                cached.mPbr = resolvePbrInputs(cached.mState, materialTextures(cached).mDiffuse);
+                cached.mPbrFrame = mSerial;
+            }
+            return cached.mPbr;
+        }
+
+        static State::PbrInputs resolvePbrInputs(
+            const RenderAssets::OsgStateView& resolved, std::optional<unsigned> diffuse)
+        {
+            State::PbrInputs prepared;
+            const auto read = [&](std::string_view semantic, std::size_t slot) {
+                if (const auto unit = RenderAssets::textureUnit(resolved, semantic))
+                {
+                    prepared.mUnits[slot] = unit;
+                    prepared.mMaps[slot] = dynamic_cast<const osg::Texture2D*>(
+                        resolved.getTextureAttribute(*unit, osg::StateAttribute::TEXTURE));
+                }
+            };
+            read("normalMap", 0);
+            if (!prepared.mMaps[0])
+                read("normalHeightMap", 0);
+            read("specularMap", 1);
+            read("emissiveMap", 3);
+            if (const auto* specular = resolved.getUniform(NativeUniform::TerrainSpecularAlpha))
+                specular->get(prepared.mTerrainSpecularAlpha);
+            if (const auto* authored = static_cast<const RenderAssets::PbrMaterial*>(
+                    resolved.getAttribute(RenderAssets::PbrMaterial::AttributeType)))
+                if (diffuse)
+                    if (const auto* base = dynamic_cast<const osg::Texture2D*>(
+                            resolved.getTextureAttribute(*diffuse, osg::StateAttribute::TEXTURE));
+                        base && base->getImage() && base->getImage()->getFileName() == authored->mSource)
+                    {
+                        prepared.mAuthored = authored;
+                        prepared.mMaps[2] = authored->mProperties.get();
+                    }
+            return prepared;
+        }
+
+        void preparePbr(Render::Draw& draw, const State::PbrInputs& inputs, const RenderAssets::OsgStateView& state,
+            unsigned uvUnit, const osg::Geometry& geometry)
+        {
+            if (inputs.mAuthored)
+            {
+                draw.mRoughness = inputs.mAuthored->mRoughness;
+                draw.mMetalness = inputs.mAuthored->mMetalness;
+            }
+            draw.mTerrainSpecularAlpha = draw.mTerrainLayer && inputs.mTerrainSpecularAlpha;
+            for (std::size_t i = 0; i < inputs.mMaps.size(); ++i)
+            {
+                const auto* map = inputs.mMaps[i];
+                if (!map || !map->getImage() || !map->getImage()->data())
+                    continue;
+                // Close terrain and packed maps use diffuse-layer UVs. An
+                // object without a blend mask can also use its UV0 stream.
+                if (const auto unit = inputs.mUnits[i]; unit && !draw.mTerrainLayer && *unit != uvUnit)
+                {
+                    const auto* secondary = geometry.getTexCoordArray(0);
+                    const auto* coords = geometry.getTexCoordArray(*unit);
+                    if (!coords)
+                        coords = secondary;
+                    const auto transform = RenderAssets::textureTransform(state, *unit);
+                    if (coords != geometry.getTexCoordArray(uvUnit) || transform != draw.mUVTransform)
+                    {
+                        if (!secondary || coords != secondary || draw.mMaskTexture
+                            || (draw.mPbrAlternateUV && transform != draw.mMaskUVTransform))
+                            continue;
+                        draw.mPbrAlternateUV |= 1u << i;
+                        draw.mMaskUVTransform = transform;
+                    }
+                }
+                try
+                {
+                    draw.mPbrMaps[i] = texture(map, false, mStreamMaterialTextures && draw.mLighting);
+                }
+                catch (const std::invalid_argument& error)
+                {
+                    if (mWarnings.insert(error.what()).second)
+                        Log(Debug::Warning) << "Vulkan PBR material map: " << error.what();
+                    continue;
+                }
+                if (i == 0)
+                {
+                    const auto format = map->getImage()->getPixelFormat();
+                    draw.mNormalXY = format == GL_RG || format == GL_RG8 || format == GL_COMPRESSED_RG_RGTC2;
+                }
+            }
         }
 
         void prepareDraw(State& cached)
@@ -1346,7 +1572,7 @@ namespace MWRender
             {
                 auto* image = dynamic_cast<const osg::Texture2D*>(
                     resolved.getTextureAttribute(*diffuseUnit, osg::StateAttribute::TEXTURE));
-                draw.mTexture = texture(image, false);
+                draw.mTexture = texture(image, false, mStreamMaterialTextures && !water);
                 cached.mUVUnit = *diffuseUnit;
                 draw.mUVTransform = RenderAssets::textureTransform(resolved, cached.mUVUnit);
                 if (water)
@@ -1396,47 +1622,63 @@ namespace MWRender
             }
         };
 
-        using TransformKey = std::tuple<const osg::Matrixd*, const osg::Matrixd*, const osg::Uniform*, bool>;
+        using ProjectionKey = std::tuple<const osg::Matrixd*, const osg::Uniform*, bool>;
+        struct ProjectionHash
+        {
+            std::size_t operator()(const ProjectionKey& key) const
+            {
+                return (reinterpret_cast<std::uintptr_t>(std::get<0>(key)) >> 4)
+                    ^ reinterpret_cast<std::uintptr_t>(std::get<1>(key)) ^ static_cast<std::size_t>(std::get<2>(key));
+            }
+        };
+        struct Projection
+        {
+            osg::Matrixd mMatrix;
+            std::array<float, 4> mDepth;
+        };
+        using TransformKey = std::pair<const osg::Matrixd*, ProjectionKey>;
         struct TransformHash
         {
             std::size_t operator()(const TransformKey& key) const
             {
-                std::size_t value = 0;
-                const auto add = [&](const void* pointer) {
-                    value
-                        ^= (reinterpret_cast<std::uintptr_t>(pointer) >> 4) + 0x9e3779b9u + (value << 6) + (value >> 2);
-                };
-                add(std::get<0>(key));
-                add(std::get<1>(key));
-                add(std::get<2>(key));
-                value ^= static_cast<std::size_t>(std::get<3>(key)) * 0x9e3779b9u;
-                return value;
+                const std::size_t projection = ProjectionHash{}(key.second);
+                return (reinterpret_cast<std::uintptr_t>(key.first) >> 4)
+                    ^ (projection + 0x9e3779b9u + (projection << 6));
             }
         };
         struct Transform
         {
             osg::Matrixd mProjection;
             Render::Matrix mClip{}, mView{}, mNormal = Render::IdentityMatrix;
+            std::array<float, 4> mDepthProjection{};
             bool mInvertible = false;
         };
         const Transform& transform(const osgUtil::RenderLeaf& leaf, const RenderAssets::OsgStateView& state)
         {
-            auto [entry, inserted] = mTransforms.getOrCreate({ leaf._modelview.get(), leaf._projection.get(),
-                state.getUniform(NativeUniform::ProjectionMatrix), mShadowCasting });
+            const ProjectionKey projectionKey{ leaf._projection.get(),
+                state.getUniform(NativeUniform::ProjectionMatrix), mShadowCasting };
+            auto [entry, inserted] = mTransforms.getOrCreate({ leaf._modelview.get(), projectionKey });
             if (inserted)
             {
                 PrepareTimer timer{ mPrepare.mTransformWork };
                 ++mPrepare.mTransforms;
-                if (mShadowCasting)
+                auto [projection, newProjection] = mProjections.getOrCreate(projectionKey);
+                if (newProjection)
                 {
-                    osg::Matrixd depth;
-                    depth(2, 2) = .5;
-                    depth(3, 2) = .5;
-                    entry.mProjection = *leaf._projection * depth;
+                    if (mShadowCasting)
+                    {
+                        osg::Matrixd depth;
+                        depth(2, 2) = .5;
+                        depth(3, 2) = .5;
+                        projection.mMatrix = *leaf._projection * depth;
+                    }
+                    else
+                        projection.mMatrix = RenderAssets::clipProjection(
+                            state, *leaf._projection, SceneUtil::AutoDepth::isReversed(), true);
+                    projection.mDepth = RenderAssets::depthCoefficients(projection.mMatrix, true);
                 }
-                else
-                    entry.mProjection = RenderAssets::clipProjection(
-                        state, *leaf._projection, SceneUtil::AutoDepth::isReversed(), true);
+                entry.mProjection = projection.mMatrix;
+                entry.mDepthProjection = projection.mDepth;
                 entry.mClip = matrix(*leaf._modelview * entry.mProjection);
                 entry.mView = matrix(*leaf._modelview);
                 entry.mNormal = Render::IdentityMatrix;
@@ -1452,6 +1694,25 @@ namespace MWRender
             return entry;
         }
 
+        std::uint64_t bindingRevision(const osg::StateSet* local)
+        {
+            if (!local)
+                return 0;
+            auto& entry = mBindings[local];
+            if (entry.mSource.get() != local || entry.mFrame != mSerial)
+            {
+                RenderAssets::collectNativeBindings(*local, mBindingScratch);
+                if (entry.mSource.get() != local || entry.mBindings != mBindingScratch)
+                {
+                    entry.mBindings.swap(mBindingScratch);
+                    entry.mSource = local;
+                    entry.mRevision = ++mBindingRevision;
+                }
+                entry.mFrame = mSerial;
+            }
+            return entry.mRevision;
+        }
+
         State& state(osgUtil::StateGraph* graph)
         {
             if (!graph)
@@ -1459,10 +1720,19 @@ namespace MWRender
             auto& entry = mStates[graph];
             if (entry.mFrame != mSerial)
             {
-                const auto& parent = state(graph->_parent).mState;
-                entry.mState.bind(&parent, graph->getStateSet());
-                entry.mState.prepareNativeState();
-                ++mPrepare.mStateBindings;
+                const auto& parent = state(graph->_parent);
+                const auto* local = graph->getStateSet();
+                const auto revision = bindingRevision(local);
+                if (entry.mState.parent() != &parent.mState || entry.mLocalRevision != revision
+                    || entry.mParentRevision != parent.mPathRevision)
+                {
+                    entry.mState.bind(&parent.mState, local);
+                    entry.mState.prepareNativeState();
+                    entry.mLocalRevision = revision;
+                    entry.mParentRevision = parent.mPathRevision;
+                    entry.mPathRevision = ++mBindingRevision;
+                    ++mPrepare.mStateBindings;
+                }
                 entry.mFrame = mSerial;
             }
             return entry;
@@ -1506,6 +1776,9 @@ namespace MWRender
             std::uint64_t mQueued = 0;
             bool mReady = false;
             std::uint64_t mPreparedFrame = 0;
+            std::array<std::unique_ptr<GpuTexture>, 2> mPbrTextures{};
+            bool mPbrReady = false;
+            std::uint64_t mPreparedPbrFrame = 0;
         };
 
         void planComposite(const std::shared_ptr<Terrain::CompositeMap>& source)
@@ -1515,9 +1788,18 @@ namespace MWRender
             auto& record = mComposites[source.get()];
             if (record.mSource.lock() != source)
                 record = { source, 0, false, 0 };
-            if (record.mReady || record.mPreparedFrame == mSerial)
+            if ((record.mReady && (!mPbrEnabled || record.mPbrReady)) || record.mPreparedFrame == mSerial)
                 return;
             record.mPreparedFrame = mSerial;
+            const bool preparePbr = mPbrEnabled && !record.mPbrReady && mPbrCompositeBudget > 0;
+            if (preparePbr)
+            {
+                --mPbrCompositeBudget;
+                record.mPreparedPbrFrame = mSerial;
+            }
+            if (record.mReady && !preparePbr)
+                return;
+            mPlannedComposites.push_back(source);
             for (const auto& drawable : source->mDrawables)
             {
                 if (!drawable)
@@ -1527,7 +1809,11 @@ namespace MWRender
                 if (geometry && geometry->getVertexArray() && state)
                 {
                     planMaterialImages(*state, false);
-                    planMesh(*geometry, RenderAssets::textureUnit(*state, "diffuseMap").value_or(0));
+                    const auto diffuse = RenderAssets::textureUnit(*state, "diffuseMap");
+                    if (preparePbr)
+                        for (const auto* map : resolvePbrInputs({ nullptr, state }, diffuse).mMaps)
+                            planTexture(map);
+                    planMesh(*geometry, diffuse.value_or(0));
                 }
             }
         }
@@ -1539,16 +1825,22 @@ namespace MWRender
             auto& record = mComposites[source.get()];
             if (record.mSource.lock() != source)
                 record = { source, 0, false, 0 };
-            if (record.mReady || record.mQueued == mSerial)
+            const bool bakePbr = record.mPreparedPbrFrame == mSerial;
+            if ((record.mReady && !bakePbr) || record.mQueued == mSerial)
                 return;
-            if (mCompositeViewCount == mCompositeViews.size())
-                mCompositeViews.emplace_back();
-            auto& view = mCompositeViews[mCompositeViewCount];
-            view.mDraws.clear();
-            view.mTarget = target(*source->mTexture);
-            view.mColor = { 0, 0, 0, 1 };
-            view.mViewport = {};
-            view.mClear = true;
+            struct PendingViews
+            {
+                std::size_t& mCount;
+                std::size_t mStart;
+                bool mPublished = false;
+                ~PendingViews()
+                {
+                    if (!mPublished)
+                        mCount = mStart;
+                }
+            } pending{ mCompositeViewCount, mCompositeViewCount };
+            auto& layers = mCompositeLayers;
+            layers.clear();
             for (const auto& drawable : source->mDrawables)
             {
                 if (!drawable)
@@ -1583,37 +1875,95 @@ namespace MWRender
                 draw.mDoubleSided = true;
                 draw.mLighting = false;
                 draw.mFogEnd = 0;
-                view.mDraws.push_back(std::move(draw));
+                if (bakePbr)
+                {
+                    const RenderAssets::OsgStateView resolved(nullptr, state);
+                    draw.mTerrainLayer = true;
+                    preparePbr(draw, resolvePbrInputs(resolved, diffuseUnit), resolved, unit, *geometry);
+                }
+                layers.push_back(std::move(draw));
             }
-            record.mQueued = mSerial;
-            ++mCompositeViewCount;
+            if (!record.mReady)
+            {
+                auto& albedo = newCompositeView(mCompositeViewCount++);
+                albedo.mTarget = target(*source->mTexture);
+                albedo.mDraws = layers;
+            }
+            if (bakePbr)
+            {
+                const bool bakeProperties = std::any_of(layers.begin(), layers.end(), [](const auto& draw) {
+                    return draw.mTerrainSpecularAlpha || draw.mRoughness >= 0 || draw.mMetalness > 0
+                        || draw.mPbrMaps[2];
+                });
+                // Each packed properties bake needs the blended specular weights,
+                // even if no layer supplies a normal map.
+                const bool bakeNormalAndWeight = bakeProperties
+                    || std::any_of(layers.begin(), layers.end(),
+                        [](const auto& draw) { return static_cast<bool>(draw.mPbrMaps[0]); });
+                for (unsigned i = 0; i < record.mPbrTextures.size(); ++i)
+                {
+                    const bool normal = i == 0;
+                    if (!(normal ? bakeNormalAndWeight : bakeProperties))
+                        continue;
+                    if (!record.mPbrTextures[i])
+                    {
+                        auto result = std::make_unique<GpuTexture>(backend());
+                        Render::SamplerState sampling;
+                        sampling.mWrapS = sampling.mWrapT = Render::TextureWrap::Clamp;
+                        const auto width = std::max(source->mTexture->getTextureWidth() / 2, 1);
+                        const auto height = std::max(source->mTexture->getTextureHeight() / 2, 1);
+                        result->mHandle = backend().createRenderTarget(
+                            width, height, sampling, Render::TargetFormat::ColorRGBA8, true);
+                        record.mPbrTextures[i] = std::move(result);
+                    }
+                    auto& bake = newCompositeView(mCompositeViewCount++);
+                    bake.mTarget = record.mPbrTextures[i]->mHandle;
+                    bake.mPbrComposite = true;
+                    bake.mDraws = layers;
+                    for (auto& draw : bake.mDraws)
+                        draw.mPbrBake = normal ? Render::Draw::PbrBake::Normal : Render::Draw::PbrBake::Properties;
+                }
+            }
             mSubmittedComposites.push_back(source);
+            record.mQueued = mSerial;
+            pending.mPublished = true;
         }
 
-        void leaf(const osgUtil::RenderLeaf& leaf, std::vector<Render::Draw>& draws, bool sky,
-            State* preparedState = nullptr, GpuMesh* preparedMesh = nullptr)
+        struct LeafRequest
         {
-            const auto* geometry = leaf.getDrawable()->asGeometry();
-            const auto* particleSystem = dynamic_cast<const osgParticle::ParticleSystem*>(leaf.getDrawable());
-            if ((!geometry || !geometry->getVertexArray()) && !particleSystem)
-                return;
-            auto& cached = preparedState ? *preparedState : state(leaf._parent);
+            const osgUtil::RenderLeaf* mLeaf;
+            const osg::Geometry* mGeometry;
+            const Terrain::TerrainDrawable* mTerrain;
+            const osgParticle::ParticleSystem* mParticles;
+            State* mState;
+            GpuMesh* mMesh;
+            bool mSky, mProjection, mDistortion = false;
+        };
+
+        void leaf(const LeafRequest& request, std::vector<Render::Draw>& draws)
+        {
+            const auto& leaf = *request.mLeaf;
+            auto& cached = *request.mState;
+            const auto* geometry = request.mGeometry;
+            const auto* terrain = request.mTerrain;
+            const auto* particleSystem = request.mParticles;
+            auto* preparedMesh = request.mMesh;
+            const bool sky = request.mSky;
             const auto& resolved = cached.mState;
-            if (const auto* mask
-                = dynamic_cast<const osg::ColorMask*>(resolved.getAttribute(osg::StateAttribute::COLORMASK));
-                !mShadowCasting && mask && !mask->getRedMask() && !mask->getGreenMask() && !mask->getBlueMask()
-                && !mask->getAlphaMask())
-                return; // GL occlusion-query proxies have no visible output.
             try
             {
-                const auto* terrain = dynamic_cast<const Terrain::TerrainDrawable*>(geometry);
-                if (terrain)
-                    bakeComposite(terrain->getCompositeMap());
-                if (cached.mDrawFrame != mSerial)
+                if (!mShadowCasting && terrain && terrain->getCompositeMap())
+                {
+                    const auto record = mComposites.find(terrain->getCompositeMap().get());
+                    if (record == mComposites.end() || (!record->second.mReady && record->second.mQueued != mSerial))
+                        return;
+                }
+                if (cached.mDrawFrame != mSerial || cached.mStreamedDraw != mStreamMaterialTextures)
                 {
                     cached.mDraw = {};
                     prepareDraw(cached);
                     cached.mDrawFrame = mSerial;
+                    cached.mStreamedDraw = mStreamMaterialTextures;
                 }
                 Render::Draw draw = cached.mDraw;
                 draw.mTerrainLayer = terrain != nullptr;
@@ -1637,7 +1987,7 @@ namespace MWRender
                 const auto& transforms = transform(leaf, resolved);
                 const auto& projection = transforms.mProjection;
                 if (water)
-                    draw.mWaterProjection = RenderAssets::depthCoefficients(projection, true);
+                    draw.mWaterProjection = transforms.mDepthProjection;
                 if (mProjectionOutput && !mProjectionOutput->has_value() && !sky)
                 {
                     // The native effect API uses reverse, zero-to-one depth.
@@ -1646,7 +1996,7 @@ namespace MWRender
                 draw.mClipFromModel = particleSystem ? matrix(projection) : transforms.mClip;
                 draw.mViewFromModel = particleSystem ? Render::IdentityMatrix : transforms.mView;
                 draw.mNormalFromModel = transforms.mNormal;
-                draw.mDepthProjection = RenderAssets::depthCoefficients(projection, true);
+                draw.mDepthProjection = transforms.mDepthProjection;
                 if (transforms.mInvertible)
                 {
                     if (geometry && geometry->getNormalArray() && !sky && !water)
@@ -1660,6 +2010,28 @@ namespace MWRender
                         draw.mLighting
                             = RenderAssets::nativeUniform(resolved, NativeUniform::SunDiffuse) || draw.mLights;
                     }
+                }
+                if (mPbrEnabled && !mShadowCasting && !particleSystem && geometry && draw.mLighting
+                    && (draw.mTerrainLayer || draw.mBlend == Render::BlendMode::Opaque
+                        || draw.mBlend == Render::BlendMode::Alpha))
+                {
+                    const auto& inputs = pbrInputs(cached);
+                    if (inputs.hasInputs())
+                        preparePbr(draw, inputs, resolved, uvUnit, *geometry);
+                    if (terrain && terrain->getCompositeMap())
+                        if (const auto record = mComposites.find(terrain->getCompositeMap().get());
+                            record != mComposites.end() && (record->second.mPbrReady
+                                || (record->second.mQueued == mSerial && record->second.mPreparedPbrFrame == mSerial)))
+                            for (unsigned i = 0; i < record->second.mPbrTextures.size(); ++i)
+                                if (const auto& image = record->second.mPbrTextures[i])
+                                {
+                                    draw.mPbrMaps[i * 2] = image->mHandle;
+                                    if (i == 0)
+                                        draw.mNormalXY = draw.mPbrBakedTerrain = true;
+                                }
+                    draw.mPbr = draw.mTerrainSpecularAlpha || draw.mRoughness >= 0 || draw.mMetalness > 0
+                        || std::any_of(draw.mPbrMaps.begin(), draw.mPbrMaps.end(),
+                            [](auto map) { return static_cast<bool>(map); });
                 }
                 if (particleSystem)
                 {
@@ -1749,13 +2121,6 @@ namespace MWRender
             }
         }
 
-        struct LeafRequest
-        {
-            const osgUtil::RenderLeaf* mLeaf;
-            State* mState;
-            GpuMesh* mMesh;
-            bool mSky, mProjection, mDistortion = false;
-        };
         struct DrawPlan
         {
             std::vector<LeafRequest> mLeaves;
@@ -1770,7 +2135,7 @@ namespace MWRender
         void queueLeaf(const osgUtil::RenderLeaf& leaf, DrawPlan& plan, bool sky)
         {
             const auto* geometry = leaf.getDrawable()->asGeometry();
-            const auto* particle = dynamic_cast<const osgParticle::ParticleSystem*>(leaf.getDrawable());
+            const auto* particle = geometry ? nullptr : dynamic_cast<const osgParticle::ParticleSystem*>(leaf.getDrawable());
             if ((!geometry || !geometry->getVertexArray()) && !particle)
                 return;
             auto& cached = [&]() -> State& {
@@ -1782,26 +2147,32 @@ namespace MWRender
                 = dynamic_cast<const osg::ColorMask*>(resolved.getAttribute(osg::StateAttribute::COLORMASK));
                 !mShadowCasting && mask && !mask->getRedMask() && !mask->getGreenMask() && !mask->getBlueMask()
                 && !mask->getAlphaMask())
-                return;
-            if (cached.mImagesPlannedFrame != mSerial)
+                return; // GL occlusion-query proxies have no visible output.
+            auto& imagesPlanned = cached.mImagesPlannedFrame[mStreamMaterialTextures];
+            if (imagesPlanned != mSerial)
             {
                 try
                 {
-                    planMaterialImages(resolved, sky, &materialTextures(cached));
+                    planMaterialImages(resolved, sky, &materialTextures(cached), mStreamMaterialTextures);
                 }
                 catch (const std::invalid_argument&)
                 {
                     // Preserve the owner-thread draw diagnostic.
                 }
-                cached.mImagesPlannedFrame = mSerial;
+                imagesPlanned = mSerial;
             }
             GpuMesh* mesh = nullptr;
+            const auto* terrain = dynamic_cast<const Terrain::TerrainDrawable*>(geometry);
             if (geometry && !particle)
             {
                 try
                 {
-                    if (const auto* terrain = dynamic_cast<const Terrain::TerrainDrawable*>(geometry))
+                    if (terrain && !mShadowCasting)
                         planComposite(terrain->getCompositeMap());
+                    if (mPbrEnabled && !mShadowCasting && !sky && !materialTextures(cached).mWater
+                        && cached.mPbrFrame != mSerial && geometry->getNormalArray())
+                        for (const auto* map : pbrInputs(cached).mMaps)
+                            planTexture(map, mStreamMaterialTextures);
                     const auto uv = materialTextures(cached).mDiffuse.value_or(0);
                     PrepareTimer timer{ mPrepare.mGeometryPlan };
                     mesh = &planMesh(*geometry, uv);
@@ -1812,7 +2183,7 @@ namespace MWRender
                 }
             }
             Render::reserveFor(plan.mLeaves, plan.mLeaves.size() + 1);
-            plan.mLeaves.push_back({ &leaf, &cached, mesh, sky, mProjectionOutput != nullptr });
+            plan.mLeaves.push_back({ &leaf, geometry, terrain, particle, &cached, mesh, sky, mProjectionOutput != nullptr });
         }
 
         void bin(osgUtil::RenderBin& bin, DrawPlan& plan, bool parentSky = false)
@@ -1866,8 +2237,23 @@ namespace MWRender
             std::array<std::uint32_t, 4> mViewport{};
             bool mClear = true;
             bool mReversedDepth = true;
+            bool mPbrComposite = false;
+            bool mStreamTextures = false;
             Render::SceneEnvironment mEnvironment;
         };
+
+        CapturedView& newCompositeView(std::size_t index)
+        {
+            if (index == mCompositeViews.size())
+                mCompositeViews.emplace_back();
+            auto& view = mCompositeViews[index];
+            view.mDraws.clear();
+            view.mColor = { 0, 0, 0, 1 };
+            view.mViewport = {};
+            view.mClear = true;
+            view.mPbrComposite = false;
+            return view;
+        }
 
         void assemble(DrawPlan& plan, std::vector<Render::Draw>& draws, CapturedView& view)
         {
@@ -1879,12 +2265,13 @@ namespace MWRender
                 const auto& request = plan.mLeaves[i];
                 mProjectionOutput = request.mProjection ? &view.mProjection : nullptr;
                 const auto begin = draws.size();
-                leaf(*request.mLeaf, draws, request.mSky, request.mState, request.mMesh);
+                leaf(request, draws);
                 if (request.mDistortion)
                     for (auto j = begin; j < draws.size(); ++j)
                     {
                         draws[j].mDistortion = true;
                         draws[j].mLighting = false;
+                        draws[j].mPbr = false;
                         draws[j].mFogEnd = 0;
                         draws[j].mDepthWrite = false;
                     }
@@ -1934,6 +2321,22 @@ namespace MWRender
                     this);
                 mPrepare.mImageConversions += mImageJobs.size();
             }
+            {
+                PrepareTimer timer{ mPrepare.mTextures };
+                stageTextureUpgrades();
+            }
+            for (const auto& composite : mPlannedComposites)
+            {
+                try
+                {
+                    bakeComposite(composite);
+                }
+                catch (const std::invalid_argument& error)
+                {
+                    if (mWarnings.insert(error.what()).second)
+                        Log(Debug::Warning) << "Vulkan terrain composite: " << error.what();
+                }
+            }
             for (std::size_t i = 0; i < mViewCount; ++i)
             {
                 auto& view = mViews[i];
@@ -1941,6 +2344,7 @@ namespace MWRender
                 mParticleOccurrences.clear();
                 mClipPlane = view.mClip;
                 mShadowCasting = !view.mReversedDepth;
+                mStreamMaterialTextures = view.mStreamTextures;
                 assemble(view.mScenePlan, view.mDraws, view);
                 assemble(view.mDistortionPlan, view.mDistortion, view);
                 std::erase_if(view.mDraws, [&](const auto& draw) {
@@ -1949,6 +2353,7 @@ namespace MWRender
                 mShadowCasting = false;
                 mProjectionOutput = nullptr;
             }
+            mStreamMaterialTextures = false;
             mClipPlane.reset();
         }
 
@@ -2052,6 +2457,7 @@ namespace MWRender
                     view.mTarget = target(
                         *colorTarget, view.mViewport[0] + view.mViewport[2], view.mViewport[1] + view.mViewport[3]);
                 view.mStage = &stage;
+                view.mStreamTextures = window || (camera && camera->getName() == Constants::WaterReflectionCamera);
                 mClipPlane.reset();
                 for (const auto& [attribute, transform] : stage.getPositionalStateContainer()->getAttrMatrixList())
                     if (const auto* clip = dynamic_cast<const osg::ClipPlane*>(attribute.get());
@@ -2073,8 +2479,10 @@ namespace MWRender
                 mProjectionOutput = shadow ? nullptr : &view.mProjection;
                 mDistortionOutput = shadow ? nullptr : &view.mDistortionPlan;
                 mShadowCasting = shadow;
+                mStreamMaterialTextures = view.mStreamTextures;
                 bin(stage, view.mScenePlan);
                 mShadowCasting = false;
+                mStreamMaterialTextures = false;
                 mDistortionOutput = nullptr;
                 mProjectionOutput = nullptr;
             }
@@ -2113,11 +2521,23 @@ namespace MWRender
             {
                 mNextSlowFrameReport = now + std::chrono::seconds(5);
                 const auto& phases = timing.mMilliseconds;
+                std::size_t pbrDraws = 0, reflectionDraws = 0;
+                if (mFrameSubmitted)
+                    for (std::size_t index = 0; index < mViewCount; ++index)
+                    {
+                        const auto& view = mViews[index];
+                        const auto* camera = view.mStage->getCamera();
+                        if (camera && camera->getName() == Constants::WaterReflectionCamera)
+                            reflectionDraws += view.mDraws.size();
+                        pbrDraws += std::count_if(
+                            view.mDraws.begin(), view.mDraws.end(), [](const auto& draw) { return draw.mPbr; });
+                    }
                 Log(Debug::Warning) << "Vulkan slow frame: renderer=" << total << "ms, outside=" << outside
                                     << "ms, ready=" << phases[0] << "ms, cull=" << phases[1]
                                     << "ms, prepare=" << phases[2] << "ms, submit=" << phases[3]
                                     << "ms, retire=" << phases[4] << "ms, since submit=" << sinceSubmit
                                     << "ms, last submitted draws=" << mLastSubmittedDraws << ", views=" << mViewCount
+                                    << ", PBR scene draws=" << pbrDraws << ", reflection draws=" << reflectionDraws
                                     << ", composites=" << mCompositeViewCount << ", mesh uploads=" << mMeshChanges
                                     << ", image uploads=" << mImageChanges << ", retirement cache=" << mRetireName
                                     << ", retired=" << mRetired << ", prepare scene=" << mPrepare.mScene
@@ -2164,22 +2584,30 @@ namespace MWRender
                 const FrameTiming& mTiming;
                 ~Report() { mOwner.reportSlowFrame(mTiming); }
             } report{ *this, timing };
-            struct ClearPlans
+            struct EndFrame
             {
                 Impl& mOwner;
-                ~ClearPlans() { mOwner.clearAssetPlans(); }
-            } clear{ *this };
+                ~EndFrame()
+                {
+                    mOwner.clearAssetPlans();
+                    // CPU preparation is cleared before renderPasses, but draw
+                    // handles must remain valid until the backend retains them.
+                    mOwner.mReplacedTextures.clear();
+                }
+            } endFrame{ *this };
             mFrameSubmitted = false;
             mMeshChanges = 0;
             mImageChanges = 0;
             mPrepare = {};
             mViewCount = 0;
             mCompositeViewCount = 0;
+            mPbrCompositeBudget = 4;
             const bool ready = backend().ready();
             timing.finish(0);
             if (!ready)
                 return;
             ++mSerial;
+            mProjections.beginFrame();
             mTransforms.beginFrame();
             mShadowSetsUsed = 0;
             mMeshResidency.beginFrame();
@@ -2231,6 +2659,11 @@ namespace MWRender
                 {
                     const auto& view = mCompositeViews[i];
                     mPasses.push_back({ view.mDraws, view.mTarget, view.mColor, view.mClear, view.mViewport });
+                    if (view.mPbrComposite)
+                    {
+                        mPasses.back().mGenerateMipmaps = true;
+                        mPasses.back().mLabel = "Terrain material bake";
+                    }
                 }
                 for (std::size_t i = 0; i < mViewCount; ++i)
                 {
@@ -2306,16 +2739,28 @@ namespace MWRender
                     mLastSubmittedDraws += pass.mDraws.size();
                 for (const auto& composite : mSubmittedComposites)
                 {
-                    mComposites.at(composite.get()).mReady = true;
-                    composite->mCompiled = composite->mDrawables.size();
-                    composite->mDrawables.clear();
+                    auto& record = mComposites.at(composite.get());
+                    record.mReady = true;
+                    record.mPbrReady |= record.mPreparedPbrFrame == mSerial;
+                    if (record.mPbrReady || !mPbrEnabled)
+                    {
+                        composite->mCompiled = composite->mDrawables.size();
+                        composite->mDrawables.clear();
+                    }
                 }
             }
             const auto deadline = FrameTiming::Clock::now() + std::chrono::milliseconds(1);
             const auto stop = [&] { return FrameTiming::Clock::now() >= deadline; };
             const auto expired = [&](const auto& item) { return item.second->mSeen + 16 < mSerial; };
-            switch (mRetireCategory++ % 11)
+            switch (mRetireCategory++ % 12)
             {
+                case 11:
+                    mRetireName = "state bindings";
+                    mRetired = mNativeBindingSweep.sweep(mBindings, [&](const auto& item) {
+                        return !item.second.mSource.valid()
+                            || item.second.mFrame + (mBindings.size() > 8192 ? 16 : 600) < mSerial;
+                    }, stop);
+                    break;
                 case 10:
                     mRetireName = "image variants";
                     mRetired = mImageVariants.sweep(stop);
@@ -2400,7 +2845,7 @@ namespace MWRender
                         mTextureBindings,
                         [&](const auto& item) {
                             return !item.second.mSource.valid()
-                                || std::max(item.second.mFrame[0], item.second.mFrame[1])
+                                || *std::max_element(item.second.mFrame.begin(), item.second.mFrame.end())
                                     + (mTextureBindings.size() > 8192 ? 16 : 600)
                                 < mSerial;
                         },
@@ -2426,6 +2871,7 @@ namespace MWRender
 
         osgViewer::Viewer& mViewer;
         SDL_Window* mWindow;
+        const bool mPbrEnabled;
         // Module outlives every cache containing its resource handles.
         std::unique_ptr<Render::BackendModule> mModule;
         osg::ref_ptr<NativeRenderer> mRenderer;
@@ -2436,7 +2882,7 @@ namespace MWRender
         std::vector<std::size_t> mImageJobs;
         std::size_t mPlannedImageBytes = 0;
         Render::FrameCache<const osg::Image*, std::size_t> mImagePlanIndices;
-        Render::FrameCache<const osg::Texture2D*, bool> mPlannedTextures;
+        Render::FrameCache<const osg::Texture2D*, unsigned char> mPlannedTextures;
         Render::Residency mMeshResidency{ 64 * 1024 * 1024 };
         Render::Residency mTextureResidency{ 256 * 1024 * 1024 };
         RenderAssets::OsgImporter mImporter;
@@ -2452,10 +2898,32 @@ namespace MWRender
             mParticleMeshes;
         std::map<const osgParticle::ParticleSystem*, unsigned> mParticleOccurrences;
         const osgUtil::RenderStage* mCurrentStage = nullptr;
-        std::map<std::tuple<std::uintptr_t, Render::SamplerState>, std::shared_ptr<GpuTexture>> mTextures;
+        std::map<TextureKey, std::shared_ptr<GpuTexture>> mTextures;
         RenderAssets::ImageVariants<GpuTexture> mImageVariants;
+        static constexpr std::size_t TextureUploadBytesPerFrame = 4 * 1024 * 1024;
+        bool mStreamMaterialTextures = false;
+        struct TextureUpgrade
+        {
+            osg::observer_ptr<const osg::Image> mImage;
+            Render::SamplerState mSampling;
+            std::shared_ptr<GpuTexture> mStorage;
+            std::uint64_t mSeen = 0;
+        } mUpgrade;
+        Render::FrameCache<const osg::Image*, bool> mTextureUpgrades;
+        std::vector<std::pair<osg::ref_ptr<const osg::Image>, Render::SamplerState>> mUpgradeRequests;
+        std::vector<std::shared_ptr<GpuTexture>> mReplacedTextures;
         std::unordered_map<const osg::Texture2D*, TextureBinding> mTextureBindings;
         std::unordered_map<osgUtil::StateGraph*, State> mStates;
+        struct BindingRecord
+        {
+            osg::observer_ptr<const osg::StateSet> mSource;
+            RenderAssets::NativeBindings mBindings;
+            std::uint64_t mFrame = 0, mRevision = 0;
+        };
+        std::unordered_map<const osg::StateSet*, BindingRecord> mBindings;
+        RenderAssets::NativeBindings mBindingScratch;
+        std::uint64_t mBindingRevision = 0;
+        Render::FrameCache<ProjectionKey, Projection, ProjectionHash> mProjections;
         Render::FrameCache<TransformKey, Transform, TransformHash> mTransforms;
         struct LightRecord
         {
@@ -2470,6 +2938,9 @@ namespace MWRender
         Render::TextureHandle mTransparent;
         std::vector<CapturedView> mViews;
         std::vector<CapturedView> mCompositeViews;
+        std::vector<Render::Draw> mCompositeLayers;
+        unsigned mPbrCompositeBudget = 0;
+        std::vector<std::shared_ptr<Terrain::CompositeMap>> mPlannedComposites;
         std::size_t mCompositeViewCount = 0;
         std::map<const Terrain::CompositeMap*, CompositeRecord> mComposites;
         std::vector<std::shared_ptr<Terrain::CompositeMap>> mSubmittedComposites;
@@ -2502,6 +2973,7 @@ namespace MWRender
         Render::CacheSweep<decltype(mTargets)> mTargetSweep;
         Render::CacheSweep<decltype(mLightSets)> mLightSweep;
         Render::CacheSweep<decltype(mStates)> mStateSweep;
+        Render::CacheSweep<decltype(mBindings)> mNativeBindingSweep;
         Render::CacheSweep<decltype(mComposites)> mCompositeSweep;
         unsigned mRetireCategory = 0;
         const char* mRetireName = "none";

@@ -20,6 +20,7 @@ namespace Settings
 
         SettingValue<bool> mForcePerPixelLighting{ mIndex, "Shaders", "force per pixel lighting" };
         SettingValue<bool> mClampLighting{ mIndex, "Shaders", "clamp lighting" };
+        SettingValue<bool> mNativePbr{ mIndex, "Shaders", "native pbr" };
         SettingValue<float> mNativeHemisphereLightingStrength{ mIndex, "Shaders", "native hemisphere lighting strength",
             makeClampSanitizerFloat(0, 1) };
         SettingValue<bool> mParticlePointLighting{ mIndex, "Shaders", "particle point lighting" };

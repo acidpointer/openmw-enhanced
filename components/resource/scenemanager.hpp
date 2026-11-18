@@ -47,6 +47,11 @@ namespace Shader
     class ShaderVisitor;
 }
 
+namespace RenderAssets
+{
+    class PbrMaterialCache;
+}
+
 namespace Resource
 {
     /// @brief Handles loading and caching of scenes, e.g. .nif files or .osg files
@@ -162,6 +167,7 @@ namespace Resource
         osgUtil::IncrementalCompileOperation* getIncrementalCompileOperation();
 
         Resource::ImageManager* getImageManager();
+        RenderAssets::PbrMaterialCache& getPbrMaterials() { return *mPbrMaterials; }
 
         /// @param mask The node mask to apply to loaded particle system nodes.
         void setParticleSystemMask(unsigned int mask);
@@ -211,6 +217,7 @@ namespace Resource
         osg::ref_ptr<Resource::SharedStateManager> mSharedStateManager;
 
         Resource::ImageManager* mImageManager;
+        std::unique_ptr<RenderAssets::PbrMaterialCache> mPbrMaterials;
         Resource::NifFileManager* mNifFileManager;
         Resource::BgsmFileManager* mBgsmFileManager;
         osg::ref_ptr<osgUtil::IncrementalCompileOperation> mIncrementalCompileOperation;

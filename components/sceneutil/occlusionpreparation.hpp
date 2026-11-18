@@ -43,6 +43,8 @@ namespace SceneUtil
         }
         void apply(osg::Group& node) override
         {
+            if (!canPrepare())
+                return;
             for (auto* callback = node.getCullCallback(); callback; callback = callback->getNestedCallback())
                 if (auto* source = dynamic_cast<OcclusionSource*>(callback))
                 {
@@ -54,7 +56,7 @@ namespace SceneUtil
         }
         void apply(osg::Transform& node) override
         {
-            if (node.getReferenceFrame() != osg::Transform::RELATIVE_RF)
+            if (!canPrepare() || node.getReferenceFrame() != osg::Transform::RELATIVE_RF)
                 return;
             const auto previous = mMatrix;
             const auto previousInverse = mInverse;
@@ -72,6 +74,7 @@ namespace SceneUtil
             if (node.getRangeMode() == osg::LOD::DISTANCE_FROM_EYE_POINT)
                 apply(static_cast<osg::Group&>(node));
         }
+        bool canPrepare() const override { return mPlan.canGather(); }
 
     private:
         OcclusionPlan& mPlan;

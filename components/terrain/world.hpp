@@ -107,8 +107,8 @@ namespace Terrain
 
         Storage* getStorage() { return mStorage; }
 
-        void enableHeightCullCallback(bool enable);
-        osg::Callback* getHeightCullCallback(float highz, unsigned int mask);
+        void enableHeightCullCallback(bool enable, bool perView);
+        HeightCullCallback* getHeightCullCallback(float highz, unsigned int mask);
 
         void setActiveGrid(const osg::Vec4i& grid) { mActiveGrid = grid; }
 
