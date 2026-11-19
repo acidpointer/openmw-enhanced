@@ -21,6 +21,9 @@ optional dependency. Merely installing it in the Docker image is insufficient
 for native package users.
 The recipe also verifies the pinned mimalloc 3.6.1 archive for static compilation
 and includes its MIT license; it does not depend on a shared mimalloc package.
+It verifies the pinned LuaJIT source archive for static linking with OwnlyMe's
+Good GC patch. The native package and AppImage use the same patched runtime.
+[Good GC patch provenance](../enhanced/patches/catalog/luajit-good-gc.toml).
 
 The official Arch `bullet-dp` package already builds Bullet with
 `USE_DOUBLE_PRECISION=ON` and `BULLET2_MULTITHREADING=ON`. There is no reason to

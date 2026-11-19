@@ -79,6 +79,18 @@ Update the current fork branch from upstream:
 
 ## Arch Linux builds and packages
 
+Native Linux builds use sandboxed LuaJIT with Good GC by default. OwnlyMe’s
+patch moves finalized userdata out of the list scanned for finalizers while
+leaving it eligible for normal collection. OwnlyMe reports about 20% smaller
+GC lag spikes in their setup. OpenMW Enhanced adopts this third-party patch
+on the LuaJIT revision used by Arch Linux at adoption. Both packages include
+the patch attribution and LuaJIT copyright notice.
+[Original Good GC change](https://github.com/ownlyme/openmw-lua-unleashed/commit/9a62aacfbb372bd524026cd26ff21b08e961da0b) ·
+[Patch provenance](patches/catalog/luajit-good-gc.toml).
+
+For a direct CMake comparison build, `-DOPENMW_LUAJIT_GOOD_GC=OFF` selects
+system LuaJIT. Platforms outside native Linux default to system LuaJIT.
+
 The Linux executables use a pinned, statically linked mimalloc 3.6.1 process
 allocator by default. Qt/OSG and renderer modules share that allocator instance;
 no shared mimalloc package or preload environment is needed. See the
@@ -235,7 +247,8 @@ APPIMAGE_EXTRACT_AND_RUN=1 .build/dist/OpenMW-Enhanced-x86_64.AppImage --openmw 
 ```
 
 Launch the AppImage and confirm the launcher retains the existing mod/content
-selection. In game, check exterior and interior transitions, doors and distant
+selection. Check that the `Lua version:` line in `openmw.log` includes `Good GC`.
+In game, check exterior and interior transitions, doors and distant
 objects with occlusion enabled, water/refraction, first/third-person transitions,
 and shadow settings (resolution, soft shadows, temporal reuse). Check the log for
 bundled `usr/bin/openmw.cfg` and `defaults.bin` together with user

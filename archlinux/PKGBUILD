@@ -12,7 +12,7 @@ url='https://github.com/acidpointer/openmw-enhanced'
 license=('GPL-3.0-or-later' 'OFL-1.1' 'LicenseRef-DejaVuLGCSansMono' 'MIT')
 depends=('openal' 'openscenegraph' 'mygui' 'qt6-base' 'qt6-tools' 'qt6-svg'
          'ffmpeg' 'sdl2' 'unshield' 'libxt' 'boost-libs' 'bullet-dp' 'yaml-cpp'
-         'luajit' 'glibc' 'libgcc' 'libstdc++' 'zlib' 'icu' 'lz4' 'sqlite'
+         'glibc' 'libgcc' 'libstdc++' 'zlib' 'icu' 'lz4' 'sqlite'
          'recastnavigation' 'vulkan-icd-loader' 'glslang' 'collada-dom')
 makedepends=('cmake' 'boost' 'ninja' 'git' 'vulkan-headers' 'qt6-translations' 'mold')
 options=('!debug')
@@ -21,10 +21,13 @@ optdepends=('vulkan-driver: Vulkan GPU driver'
 provides=("openmw=${pkgver%%.r*}" 'openmw-enhanced')
 conflicts=('openmw' 'openmw-enhanced')
 backup=('etc/openmw/openmw.cfg' 'etc/openmw/openmw-enhanced.cfg')
+_luajit_revision=63c8f1a9b479ba5518cf6a170ff7729178bc3cfd
 source=('openmw-enhanced::git+https://github.com/acidpointer/openmw-enhanced.git#branch=enhanced/main'
-        'mimalloc-3.6.1.tar.gz::https://github.com/microsoft/mimalloc/archive/refs/tags/v3.6.1.tar.gz')
+        'mimalloc-3.6.1.tar.gz::https://github.com/microsoft/mimalloc/archive/refs/tags/v3.6.1.tar.gz'
+        "luajit-${_luajit_revision}.tar.gz::https://codeload.github.com/LuaJIT/LuaJIT/tar.gz/${_luajit_revision}")
 sha512sums=('SKIP'
-            '03090fbcfe16aff6b640ef64f8d26551f0347c9e49fbca4efc48d6874ec87c109227fa05157e21e2031d58fe9374a8af9a5e34cf67a2255806f32e39ce4ca3ed')
+            '03090fbcfe16aff6b640ef64f8d26551f0347c9e49fbca4efc48d6874ec87c109227fa05157e21e2031d58fe9374a8af9a5e34cf67a2255806f32e39ce4ca3ed'
+            'c1ab4518b9d62b66b6dd7985ea8802001e062a271c0804700feb841ea64027d7fdf2b1203261e11805a96b372191963e4198cd0c188f3092a4669b9b3fb04702')
 
 _source_dir() {
   printf '%s\n' "${OPENMW_SOURCE_DIR:-${srcdir}/openmw-enhanced}"
@@ -46,11 +49,14 @@ build() {
   checkout="$(_source_dir)"
   source "${checkout}/enhanced/scripts/common.sh"
   export CMAKE_POLICY_VERSION_MINIMUM=3.5
-  local -a allocator_args=()
+  local -a dependency_args=()
   if [[ -z "${OPENMW_SOURCE_DIR:-}" ]]; then
-    allocator_args=(-DFETCHCONTENT_SOURCE_DIR_MIMALLOC="${srcdir}/mimalloc-3.6.1")
+    dependency_args=(
+      -DFETCHCONTENT_SOURCE_DIR_MIMALLOC="${srcdir}/mimalloc-3.6.1"
+      -DFETCHCONTENT_SOURCE_DIR_LUAJIT="${srcdir}/LuaJIT-${_luajit_revision}"
+    )
   fi
-  openmw_configure "$checkout" "${srcdir}/build" -DOPENMW_LTO_BUILD=ON "${allocator_args[@]}"
+  openmw_configure "$checkout" "${srcdir}/build" -DOPENMW_LTO_BUILD=ON "${dependency_args[@]}"
   cmake --build "${srcdir}/build" --parallel "$(cmake_jobs)"
 }
 

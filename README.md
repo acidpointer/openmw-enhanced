@@ -27,6 +27,12 @@ set `occlusion debug messages = true` under `[Occlusion]` in
 `~/.config/openmw/openmw-enhanced.cfg`; the log should periodically print
 `OcclusionCull` statistics while in exterior cells.
 
+The Arch package and Linux AppImage ship sandboxed LuaJIT with Good GC by
+default. This is an adoption of OwnlyMe’s third-party patchset. OpenMW Enhanced
+maintainer acidpointer integrated it and claims no original authorship.
+[OwnlyMe’s `openmw-lua-unleashed` repository](https://github.com/ownlyme/openmw-lua-unleashed) ·
+[Exact patch provenance](enhanced/patches/catalog/luajit-good-gc.toml).
+
 Font Licenses:
 * DejaVuLGCSansMono.ttf: custom (see [files/data/fonts/DejaVuFontLicense.txt](https://gitlab.com/OpenMW/openmw/-/raw/master/files/data/fonts/DejaVuFontLicense.txt) for more information)
 * DemonicLetters.ttf: SIL Open Font License (see [files/data/fonts/DemonicLettersFontLicense.txt](https://gitlab.com/OpenMW/openmw/-/raw/master/files/data/fonts/DemonicLettersFontLicense.txt) for more information)

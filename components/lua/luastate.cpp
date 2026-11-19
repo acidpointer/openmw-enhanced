@@ -452,6 +452,8 @@ namespace LuaUtil
     {
 #ifdef NO_LUAJIT
         return LUA_RELEASE;
+#elif defined(OPENMW_LUAJIT_GOOD_GC)
+        return LUA_RELEASE " (" LUAJIT_VERSION ", Good GC)";
 #else
         return LUA_RELEASE " (" LUAJIT_VERSION ")";
 #endif

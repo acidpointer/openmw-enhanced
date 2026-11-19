@@ -1,0 +1,19 @@
+Good GC by OwnlyMe (ownlyme), openmw-lua-unleashed.
+OpenMW Enhanced adopts this third-party patchset. OwnlyMe is the original
+author. See ../catalog/luajit-good-gc.toml for the source and base revisions.
+
+--- a/src/lj_gc.c
++++ b/src/lj_gc.c
+@@ -565,9 +565,9 @@
+     return;
+   }
+ #endif
+-  /* Add userdata back to the main userdata list and make it white. */
+-  setgcrefr(o->gch.nextgc, mainthread(g)->nextgc);
+-  setgcref(mainthread(g)->nextgc, o);
++  /* Relink onto g->gc.root, not the udata sublist, so separate() never re-walks it - sweep still frees it. */
++  setgcrefr(o->gch.nextgc, g->gc.root);
++  setgcref(g->gc.root, o);
+   makewhite(g, o);
+   /* Resolve the __gc metamethod. */
+   mo = lj_meta_fastg(g, tabref(gco2ud(o)->metatable), MM_gc);

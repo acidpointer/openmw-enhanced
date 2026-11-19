@@ -28,7 +28,6 @@ pkgbase = openmw-enhanced-git
 	depends = boost-libs
 	depends = bullet-dp
 	depends = yaml-cpp
-	depends = luajit
 	depends = glibc
 	depends = libgcc
 	depends = libstdc++
@@ -51,7 +50,9 @@ pkgbase = openmw-enhanced-git
 	backup = etc/openmw/openmw-enhanced.cfg
 	source = openmw-enhanced::git+https://github.com/acidpointer/openmw-enhanced.git#branch=enhanced/main
 	source = mimalloc-3.6.1.tar.gz::https://github.com/microsoft/mimalloc/archive/refs/tags/v3.6.1.tar.gz
+	source = luajit-63c8f1a9b479ba5518cf6a170ff7729178bc3cfd.tar.gz::https://codeload.github.com/LuaJIT/LuaJIT/tar.gz/63c8f1a9b479ba5518cf6a170ff7729178bc3cfd
 	sha512sums = SKIP
 	sha512sums = 03090fbcfe16aff6b640ef64f8d26551f0347c9e49fbca4efc48d6874ec87c109227fa05157e21e2031d58fe9374a8af9a5e34cf67a2255806f32e39ce4ca3ed
+	sha512sums = c1ab4518b9d62b66b6dd7985ea8802001e062a271c0804700feb841ea64027d7fdf2b1203261e11805a96b372191963e4198cd0c188f3092a4669b9b3fb04702
 
 pkgname = openmw-enhanced-git
